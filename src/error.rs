@@ -1,4 +1,4 @@
-use crate::{AccountAddress, CurrencyAddress};
+use crate::{AccountAddress, CurrencyAddress, ValidatorId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskEncodingError {
@@ -42,4 +42,17 @@ pub enum ExecutionError {
 pub enum ValidatorSetError {
     EmptySet,
     DuplicateValidator,
+    DuplicateConsensusKey,
+    InvalidConsensusKey(ValidatorId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FinalityError {
+    WrongProtocolVersion { expected: u32, actual: u32 },
+    WrongValidatorSetVersion { expected: u64, actual: u64 },
+    UnknownValidator(ValidatorId),
+    DuplicateVote(ValidatorId),
+    InvalidValidatorKey(ValidatorId),
+    InvalidSignature(ValidatorId),
+    InsufficientVotes { required: usize, actual: usize },
 }
