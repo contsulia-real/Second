@@ -86,17 +86,59 @@ pub enum ValidatorAdmissionError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatorRotationError {
+    UnsupportedProtocolVersion {
+        expected: u32,
+        actual: u32,
+    },
+    ValidatorIdMismatch {
+        expected: ValidatorId,
+        actual: ValidatorId,
+    },
+    InvalidNewConsensusKey(ValidatorId),
+    InvalidAuthorization(ValidatorId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValidatorTransitionError {
-    UnsupportedProtocolVersion { expected: u32, actual: u32 },
-    WrongCurrentValidatorSetVersion { expected: u64, actual: u64 },
-    WrongNextValidatorSetVersion { expected: u64, actual: u64 },
+    UnsupportedProtocolVersion {
+        expected: u32,
+        actual: u32,
+    },
+    WrongCurrentValidatorSetVersion {
+        expected: u64,
+        actual: u64,
+    },
+    WrongNextValidatorSetVersion {
+        expected: u64,
+        actual: u64,
+    },
     ValidatorSetVersionOverflow,
     EpochOverflow,
     IdentityKeyChanged(ValidatorId),
+    RecoveryKeyChanged(ValidatorId),
+    MissingConsensusKeyRotation(ValidatorId),
+    UnexpectedConsensusKeyRotation(ValidatorId),
+    DuplicateConsensusKeyRotation(ValidatorId),
+    ConsensusKeyRotationCredentialMismatch(ValidatorId),
+    ConsensusKeyRotationValidatorSetMismatch {
+        validator_id: ValidatorId,
+        expected: u64,
+        actual: u64,
+    },
+    ConsensusKeyRotationEpochMismatch {
+        validator_id: ValidatorId,
+        expected: u64,
+        actual: u64,
+    },
+    Rotation(ValidatorRotationError),
     MissingAdmission(ValidatorId),
     UnexpectedAdmission(ValidatorId),
     DuplicateAdmission(ValidatorId),
     AdmissionCredentialMismatch(ValidatorId),
-    WrongActivationEpoch { expected: u64, actual: u64 },
+    WrongActivationEpoch {
+        expected: u64,
+        actual: u64,
+    },
     Finality(FinalityError),
 }

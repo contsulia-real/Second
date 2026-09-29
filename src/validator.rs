@@ -127,6 +127,10 @@ impl ValidatorSet {
         self.validators.contains_key(&validator)
     }
 
+    pub fn validator(&self, validator: ValidatorId) -> Option<&ValidatorCredential> {
+        self.validators.get(&validator)
+    }
+
     pub fn has_quorum<I>(&self, votes: I) -> bool
     where
         I: IntoIterator<Item = ValidatorId>,

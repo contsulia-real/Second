@@ -10,13 +10,14 @@ mod state;
 mod task;
 mod validator;
 mod validator_admission;
+mod validator_rotation;
 mod validator_transition;
 
 pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
 pub use currency::{CurrencyRole, PublicCurrencyState};
 pub use error::{
     AuthorizationError, ExecutionError, FinalityError, PersistenceError, TaskEncodingError,
-    ValidatorAdmissionError, ValidatorSetError, ValidatorTransitionError,
+    ValidatorAdmissionError, ValidatorRotationError, ValidatorSetError, ValidatorTransitionError,
 };
 pub use finality::{FinalityCertificate, FinalityStatement, ValidatorVote};
 pub use ids::{AccountAddress, CurrencyAddress, PaymentAddress, TaskId, ValidatorId};
@@ -30,4 +31,5 @@ pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use validator::{ValidatorCredential, ValidatorSet};
 pub use validator_admission::{ValidatorAdmissionRequest, VerifiedValidatorAdmission};
+pub use validator_rotation::{ValidatorConsensusKeyRotationRequest, ValidatorRotationAuthority};
 pub use validator_transition::{CertifiedValidatorSetTransition, ValidatorSetTransition};

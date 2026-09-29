@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityStatement, ValidatorId, ValidatorSet,
-    ValidatorTransitionError, ValidatorVote, VerifiedValidatorAdmission,
+    CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityStatement,
+    ValidatorConsensusKeyRotationRequest, ValidatorId, ValidatorSet, ValidatorTransitionError,
+    ValidatorVote, VerifiedValidatorAdmission,
 };
 
 const TRANSITION_DOMAIN: &[u8] = b"SECOND_VALIDATOR_SET_TRANSITION_V1\0";
@@ -17,6 +18,7 @@ pub struct ValidatorSetTransition {
     current_validator_set_version: u64,
     next_validator_set: ValidatorSet,
     admissions: Vec<VerifiedValidatorAdmission>,
+    consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
     digest: [u8; 32],
 }
 
@@ -27,6 +29,7 @@ impl ValidatorSetTransition {
         current_validator_set: &ValidatorSet,
         next_validator_set: ValidatorSet,
         admissions: Vec<VerifiedValidatorAdmission>,
+        consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
     ) -> Result<Self, ValidatorTransitionError> {
         if protocol_version != CURRENT_PROTOCOL_VERSION {
             return Err(ValidatorTransitionError::UnsupportedProtocolVersion {
@@ -46,19 +49,29 @@ impl ValidatorSetTransition {
             });
         }
 
+        let activation_epoch = current_epoch
+            .checked_add(1)
+            .ok_or(ValidatorTransitionError::EpochOverflow)?;
+
         for current in current_validator_set.credentials() {
-            if let Some(next) = next_validator_set.credential(current.id())
-                && next.identity_public_key() != current.identity_public_key()
-            {
-                return Err(ValidatorTransitionError::IdentityKeyChanged(current.id()));
+            if let Some(next) = next_validator_set.credential(current.id()) {
+                if next.identity_public_key() != current.identity_public_key() {
+                    return Err(ValidatorTransitionError::IdentityKeyChanged(current.id()));
+                }
+                if next.recovery_public_key() != current.recovery_public_key() {
+                    return Err(ValidatorTransitionError::RecoveryKeyChanged(current.id()));
+                }
             }
         }
 
         validate_admissions(current_validator_set, &next_validator_set, &admissions)?;
+        validate_consensus_key_rotations(
+            current_validator_set,
+            &next_validator_set,
+            activation_epoch,
+            &consensus_key_rotations,
+        )?;
 
-        let activation_epoch = current_epoch
-            .checked_add(1)
-            .ok_or(ValidatorTransitionError::EpochOverflow)?;
         let current_validator_set_version = current_validator_set.version();
         let digest = transition_digest(
             protocol_version,
@@ -75,6 +88,7 @@ impl ValidatorSetTransition {
             current_validator_set_version,
             next_validator_set,
             admissions,
+            consensus_key_rotations,
             digest,
         })
     }
@@ -105,6 +119,10 @@ impl ValidatorSetTransition {
 
     pub fn admissions(&self) -> &[VerifiedValidatorAdmission] {
         &self.admissions
+    }
+
+    pub fn consensus_key_rotations(&self) -> &[ValidatorConsensusKeyRotationRequest] {
+        &self.consensus_key_rotations
     }
 
     pub fn finality_statement(&self) -> FinalityStatement {
@@ -203,6 +221,84 @@ fn validate_admissions(
     for next in next_validator_set.credentials() {
         if !current_validator_set.contains(next.id()) && !by_id.contains_key(&next.id()) {
             return Err(ValidatorTransitionError::MissingAdmission(next.id()));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_consensus_key_rotations(
+    current_validator_set: &ValidatorSet,
+    next_validator_set: &ValidatorSet,
+    activation_epoch: u64,
+    rotations: &[ValidatorConsensusKeyRotationRequest],
+) -> Result<(), ValidatorTransitionError> {
+    let mut by_id = BTreeMap::<ValidatorId, &ValidatorConsensusKeyRotationRequest>::new();
+
+    for rotation in rotations {
+        let validator_id = rotation.validator_id();
+
+        if by_id.insert(validator_id, rotation).is_some() {
+            return Err(ValidatorTransitionError::DuplicateConsensusKeyRotation(
+                validator_id,
+            ));
+        }
+
+        let current = current_validator_set.credential(validator_id).ok_or(
+            ValidatorTransitionError::UnexpectedConsensusKeyRotation(validator_id),
+        )?;
+        let next = next_validator_set.credential(validator_id).ok_or(
+            ValidatorTransitionError::UnexpectedConsensusKeyRotation(validator_id),
+        )?;
+
+        if current.consensus_public_key() == next.consensus_public_key() {
+            return Err(ValidatorTransitionError::UnexpectedConsensusKeyRotation(
+                validator_id,
+            ));
+        }
+
+        rotation
+            .verify(current)
+            .map_err(ValidatorTransitionError::Rotation)?;
+
+        if rotation.current_validator_set_version() != current_validator_set.version() {
+            return Err(
+                ValidatorTransitionError::ConsensusKeyRotationValidatorSetMismatch {
+                    validator_id,
+                    expected: current_validator_set.version(),
+                    actual: rotation.current_validator_set_version(),
+                },
+            );
+        }
+
+        if rotation.activation_epoch() != activation_epoch {
+            return Err(
+                ValidatorTransitionError::ConsensusKeyRotationEpochMismatch {
+                    validator_id,
+                    expected: activation_epoch,
+                    actual: rotation.activation_epoch(),
+                },
+            );
+        }
+
+        if rotation.new_consensus_public_key() != next.consensus_public_key() {
+            return Err(
+                ValidatorTransitionError::ConsensusKeyRotationCredentialMismatch(validator_id),
+            );
+        }
+    }
+
+    for current in current_validator_set.credentials() {
+        let Some(next) = next_validator_set.credential(current.id()) else {
+            continue;
+        };
+
+        if current.consensus_public_key() != next.consensus_public_key()
+            && !by_id.contains_key(&current.id())
+        {
+            return Err(ValidatorTransitionError::MissingConsensusKeyRotation(
+                current.id(),
+            ));
         }
     }
 

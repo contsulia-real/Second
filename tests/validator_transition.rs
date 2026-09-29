@@ -1,7 +1,9 @@
 use ed25519_dalek::SigningKey;
 use second::{
-    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ValidatorCredential, ValidatorId,
-    ValidatorSet, ValidatorSetTransition, ValidatorTransitionError, ValidatorVote,
+    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
+    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId,
+    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorTransitionError,
+    ValidatorVote,
 };
 
 fn key(byte: u8) -> SigningKey {
@@ -74,6 +76,7 @@ fn current_quorum_can_certify_complete_next_validator_set() {
         &current,
         next,
         vec![admission(5)],
+        Vec::new(),
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -100,6 +103,7 @@ fn joining_validator_cannot_contribute_a_vote_before_activation() {
         &current,
         next,
         vec![admission(5)],
+        Vec::new(),
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -134,10 +138,164 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
     let next = ValidatorSet::new(5, next_credentials).unwrap();
 
     assert_eq!(
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next, Vec::new(),),
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            Vec::new(),
+            Vec::new(),
+        ),
         Err(ValidatorTransitionError::IdentityKeyChanged(
             ValidatorId::new(1)
         ))
+    );
+}
+
+#[test]
+fn retained_validator_recovery_key_cannot_be_rewritten() {
+    let current = current_set();
+
+    let mut next_credentials = (1..=4).map(credential).collect::<Vec<_>>();
+    next_credentials[0] = ValidatorCredential::new(
+        ValidatorId::new(1),
+        key(3).verifying_key().to_bytes(),
+        key(4).verifying_key().to_bytes(),
+        key(90).verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let next = ValidatorSet::new(5, next_credentials).unwrap();
+
+    assert_eq!(
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(ValidatorTransitionError::RecoveryKeyChanged(
+            ValidatorId::new(1)
+        ))
+    );
+}
+
+#[test]
+fn retained_validator_consensus_key_requires_rotation_request() {
+    let current = current_set();
+
+    let mut next_credentials = (1..=4).map(credential).collect::<Vec<_>>();
+    next_credentials[0] = ValidatorCredential::new(
+        ValidatorId::new(1),
+        key(3).verifying_key().to_bytes(),
+        key(90).verifying_key().to_bytes(),
+        key(5).verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let next = ValidatorSet::new(5, next_credentials).unwrap();
+
+    assert_eq!(
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(ValidatorTransitionError::MissingConsensusKeyRotation(
+            ValidatorId::new(1)
+        ))
+    );
+}
+
+#[test]
+fn identity_authorized_consensus_key_rotation_is_accepted() {
+    let current = current_set();
+
+    let mut next_credentials = (1..=4).map(credential).collect::<Vec<_>>();
+    next_credentials[0] = ValidatorCredential::new(
+        ValidatorId::new(1),
+        key(3).verifying_key().to_bytes(),
+        key(90).verifying_key().to_bytes(),
+        key(5).verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let next = ValidatorSet::new(5, next_credentials).unwrap();
+
+    let rotation = ValidatorConsensusKeyRotationRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        ValidatorRotationAuthority::Identity,
+        ValidatorId::new(1),
+        4,
+        10,
+        key(90).verifying_key().to_bytes(),
+        &key(3),
+    )
+    .unwrap();
+
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        9,
+        &current,
+        next,
+        Vec::new(),
+        vec![rotation],
+    )
+    .unwrap();
+
+    assert_eq!(
+        transition
+            .next_validator_set()
+            .validator(ValidatorId::new(1))
+            .unwrap()
+            .consensus_public_key(),
+        key(90).verifying_key().to_bytes()
+    );
+}
+
+#[test]
+fn consensus_key_rotation_is_bound_to_activation_epoch() {
+    let current = current_set();
+
+    let mut next_credentials = (1..=4).map(credential).collect::<Vec<_>>();
+    next_credentials[0] = ValidatorCredential::new(
+        ValidatorId::new(1),
+        key(3).verifying_key().to_bytes(),
+        key(90).verifying_key().to_bytes(),
+        key(5).verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let next = ValidatorSet::new(5, next_credentials).unwrap();
+
+    let rotation = ValidatorConsensusKeyRotationRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        ValidatorRotationAuthority::Recovery,
+        ValidatorId::new(1),
+        4,
+        11,
+        key(90).verifying_key().to_bytes(),
+        &key(5),
+    )
+    .unwrap();
+
+    assert_eq!(
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            Vec::new(),
+            vec![rotation],
+        ),
+        Err(
+            ValidatorTransitionError::ConsensusKeyRotationEpochMismatch {
+                validator_id: ValidatorId::new(1),
+                expected: 10,
+                actual: 11,
+            }
+        )
     );
 }
 
@@ -147,7 +305,14 @@ fn newly_added_validator_without_admission_proof_is_rejected() {
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
 
     assert_eq!(
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next, Vec::new(),),
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            Vec::new(),
+            Vec::new(),
+        ),
         Err(ValidatorTransitionError::MissingAdmission(
             ValidatorId::new(5)
         ))
@@ -166,6 +331,7 @@ fn admission_for_validator_not_added_to_next_set_is_rejected() {
             &current,
             next,
             vec![admission(6)],
+            Vec::new(),
         ),
         Err(ValidatorTransitionError::UnexpectedAdmission(
             ValidatorId::new(6)
@@ -186,6 +352,7 @@ fn duplicate_admission_proof_is_rejected() {
             &current,
             next,
             vec![proof.clone(), proof],
+            Vec::new(),
         ),
         Err(ValidatorTransitionError::DuplicateAdmission(
             ValidatorId::new(5)
@@ -203,6 +370,7 @@ fn certified_transition_only_activates_at_its_declared_epoch() {
         &current,
         next,
         vec![admission(5)],
+        Vec::new(),
     )
     .unwrap();
     let statement = transition.finality_statement();
