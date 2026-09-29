@@ -4,7 +4,10 @@ use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use second::{NodeId, StateStore, client_ping, serve_ping_session};
+use second::{
+    CurrencyAddress, CurrencyRole, NodeId, StateStore, client_ping, client_public_currency_page,
+    serve_ping_session, serve_public_currency_session,
+};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -31,8 +34,23 @@ fn run() -> Result<(), String> {
             parse_u64("nonce", nonce)?,
         ),
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
+        [command, address, node_id, snapshot_base] if command == "serve-public-once" => {
+            serve_public_once(
+                address,
+                parse_u64("node id", node_id)?,
+                snapshot_base,
+            )
+        }
+        [command, address, node_id, start, span] if command == "query-public" => {
+            query_public(
+                address,
+                parse_u64("node id", node_id)?,
+                parse_u64("currency start", start)?,
+                parse_u16("span", span)?,
+            )
+        }
         _ => Err(
-            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base>"
+            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <span-u16>"
                 .to_owned(),
         ),
     }
@@ -74,6 +92,80 @@ fn ping(address: &str, node_id: u64, nonce: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> Result<(), String> {
+    let store = StateStore::new(snapshot_base);
+    let persisted = store
+        .load()
+        .map_err(|error| format!("failed to load snapshot: {error:?}"))?
+        .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
+
+    let listener =
+        TcpListener::bind(address).map_err(|error| format!("failed to bind {address}: {error}"))?;
+    let local_address = listener
+        .local_addr()
+        .map_err(|error| format!("failed to read listening address: {error}"))?;
+
+    println!("LISTENING {local_address}");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to flush listening address: {error}"))?;
+
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|error| format!("failed to accept peer: {error}"))?;
+    configure_stream(&stream)?;
+
+    let peer =
+        serve_public_currency_session(&mut stream, NodeId::from_u64(node_id), &persisted.state)
+            .map_err(|error| format!("public currency session failed: {error:?}"))?;
+
+    println!("PEER {peer}");
+    Ok(())
+}
+
+fn query_public(address: &str, node_id: u64, start: u64, span: u16) -> Result<(), String> {
+    let mut stream = TcpStream::connect(address)
+        .map_err(|error| format!("failed to connect {address}: {error}"))?;
+    configure_stream(&stream)?;
+
+    let page = client_public_currency_page(
+        &mut stream,
+        NodeId::from_u64(node_id),
+        CurrencyAddress::new(start),
+        span,
+    )
+    .map_err(|error| format!("public currency query failed: {error:?}"))?;
+
+    let next = page
+        .next_start
+        .map(|address| address.value().to_string())
+        .unwrap_or_else(|| "none".to_owned());
+
+    println!(
+        "PUBLIC peer={} next={} count={}",
+        page.remote_node_id,
+        next,
+        page.states.len()
+    );
+
+    for state in page.states {
+        let role = match state.role {
+            CurrencyRole::Circulation => "circulation",
+            CurrencyRole::Reserve => "reserve",
+        };
+
+        println!(
+            "CURRENCY address={} exists={} occupied={} role={}",
+            state.address.value(),
+            state.exists,
+            state.occupied,
+            role
+        );
+    }
+
+    Ok(())
+}
+
 fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
     let store = StateStore::new(snapshot_base);
     let persisted = store
@@ -108,5 +200,11 @@ fn configure_stream(stream: &TcpStream) -> Result<(), String> {
 fn parse_u64(label: &str, value: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
+        .map_err(|error| format!("invalid {label} {value:?}: {error}"))
+}
+
+fn parse_u16(label: &str, value: &str) -> Result<u16, String> {
+    value
+        .parse::<u16>()
         .map_err(|error| format!("invalid {label} {value:?}: {error}"))
 }
