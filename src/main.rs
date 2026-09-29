@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use second::{NodeId, client_ping, serve_ping_session};
+use second::{NodeId, StateStore, client_ping, serve_ping_session};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -30,8 +30,9 @@ fn run() -> Result<(), String> {
             parse_u64("node id", node_id)?,
             parse_u64("nonce", nonce)?,
         ),
+        [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
         _ => Err(
-            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce>"
+            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -70,6 +71,27 @@ fn ping(address: &str, node_id: u64, nonce: u64) -> Result<(), String> {
         .map_err(|error| format!("network ping failed: {error:?}"))?;
 
     println!("PONG peer={peer} nonce={nonce}");
+    Ok(())
+}
+
+fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
+    let store = StateStore::new(snapshot_base);
+    let persisted = store
+        .load()
+        .map_err(|error| format!("failed to load snapshot: {error:?}"))?
+        .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
+
+    println!(
+        "SNAPSHOT generation={} supply={} reserve={} next_currency={} validator_set={} validators={} quorum={}",
+        persisted.generation,
+        persisted.state.current_supply(),
+        persisted.state.reserve_count(),
+        persisted.state.next_currency_address(),
+        persisted.validator_set.version(),
+        persisted.validator_set.len(),
+        persisted.validator_set.quorum_threshold(),
+    );
+
     Ok(())
 }
 
