@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
 
+use sha2::{Digest, Sha256};
+
 use crate::state::BusinessState;
 use crate::{
-    AccountAddress, ClaimError, CurrencyAddress, CurrencyClaimBook, ExecutionError,
-    ExecutionOutcome, Operation, OperationClaimId, PersistenceError, SecondState, StateStore,
-    TaskId, ValidatorSet, VerifiedLegalTask,
+    AccountAddress, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, CurrencyClaimBook,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityError, FinalityStatement,
+    Operation, OperationClaimId, PersistenceError, SecondState, StateStore, TaskId, ValidatorSet,
+    VerifiedLegalTask,
 };
+
+const PREPARED_TASK_DOMAIN: &[u8] = b"SECOND_PREPARED_TASK_V1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationOutcome {
@@ -18,6 +23,15 @@ pub enum PreparationError {
     Execution(ExecutionError),
     Claim(ClaimError),
     Persistence(PersistenceError),
+    Finality(FinalityError),
+    FinalitySubjectMismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+    ValidatorSetVersionChanged {
+        expected: u64,
+        actual: u64,
+    },
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
     OperationIndexOverflow,
@@ -39,6 +53,12 @@ impl From<ClaimError> for PreparationError {
 impl From<PersistenceError> for PreparationError {
     fn from(error: PersistenceError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+impl From<FinalityError> for PreparationError {
+    fn from(error: FinalityError) -> Self {
+        Self::Finality(error)
     }
 }
 
@@ -67,7 +87,60 @@ enum PreparedOperation {
 #[derive(Clone, Debug)]
 struct PreparedTask {
     task: VerifiedLegalTask,
+    validator_set_version: u64,
     operations: Vec<PreparedOperation>,
+}
+
+impl PreparedTask {
+    fn plan_digest(&self) -> Result<[u8; 32], PreparationError> {
+        let mut hasher = Sha256::new();
+        hasher.update(PREPARED_TASK_DOMAIN);
+        hasher.update(self.task.request_digest());
+        hasher.update(self.task.task_id().value().to_be_bytes());
+        hasher.update(self.validator_set_version.to_be_bytes());
+        hash_len(&mut hasher, self.operations.len())?;
+
+        for operation in &self.operations {
+            match operation {
+                PreparedOperation::Issue { account, addresses } => {
+                    hasher.update([1]);
+                    hasher.update(account.value().to_be_bytes());
+                    hash_addresses(&mut hasher, addresses)?;
+                }
+                PreparedOperation::Transfer {
+                    source,
+                    destination,
+                    currencies,
+                } => {
+                    hasher.update([2]);
+                    hasher.update(source.value().to_be_bytes());
+                    hasher.update(destination.value().to_be_bytes());
+                    hash_addresses(&mut hasher, currencies)?;
+                }
+                PreparedOperation::Destroy { currencies } => {
+                    hasher.update([3]);
+                    hash_addresses(&mut hasher, currencies)?;
+                }
+                PreparedOperation::LeakRepair {
+                    leaked,
+                    leaked_owners,
+                    reserve,
+                    replacement_reserve,
+                } => {
+                    hasher.update([4]);
+                    hash_addresses(&mut hasher, leaked)?;
+                    hash_len(&mut hasher, leaked_owners.len())?;
+                    for owner in leaked_owners {
+                        hasher.update(owner.value().to_be_bytes());
+                    }
+                    hash_addresses(&mut hasher, reserve)?;
+                    hash_addresses(&mut hasher, replacement_reserve)?;
+                }
+            }
+        }
+
+        Ok(hasher.finalize().into())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +180,7 @@ impl PreparedTaskBook {
         let before_binding = state.bound_request_digest(task.task_id());
         let mut candidate = state.clone();
 
-        let result = self.build_prepared(&mut candidate, task, now);
+        let result = self.build_prepared(&mut candidate, task, now, validator_set.version());
         let protocol_changed = candidate.next_currency_address() != before_frontier
             || candidate.bound_request_digest(task.task_id()) != before_binding;
 
@@ -145,6 +218,7 @@ impl PreparedTaskBook {
         state: &mut SecondState,
         task_id: TaskId,
         now: u64,
+        certificate: &FinalityCertificate,
         validator_set: &ValidatorSet,
     ) -> Result<ExecutionOutcome, PreparationError> {
         let prepared = self
@@ -162,6 +236,18 @@ impl PreparedTaskBook {
             self.claims.release_task(task_id);
             return Err(ExecutionError::TaskExpired.into());
         }
+
+        let expected_statement = self.prepared_finality_statement(task_id, validator_set)?;
+        let actual_statement = certificate.statement();
+
+        if actual_statement.subject_digest() != expected_statement.subject_digest() {
+            return Err(PreparationError::FinalitySubjectMismatch {
+                expected: expected_statement.subject_digest(),
+                actual: actual_statement.subject_digest(),
+            });
+        }
+
+        certificate.verify(validator_set)?;
 
         let mut candidate = state.clone();
         let outcome = match self.commit_inner(&mut candidate, &prepared) {
@@ -181,6 +267,38 @@ impl PreparedTaskBook {
         self.tasks.remove(&task_id);
         self.claims.release_task(task_id);
         Ok(outcome)
+    }
+
+    pub fn prepared_plan_digest(&self, task_id: TaskId) -> Result<[u8; 32], PreparationError> {
+        let prepared = self
+            .tasks
+            .get(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id))?;
+        prepared.plan_digest()
+    }
+
+    pub fn prepared_finality_statement(
+        &self,
+        task_id: TaskId,
+        validator_set: &ValidatorSet,
+    ) -> Result<FinalityStatement, PreparationError> {
+        let prepared = self
+            .tasks
+            .get(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id))?;
+
+        if prepared.validator_set_version != validator_set.version() {
+            return Err(PreparationError::ValidatorSetVersionChanged {
+                expected: prepared.validator_set_version,
+                actual: validator_set.version(),
+            });
+        }
+
+        Ok(FinalityStatement::new(
+            CURRENT_PROTOCOL_VERSION,
+            prepared.validator_set_version,
+            prepared.plan_digest()?,
+        ))
     }
 
     pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
@@ -209,6 +327,7 @@ impl PreparedTaskBook {
         state: &mut SecondState,
         task: &VerifiedLegalTask,
         now: u64,
+        validator_set_version: u64,
     ) -> Result<BuildOutcome, PreparationError> {
         if state.bind_task(task)? {
             return Ok(BuildOutcome::AlreadySucceeded);
@@ -223,6 +342,7 @@ impl PreparedTaskBook {
 
         Ok(BuildOutcome::Prepared(Box::new(PreparedTask {
             task: task.clone(),
+            validator_set_version,
             operations,
         })))
     }
@@ -366,4 +486,21 @@ impl PreparedTaskBook {
         state.mark_task_succeeded(prepared.task.task_id());
         Ok(ExecutionOutcome::Succeeded)
     }
+}
+
+fn hash_addresses(
+    hasher: &mut Sha256,
+    addresses: &[CurrencyAddress],
+) -> Result<(), PreparationError> {
+    hash_len(hasher, addresses.len())?;
+    for address in addresses {
+        hasher.update(address.value().to_be_bytes());
+    }
+    Ok(())
+}
+
+fn hash_len(hasher: &mut Sha256, len: usize) -> Result<(), PreparationError> {
+    let len = u64::try_from(len).map_err(|_| PreparationError::LengthOverflow)?;
+    hasher.update(len.to_be_bytes());
+    Ok(())
 }

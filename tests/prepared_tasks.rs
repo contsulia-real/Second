@@ -1,9 +1,9 @@
 use ed25519_dalek::SigningKey;
 use second::{
     AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress,
-    ExecutionError, ExecutionOutcome, LegalTask, LegalTaskPayload, Operation, PreparationError,
-    PreparationOutcome, PreparedTaskBook, SecondState, StateStore, TaskId, ValidatorCredential,
-    ValidatorId, ValidatorSet,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
+    PreparationError, PreparationOutcome, PreparedTaskBook, SecondState, StateStore, TaskId,
+    ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote,
 };
 
 fn key(byte: u8) -> SigningKey {
@@ -11,8 +11,12 @@ fn key(byte: u8) -> SigningKey {
 }
 
 fn validators() -> ValidatorSet {
+    validators_at(7)
+}
+
+fn validators_at(version: u64) -> ValidatorSet {
     ValidatorSet::new(
-        7,
+        version,
         (1..=4).map(|id| {
             ValidatorCredential::new(
                 ValidatorId::new(id),
@@ -69,7 +73,9 @@ impl Harness {
         task_id: TaskId,
         now: u64,
     ) -> Result<ExecutionOutcome, PreparationError> {
-        self.book.commit(state, task_id, now, &self.validators)
+        let certificate = certify(&self.book, task_id, &self.validators);
+        self.book
+            .commit(state, task_id, now, &certificate, &self.validators)
     }
 
     fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
@@ -89,6 +95,22 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = self.store.remove_files();
     }
+}
+
+fn certify(
+    book: &PreparedTaskBook,
+    task_id: TaskId,
+    validator_set: &ValidatorSet,
+) -> FinalityCertificate {
+    let statement = book
+        .prepared_finality_statement(task_id, validator_set)
+        .unwrap();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+
+    FinalityCertificate::new(statement, votes, validator_set).unwrap()
 }
 
 fn verified_task(task_id: u128, operations: Vec<Operation>) -> second::VerifiedLegalTask {
@@ -354,6 +376,90 @@ fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
 }
 
 #[test]
+fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses() {
+    let alice = AccountAddress::new(1);
+    let mut state = SecondState::genesis([alice], 1);
+    let mut prepared = Harness::new("stale-certificate");
+    let task = verified_task(
+        10,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+
+    prepared.prepare(&mut state, &task, 1).unwrap();
+    let old_digest = prepared.book.prepared_plan_digest(task.task_id()).unwrap();
+    let old_certificate = certify(&prepared.book, task.task_id(), &prepared.validators);
+
+    prepared.cancel(task.task_id()).unwrap();
+    prepared.prepare(&mut state, &task, 2).unwrap();
+
+    let new_digest = prepared.book.prepared_plan_digest(task.task_id()).unwrap();
+    assert_ne!(old_digest, new_digest);
+
+    assert_eq!(
+        prepared.book.commit(
+            &mut state,
+            task.task_id(),
+            2,
+            &old_certificate,
+            &prepared.validators,
+        ),
+        Err(PreparationError::FinalitySubjectMismatch {
+            expected: new_digest,
+            actual: old_digest,
+        })
+    );
+    assert!(prepared.book.is_prepared(task.task_id()));
+
+    let current_certificate = certify(&prepared.book, task.task_id(), &prepared.validators);
+    assert_eq!(
+        prepared
+            .book
+            .commit(
+                &mut state,
+                task.task_id(),
+                2,
+                &current_certificate,
+                &prepared.validators,
+            )
+            .unwrap(),
+        ExecutionOutcome::Succeeded
+    );
+
+    assert!(!state.currency_exists(CurrencyAddress::new(1)));
+    assert!(state.currency_exists(CurrencyAddress::new(2)));
+}
+
+#[test]
+fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
+    let alice = AccountAddress::new(1);
+    let mut state = SecondState::genesis([alice], 1);
+    let mut prepared = Harness::new("validator-set-binding");
+    let task = verified_task(
+        10,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+
+    prepared.prepare(&mut state, &task, 1).unwrap();
+    let next_set = validators_at(prepared.validators.version() + 1);
+
+    assert_eq!(
+        prepared
+            .book
+            .prepared_finality_statement(task.task_id(), &next_set),
+        Err(PreparationError::ValidatorSetVersionChanged {
+            expected: prepared.validators.version(),
+            actual: next_set.version(),
+        })
+    );
+}
+
+#[test]
 fn task_expiring_while_prepared_is_cancelled_without_reusing_reserved_addresses() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 1);
@@ -450,8 +556,9 @@ fn crash_after_prepare_restores_burned_frontier_without_exposing_reserved_curren
         .unwrap();
 
     assert_eq!(state.next_currency_address(), 5);
+    let certificate = certify(&reprepared, task.task_id(), &validator_set);
     reprepared
-        .commit(&mut state, task.task_id(), 2, &validator_set)
+        .commit(&mut state, task.task_id(), 2, &certificate, &validator_set)
         .unwrap();
 
     assert!(!state.currency_exists(CurrencyAddress::new(1)));
@@ -480,8 +587,9 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
     prepared
         .prepare(&mut state, &task, 1, &validator_set)
         .unwrap();
+    let certificate = certify(&prepared, task.task_id(), &validator_set);
     prepared
-        .commit(&mut state, task.task_id(), 1, &validator_set)
+        .commit(&mut state, task.task_id(), 1, &certificate, &validator_set)
         .unwrap();
 
     let mut restored = store.load().unwrap().unwrap().state;
