@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityStatement, ValidatorSet,
-    ValidatorTransitionError, ValidatorVote,
+    CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityStatement, ValidatorId, ValidatorSet,
+    ValidatorTransitionError, ValidatorVote, VerifiedValidatorAdmission,
 };
 
 const TRANSITION_DOMAIN: &[u8] = b"SECOND_VALIDATOR_SET_TRANSITION_V1\0";
@@ -14,6 +16,7 @@ pub struct ValidatorSetTransition {
     activation_epoch: u64,
     current_validator_set_version: u64,
     next_validator_set: ValidatorSet,
+    admissions: Vec<VerifiedValidatorAdmission>,
     digest: [u8; 32],
 }
 
@@ -23,6 +26,7 @@ impl ValidatorSetTransition {
         current_epoch: u64,
         current_validator_set: &ValidatorSet,
         next_validator_set: ValidatorSet,
+        admissions: Vec<VerifiedValidatorAdmission>,
     ) -> Result<Self, ValidatorTransitionError> {
         if protocol_version != CURRENT_PROTOCOL_VERSION {
             return Err(ValidatorTransitionError::UnsupportedProtocolVersion {
@@ -50,6 +54,8 @@ impl ValidatorSetTransition {
             }
         }
 
+        validate_admissions(current_validator_set, &next_validator_set, &admissions)?;
+
         let activation_epoch = current_epoch
             .checked_add(1)
             .ok_or(ValidatorTransitionError::EpochOverflow)?;
@@ -68,6 +74,7 @@ impl ValidatorSetTransition {
             activation_epoch,
             current_validator_set_version,
             next_validator_set,
+            admissions,
             digest,
         })
     }
@@ -94,6 +101,10 @@ impl ValidatorSetTransition {
 
     pub fn next_validator_set(&self) -> &ValidatorSet {
         &self.next_validator_set
+    }
+
+    pub fn admissions(&self) -> &[VerifiedValidatorAdmission] {
+        &self.admissions
     }
 
     pub fn finality_statement(&self) -> FinalityStatement {
@@ -159,6 +170,43 @@ impl CertifiedValidatorSetTransition {
 
         Ok(self.transition.next_validator_set)
     }
+}
+
+fn validate_admissions(
+    current_validator_set: &ValidatorSet,
+    next_validator_set: &ValidatorSet,
+    admissions: &[VerifiedValidatorAdmission],
+) -> Result<(), ValidatorTransitionError> {
+    let mut by_id = BTreeMap::<ValidatorId, &VerifiedValidatorAdmission>::new();
+
+    for admission in admissions {
+        let validator_id = admission.validator_id();
+        if by_id.insert(validator_id, admission).is_some() {
+            return Err(ValidatorTransitionError::DuplicateAdmission(validator_id));
+        }
+
+        if current_validator_set.contains(validator_id) {
+            return Err(ValidatorTransitionError::UnexpectedAdmission(validator_id));
+        }
+
+        let next = next_validator_set
+            .credential(validator_id)
+            .ok_or(ValidatorTransitionError::UnexpectedAdmission(validator_id))?;
+
+        if next != admission.credential() {
+            return Err(ValidatorTransitionError::AdmissionCredentialMismatch(
+                validator_id,
+            ));
+        }
+    }
+
+    for next in next_validator_set.credentials() {
+        if !current_validator_set.contains(next.id()) && !by_id.contains_key(&next.id()) {
+            return Err(ValidatorTransitionError::MissingAdmission(next.id()));
+        }
+    }
+
+    Ok(())
 }
 
 fn transition_digest(

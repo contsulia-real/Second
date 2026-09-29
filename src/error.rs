@@ -78,6 +78,14 @@ pub enum FinalityError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatorAdmissionError {
+    UnsupportedProtocolVersion { expected: u32, actual: u32 },
+    InvalidIdentityProof(ValidatorId),
+    InvalidConsensusProof(ValidatorId),
+    InvalidRecoveryProof(ValidatorId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValidatorTransitionError {
     UnsupportedProtocolVersion { expected: u32, actual: u32 },
     WrongCurrentValidatorSetVersion { expected: u64, actual: u64 },
@@ -85,6 +93,10 @@ pub enum ValidatorTransitionError {
     ValidatorSetVersionOverflow,
     EpochOverflow,
     IdentityKeyChanged(ValidatorId),
+    MissingAdmission(ValidatorId),
+    UnexpectedAdmission(ValidatorId),
+    DuplicateAdmission(ValidatorId),
+    AdmissionCredentialMismatch(ValidatorId),
     WrongActivationEpoch { expected: u64, actual: u64 },
     Finality(FinalityError),
 }

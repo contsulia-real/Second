@@ -22,6 +22,19 @@ fn current_set() -> ValidatorSet {
     ValidatorSet::new(4, (1..=4).map(credential)).unwrap()
 }
 
+fn admission(id: u64) -> second::VerifiedValidatorAdmission {
+    second::ValidatorAdmissionRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        credential(id),
+        &key((id * 3) as u8),
+        &key((id * 3 + 1) as u8),
+        &key((id * 3 + 2) as u8),
+    )
+    .unwrap()
+    .verify()
+    .unwrap()
+}
+
 #[test]
 fn validator_credential_requires_three_distinct_keys() {
     let shared = key(7).verifying_key().to_bytes();
@@ -55,8 +68,14 @@ fn validator_set_rejects_key_reuse_across_different_validators() {
 fn current_quorum_can_certify_complete_next_validator_set() {
     let current = current_set();
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
-    let transition =
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        9,
+        &current,
+        next,
+        vec![admission(5)],
+    )
+    .unwrap();
     let statement = transition.finality_statement();
 
     let votes = [1_u64, 2, 3]
@@ -75,8 +94,14 @@ fn current_quorum_can_certify_complete_next_validator_set() {
 fn joining_validator_cannot_contribute_a_vote_before_activation() {
     let current = current_set();
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
-    let transition =
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        9,
+        &current,
+        next,
+        vec![admission(5)],
+    )
+    .unwrap();
     let statement = transition.finality_statement();
 
     let votes = vec![
@@ -109,9 +134,61 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
     let next = ValidatorSet::new(5, next_credentials).unwrap();
 
     assert_eq!(
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next),
+        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next, Vec::new(),),
         Err(ValidatorTransitionError::IdentityKeyChanged(
             ValidatorId::new(1)
+        ))
+    );
+}
+
+#[test]
+fn newly_added_validator_without_admission_proof_is_rejected() {
+    let current = current_set();
+    let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
+
+    assert_eq!(
+        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next, Vec::new(),),
+        Err(ValidatorTransitionError::MissingAdmission(
+            ValidatorId::new(5)
+        ))
+    );
+}
+
+#[test]
+fn admission_for_validator_not_added_to_next_set_is_rejected() {
+    let current = current_set();
+    let next = ValidatorSet::new(5, (1..=4).map(credential)).unwrap();
+
+    assert_eq!(
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            vec![admission(6)],
+        ),
+        Err(ValidatorTransitionError::UnexpectedAdmission(
+            ValidatorId::new(6)
+        ))
+    );
+}
+
+#[test]
+fn duplicate_admission_proof_is_rejected() {
+    let current = current_set();
+    let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
+    let proof = admission(5);
+
+    assert_eq!(
+        ValidatorSetTransition::new(
+            CURRENT_PROTOCOL_VERSION,
+            9,
+            &current,
+            next,
+            vec![proof.clone(), proof],
+        ),
+        Err(ValidatorTransitionError::DuplicateAdmission(
+            ValidatorId::new(5)
         ))
     );
 }
@@ -120,8 +197,14 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
 fn certified_transition_only_activates_at_its_declared_epoch() {
     let current = current_set();
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
-    let transition =
-        ValidatorSetTransition::new(CURRENT_PROTOCOL_VERSION, 9, &current, next).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        9,
+        &current,
+        next,
+        vec![admission(5)],
+    )
+    .unwrap();
     let statement = transition.finality_statement();
     let votes = [1_u64, 2, 3]
         .into_iter()
