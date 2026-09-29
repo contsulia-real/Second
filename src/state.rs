@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::currency::Currency;
 use crate::{
     AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError,
-    PublicCurrencyPage, PublicCurrencyState, TaskId, VerifiedLegalTask,
+    PublicCurrencyPage, PublicCurrencyState, TaskId, ValidatorId, VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +22,7 @@ pub(crate) struct TaskBinding {
 pub(crate) struct ProtocolState {
     pub(crate) next_currency_address: u64,
     pub(crate) task_bindings: BTreeMap<TaskId, TaskBinding>,
+    pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, TaskId), [u8; 32]>,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,7 @@ impl SecondState {
             protocol: ProtocolState {
                 next_currency_address: first_currency_address,
                 task_bindings: BTreeMap::new(),
+                validator_vote_locks: BTreeMap::new(),
             },
             business: BusinessState {
                 accounts: accounts.into_iter().collect(),
@@ -156,6 +158,28 @@ impl SecondState {
         if let Some(binding) = self.protocol.task_bindings.get_mut(&task_id) {
             binding.succeeded = true;
         }
+    }
+
+    pub fn validator_vote_lock(
+        &self,
+        validator_id: ValidatorId,
+        task_id: TaskId,
+    ) -> Option<[u8; 32]> {
+        self.protocol
+            .validator_vote_locks
+            .get(&(validator_id, task_id))
+            .copied()
+    }
+
+    pub(crate) fn set_validator_vote_lock(
+        &mut self,
+        validator_id: ValidatorId,
+        task_id: TaskId,
+        plan_digest: [u8; 32],
+    ) {
+        self.protocol
+            .validator_vote_locks
+            .insert((validator_id, task_id), plan_digest);
     }
 
     pub fn bound_request_digest(&self, task_id: TaskId) -> Option<[u8; 32]> {

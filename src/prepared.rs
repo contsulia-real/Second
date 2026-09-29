@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
+use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
 use crate::state::BusinessState;
 use crate::{
     AccountAddress, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, CurrencyClaimBook,
     ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityError, FinalityStatement,
-    Operation, OperationClaimId, PersistenceError, SecondState, StateStore, TaskId, ValidatorSet,
-    VerifiedLegalTask,
+    Operation, OperationClaimId, PersistenceError, SecondState, StateStore, TaskId, ValidatorId,
+    ValidatorSet, ValidatorVote, VerifiedLegalTask,
 };
 
 const PREPARED_TASK_DOMAIN: &[u8] = b"SECOND_PREPARED_TASK_V1\0";
@@ -31,6 +32,13 @@ pub enum PreparationError {
     ValidatorSetVersionChanged {
         expected: u64,
         actual: u64,
+    },
+    ConsensusSigningKeyMismatch(ValidatorId),
+    ValidatorVoteLocked {
+        validator_id: ValidatorId,
+        task_id: TaskId,
+        locked_digest: [u8; 32],
+        attempted_digest: [u8; 32],
     },
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
@@ -299,6 +307,60 @@ impl PreparedTaskBook {
             prepared.validator_set_version,
             prepared.plan_digest()?,
         ))
+    }
+
+    pub fn sign_prepared_vote(
+        &self,
+        state: &mut SecondState,
+        task_id: TaskId,
+        now: u64,
+        validator_id: ValidatorId,
+        signing_key: &SigningKey,
+        validator_set: &ValidatorSet,
+    ) -> Result<ValidatorVote, PreparationError> {
+        let prepared = self
+            .tasks
+            .get(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id))?;
+
+        if prepared
+            .task
+            .expires_at()
+            .is_some_and(|expires_at| now > expires_at)
+        {
+            return Err(ExecutionError::TaskExpired.into());
+        }
+
+        let statement = self.prepared_finality_statement(task_id, validator_set)?;
+        let credential = validator_set
+            .validator(validator_id)
+            .ok_or(FinalityError::UnknownValidator(validator_id))?;
+
+        if signing_key.verifying_key().to_bytes() != credential.consensus_public_key() {
+            return Err(PreparationError::ConsensusSigningKeyMismatch(validator_id));
+        }
+
+        let attempted_digest = statement.subject_digest();
+
+        match state.validator_vote_lock(validator_id, task_id) {
+            Some(locked_digest) if locked_digest != attempted_digest => {
+                return Err(PreparationError::ValidatorVoteLocked {
+                    validator_id,
+                    task_id,
+                    locked_digest,
+                    attempted_digest,
+                });
+            }
+            Some(_) => {}
+            None => {
+                let mut candidate = state.clone();
+                candidate.set_validator_vote_lock(validator_id, task_id, attempted_digest);
+                self.store.save(&candidate, validator_set)?;
+                *state = candidate;
+            }
+        }
+
+        Ok(ValidatorVote::sign(&statement, validator_id, signing_key))
     }
 
     pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {

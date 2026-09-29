@@ -11,8 +11,10 @@ use crate::{
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 3;
-const LEGACY_SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 4;
+const LEGACY_SNAPSHOT_VERSION_V3: u32 = 3;
+const LEGACY_SNAPSHOT_VERSION_V2: u32 = 2;
+const SNAPSHOT_DOMAIN_V4: &[u8] = b"SECOND_STATE_SNAPSHOT_V4\0";
 const SNAPSHOT_DOMAIN_V3: &[u8] = b"SECOND_STATE_SNAPSHOT_V3\0";
 const SNAPSHOT_DOMAIN_V2: &[u8] = b"SECOND_STATE_SNAPSHOT_V2\0";
 const CHECKSUM_SIZE: usize = 32;
@@ -63,7 +65,10 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)?,
     );
-    if version != SNAPSHOT_VERSION && version != LEGACY_SNAPSHOT_VERSION {
+    if version != SNAPSHOT_VERSION
+        && version != LEGACY_SNAPSHOT_VERSION_V3
+        && version != LEGACY_SNAPSHOT_VERSION_V2
+    {
         return Err(PersistenceError::UnsupportedSnapshotVersion(version));
     }
 
@@ -113,8 +118,9 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
 
 fn snapshot_checksum(version: u32, bytes: &[u8]) -> Result<[u8; 32], PersistenceError> {
     let domain = match version {
-        SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V3,
-        LEGACY_SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V2,
+        SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V4,
+        LEGACY_SNAPSHOT_VERSION_V3 => SNAPSHOT_DOMAIN_V3,
+        LEGACY_SNAPSHOT_VERSION_V2 => SNAPSHOT_DOMAIN_V2,
         other => return Err(PersistenceError::UnsupportedSnapshotVersion(other)),
     };
 
@@ -180,6 +186,13 @@ fn encode_payload(
             out.extend_from_slice(&proof_bytes);
         }
         None => out.push(0),
+    }
+
+    push_len(&mut out, state.protocol.validator_vote_locks.len())?;
+    for ((validator_id, task_id), plan_digest) in &state.protocol.validator_vote_locks {
+        out.extend_from_slice(&validator_id.value().to_be_bytes());
+        out.extend_from_slice(&task_id.value().to_be_bytes());
+        out.extend_from_slice(plan_digest);
     }
 
     Ok(out)
@@ -299,7 +312,7 @@ fn decode_payload(
         );
     }
 
-    let public_checkpoint_proof = if snapshot_version == LEGACY_SNAPSHOT_VERSION {
+    let public_checkpoint_proof = if snapshot_version == LEGACY_SNAPSHOT_VERSION_V2 {
         None
     } else {
         match decoder.read_u8()? {
@@ -316,6 +329,25 @@ fn decode_payload(
         }
     };
 
+    let validator_vote_locks = if snapshot_version == SNAPSHOT_VERSION {
+        let lock_count = decoder.read_len()?;
+        let mut locks = BTreeMap::new();
+
+        for _ in 0..lock_count {
+            let validator_id = ValidatorId::new(decoder.read_u64()?);
+            let task_id = TaskId::new(decoder.read_u128()?);
+            let plan_digest = decoder.read_array_32()?;
+
+            if locks.insert((validator_id, task_id), plan_digest).is_some() {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+        }
+
+        locks
+    } else {
+        BTreeMap::new()
+    };
+
     decoder.finish()?;
 
     let validator_set = ValidatorSet::new(validator_set_version, validators)
@@ -326,6 +358,7 @@ fn decode_payload(
             protocol: ProtocolState {
                 next_currency_address,
                 task_bindings,
+                validator_vote_locks,
             },
             business: BusinessState {
                 accounts,
