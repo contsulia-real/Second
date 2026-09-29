@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use second::{
     CurrencyAddress, CurrencyRole, NodeId, StateStore, client_ping, client_public_currency_page,
-    client_sync_public_currency_view, serve_ping_session, serve_public_currency_connection,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    serve_ping_session, serve_public_currency_connection_with_checkpoint,
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,6 +38,13 @@ fn run() -> Result<(), String> {
         [command, address, node_id] if command == "sync-public" => {
             sync_public(address, parse_u64("node id", node_id)?)
         }
+        [command, address, node_id, trust_snapshot_base] if command == "sync-public-certified" => {
+            sync_public_certified(
+                address,
+                parse_u64("node id", node_id)?,
+                trust_snapshot_base,
+            )
+        }
         [command, address, node_id, snapshot_base] if command == "serve-public-once" => {
             serve_public_once(
                 address,
@@ -53,7 +61,7 @@ fn run() -> Result<(), String> {
             )
         }
         _ => Err(
-            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> | second sync-public <address> <node-id-u64>"
+            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> | second sync-public <address> <node-id-u64> | second sync-public-certified <address> <node-id-u64> <trust-snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -118,9 +126,13 @@ fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> Result
         .map_err(|error| format!("failed to accept peer: {error}"))?;
     configure_stream(&stream)?;
 
-    let peer =
-        serve_public_currency_connection(&mut stream, NodeId::from_u64(node_id), &persisted.state)
-            .map_err(|error| format!("public currency connection failed: {error:?}"))?;
+    let peer = serve_public_currency_connection_with_checkpoint(
+        &mut stream,
+        NodeId::from_u64(node_id),
+        &persisted.state,
+        persisted.public_checkpoint_proof.as_ref(),
+    )
+    .map_err(|error| format!("public currency connection failed: {error:?}"))?;
 
     println!("PEER {peer}");
     Ok(())
@@ -143,6 +155,56 @@ fn sync_public(address: &str, node_id: u64) -> Result<(), String> {
     println!(
         "SYNCED peer={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
         synced.remote_node_id,
+        synced.view.states.len(),
+        summary.current_supply,
+        summary.reserve_count,
+        summary.occupied_count,
+        summary.next_currency_address,
+        digest,
+    );
+
+    Ok(())
+}
+
+fn sync_public_certified(
+    address: &str,
+    node_id: u64,
+    trust_snapshot_base: &str,
+) -> Result<(), String> {
+    let trusted = StateStore::new(trust_snapshot_base)
+        .load()
+        .map_err(|error| format!("failed to load trust snapshot: {error:?}"))?
+        .ok_or_else(|| format!("no trust snapshot found at {trust_snapshot_base}"))?;
+
+    let mut stream = TcpStream::connect(address)
+        .map_err(|error| format!("failed to connect {address}: {error}"))?;
+    configure_stream(&stream)?;
+
+    let synced = client_sync_certified_public_currency_view(
+        &mut stream,
+        NodeId::from_u64(node_id),
+        &trusted.validator_set,
+    )
+    .map_err(|error| format!("certified public currency sync failed: {error:?}"))?;
+
+    let summary = &synced.view.summary;
+    let checkpoint = synced.checkpoint.checkpoint();
+    let digest = summary
+        .state_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    println!(
+        "CERTIFIED peer={} epoch={} validator_set={} votes={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
+        synced.remote_node_id,
+        checkpoint.epoch(),
+        synced
+            .checkpoint
+            .certificate()
+            .statement()
+            .validator_set_version(),
+        synced.checkpoint.certificate().vote_count(),
         synced.view.states.len(),
         summary.current_supply,
         summary.reserve_count,
