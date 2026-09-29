@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::{PersistenceError, SecondState, ValidatorSet};
+use crate::{PersistenceError, PublicCurrencyCheckpointProof, SecondState, ValidatorSet};
 
 use super::PersistedNodeState;
 use super::codec::{MAX_SNAPSHOT_FILE_SIZE, decode_snapshot, encode_snapshot};
@@ -25,6 +25,15 @@ impl StateStore {
         state: &SecondState,
         validator_set: &ValidatorSet,
     ) -> Result<u64, PersistenceError> {
+        self.save_with_checkpoint(state, validator_set, None)
+    }
+
+    pub fn save_with_checkpoint(
+        &self,
+        state: &SecondState,
+        validator_set: &ValidatorSet,
+        public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    ) -> Result<u64, PersistenceError> {
         let latest_generation = match self.load()? {
             Some(snapshot) => snapshot.generation,
             None => 0,
@@ -33,7 +42,7 @@ impl StateStore {
         let generation = latest_generation
             .checked_add(1)
             .ok_or(PersistenceError::GenerationOverflow)?;
-        let bytes = encode_snapshot(generation, state, validator_set)?;
+        let bytes = encode_snapshot(generation, state, validator_set, public_checkpoint_proof)?;
 
         if let Some(parent) = self
             .base_path

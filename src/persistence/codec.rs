@@ -6,12 +6,15 @@ use crate::currency::Currency;
 use crate::state::{BusinessState, ProtocolState, TaskBinding};
 use crate::{
     AccountAddress, CurrencyAddress, CurrencyRole, PersistedNodeState, PersistenceError,
-    SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorSet,
+    PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorCredential, ValidatorId,
+    ValidatorSet,
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 2;
-const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V2\0";
+const SNAPSHOT_VERSION: u32 = 3;
+const LEGACY_SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_DOMAIN_V3: &[u8] = b"SECOND_STATE_SNAPSHOT_V3\0";
+const SNAPSHOT_DOMAIN_V2: &[u8] = b"SECOND_STATE_SNAPSHOT_V2\0";
 const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
@@ -23,8 +26,10 @@ pub(super) fn encode_snapshot(
     generation: u64,
     state: &SecondState,
     validator_set: &ValidatorSet,
+    public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<Vec<u8>, PersistenceError> {
-    let payload = encode_payload(state, validator_set)?;
+    validate_checkpoint_attachment(state, validator_set, public_checkpoint_proof)?;
+    let payload = encode_payload(state, validator_set, public_checkpoint_proof)?;
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| PersistenceError::SnapshotTooLarge)?;
 
@@ -39,7 +44,7 @@ pub(super) fn encode_snapshot(
     bytes.extend_from_slice(&payload_len.to_be_bytes());
     bytes.extend_from_slice(&payload);
 
-    let checksum = snapshot_checksum(&bytes);
+    let checksum = snapshot_checksum(SNAPSHOT_VERSION, &bytes)?;
     bytes.extend_from_slice(&checksum);
     Ok(bytes)
 }
@@ -58,7 +63,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)?,
     );
-    if version != SNAPSHOT_VERSION {
+    if version != SNAPSHOT_VERSION && version != LEGACY_SNAPSHOT_VERSION {
         return Err(PersistenceError::UnsupportedSnapshotVersion(version));
     }
 
@@ -89,29 +94,40 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
     }
 
     let checksum_offset = HEADER_SIZE + payload_len;
-    let expected_checksum = snapshot_checksum(&bytes[..checksum_offset]);
+    let expected_checksum = snapshot_checksum(version, &bytes[..checksum_offset])?;
     if bytes[checksum_offset..] != expected_checksum {
         return Err(PersistenceError::ChecksumMismatch);
     }
 
-    let (state, validator_set) = decode_payload(&bytes[HEADER_SIZE..checksum_offset])?;
+    let (state, validator_set, public_checkpoint_proof) =
+        decode_payload(&bytes[HEADER_SIZE..checksum_offset], version)?;
+    validate_checkpoint_attachment(&state, &validator_set, public_checkpoint_proof.as_ref())?;
+
     Ok(PersistedNodeState {
         state,
         validator_set,
+        public_checkpoint_proof,
         generation,
     })
 }
 
-fn snapshot_checksum(bytes: &[u8]) -> [u8; 32] {
+fn snapshot_checksum(version: u32, bytes: &[u8]) -> Result<[u8; 32], PersistenceError> {
+    let domain = match version {
+        SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V3,
+        LEGACY_SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V2,
+        other => return Err(PersistenceError::UnsupportedSnapshotVersion(other)),
+    };
+
     let mut hasher = Sha256::new();
-    hasher.update(SNAPSHOT_DOMAIN);
+    hasher.update(domain);
     hasher.update(bytes);
-    hasher.finalize().into()
+    Ok(hasher.finalize().into())
 }
 
 fn encode_payload(
     state: &SecondState,
     validator_set: &ValidatorSet,
+    public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<Vec<u8>, PersistenceError> {
     let mut out = Vec::new();
 
@@ -154,10 +170,32 @@ fn encode_payload(
         out.extend_from_slice(&credential.recovery_public_key());
     }
 
+    match public_checkpoint_proof {
+        Some(proof) => {
+            out.push(1);
+            let proof_bytes = proof
+                .encode_bytes()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+            push_len(&mut out, proof_bytes.len())?;
+            out.extend_from_slice(&proof_bytes);
+        }
+        None => out.push(0),
+    }
+
     Ok(out)
 }
 
-fn decode_payload(payload: &[u8]) -> Result<(SecondState, ValidatorSet), PersistenceError> {
+fn decode_payload(
+    payload: &[u8],
+    snapshot_version: u32,
+) -> Result<
+    (
+        SecondState,
+        ValidatorSet,
+        Option<PublicCurrencyCheckpointProof>,
+    ),
+    PersistenceError,
+> {
     let mut decoder = Decoder::new(payload);
 
     let next_currency_address = decoder.read_u64()?;
@@ -261,6 +299,23 @@ fn decode_payload(payload: &[u8]) -> Result<(SecondState, ValidatorSet), Persist
         );
     }
 
+    let public_checkpoint_proof = if snapshot_version == LEGACY_SNAPSHOT_VERSION {
+        None
+    } else {
+        match decoder.read_u8()? {
+            0 => None,
+            1 => {
+                let proof_len = decoder.read_len()?;
+                let proof_bytes = decoder.read_exact(proof_len)?;
+                Some(
+                    PublicCurrencyCheckpointProof::decode_bytes(proof_bytes)
+                        .map_err(|_| PersistenceError::InvalidSnapshot)?,
+                )
+            }
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        }
+    };
+
     decoder.finish()?;
 
     let validator_set = ValidatorSet::new(validator_set_version, validators)
@@ -278,7 +333,31 @@ fn decode_payload(payload: &[u8]) -> Result<(SecondState, ValidatorSet), Persist
             },
         },
         validator_set,
+        public_checkpoint_proof,
     ))
+}
+
+fn validate_checkpoint_attachment(
+    state: &SecondState,
+    validator_set: &ValidatorSet,
+    public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+) -> Result<(), PersistenceError> {
+    let Some(proof) = public_checkpoint_proof else {
+        return Ok(());
+    };
+
+    if proof.checkpoint().summary() != &state.public_currency_summary() {
+        return Err(PersistenceError::CheckpointDoesNotMatchState);
+    }
+
+    if proof.validator_set_version() != validator_set.version() {
+        return Err(PersistenceError::CheckpointValidatorSetMismatch {
+            expected: validator_set.version(),
+            actual: proof.validator_set_version(),
+        });
+    }
+
+    Ok(())
 }
 
 fn push_len(out: &mut Vec<u8>, len: usize) -> Result<(), PersistenceError> {

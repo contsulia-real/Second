@@ -3,8 +3,8 @@ use std::fs;
 use ed25519_dalek::SigningKey;
 use second::{
     AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
-    Operation, PersistedNodeState, SecondState, StateStore, TaskId, ValidatorCredential,
-    ValidatorId, ValidatorSet,
+    Operation, PersistedNodeState, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
+    SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote,
 };
 
 fn key(byte: u8) -> SigningKey {
@@ -59,6 +59,141 @@ fn temp_base(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(unique)
 }
 
+fn checkpoint_proof(
+    state: &SecondState,
+    validators: &ValidatorSet,
+    epoch: u64,
+) -> PublicCurrencyCheckpointProof {
+    let checkpoint = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        epoch,
+        state.public_currency_summary(),
+    );
+    let statement = checkpoint.finality_statement(validators.version());
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+
+    PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
+}
+
+#[test]
+fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_it() {
+    let base = temp_base("checkpoint-proof");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 10).with_reserve(3).unwrap();
+    let set = validators();
+    let proof = checkpoint_proof(&state, &set, 42);
+
+    assert_eq!(
+        store
+            .save_with_checkpoint(&state, &set, Some(&proof))
+            .unwrap(),
+        1
+    );
+
+    let restored = store.load().unwrap().unwrap();
+    assert_eq!(restored.public_checkpoint_proof, Some(proof.clone()));
+
+    let view = second::PublicCurrencyView::new(
+        restored.state.public_currency_summary(),
+        restored.state.public_currency_states(),
+    )
+    .unwrap();
+    let certified = restored
+        .public_checkpoint_proof
+        .unwrap()
+        .verify(&view, &restored.validator_set)
+        .unwrap();
+
+    assert_eq!(certified.checkpoint().epoch(), 42);
+    assert_eq!(certified.certificate().vote_count(), 3);
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn snapshot_refuses_checkpoint_proof_for_a_different_public_state() {
+    let base = temp_base("checkpoint-state-mismatch");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let other_state = SecondState::genesis([], 10).with_reserve(2).unwrap();
+    let set = validators();
+    let proof = checkpoint_proof(&other_state, &set, 1);
+
+    assert_eq!(
+        store.save_with_checkpoint(&state, &set, Some(&proof)),
+        Err(second::PersistenceError::CheckpointDoesNotMatchState)
+    );
+    assert!(store.load().unwrap().is_none());
+}
+
+#[test]
+fn snapshot_refuses_checkpoint_proof_for_a_different_validator_set_version() {
+    let base = temp_base("checkpoint-set-mismatch");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let set = validators();
+    let valid = checkpoint_proof(&state, &set, 1);
+    let proof = PublicCurrencyCheckpointProof::new(
+        valid.checkpoint().clone(),
+        set.version() + 1,
+        valid.votes().to_vec(),
+    );
+
+    assert_eq!(
+        store.save_with_checkpoint(&state, &set, Some(&proof)),
+        Err(second::PersistenceError::CheckpointValidatorSetMismatch {
+            expected: set.version(),
+            actual: set.version() + 1,
+        })
+    );
+    assert!(store.load().unwrap().is_none());
+}
+
+#[test]
+fn snapshot_checksum_does_not_turn_an_invalid_signature_into_a_certified_checkpoint() {
+    let base = temp_base("checkpoint-invalid-signature");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let set = validators();
+    let checkpoint =
+        PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 1, state.public_currency_summary());
+    let proof = PublicCurrencyCheckpointProof::new(
+        checkpoint,
+        set.version(),
+        vec![
+            ValidatorVote::from_parts(ValidatorId::new(1), [0; 64]),
+            ValidatorVote::from_parts(ValidatorId::new(2), [0; 64]),
+            ValidatorVote::from_parts(ValidatorId::new(3), [0; 64]),
+        ],
+    );
+
+    store
+        .save_with_checkpoint(&state, &set, Some(&proof))
+        .unwrap();
+
+    let restored = store.load().unwrap().unwrap();
+    let view = second::PublicCurrencyView::new(
+        restored.state.public_currency_summary(),
+        restored.state.public_currency_states(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        restored
+            .public_checkpoint_proof
+            .unwrap()
+            .verify(&view, &restored.validator_set),
+        Err(second::PublicCheckpointError::Finality(
+            second::FinalityError::InvalidSignature(_)
+        ))
+    ));
+
+    store.remove_files().unwrap();
+}
+
 #[test]
 fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     let base = temp_base("restore");
@@ -96,10 +231,12 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     let PersistedNodeState {
         state: restored,
         validator_set,
+        public_checkpoint_proof,
         generation,
     } = store.load().unwrap().unwrap();
 
     assert_eq!(generation, 1);
+    assert!(public_checkpoint_proof.is_none());
     assert_eq!(restored.balance(alice), 2);
     assert_eq!(restored.balance(bob), 1);
     assert_eq!(restored.current_supply(), 5);

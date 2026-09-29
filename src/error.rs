@@ -58,6 +58,8 @@ pub enum PersistenceError {
     InvalidSnapshot,
     NoValidSnapshot,
     GenerationOverflow,
+    CheckpointDoesNotMatchState,
+    CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
 }
 
 impl PersistenceError {
