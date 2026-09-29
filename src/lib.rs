@@ -21,8 +21,9 @@ pub use error::{
 pub use finality::{FinalityCertificate, FinalityStatement, ValidatorVote};
 pub use ids::{AccountAddress, CurrencyAddress, PaymentAddress, TaskId, ValidatorId};
 pub use network::{
-    MAX_NETWORK_FRAME_SIZE, NetworkError, NetworkMessage, NodeId, client_ping,
-    read_network_message, serve_ping_session, write_network_message,
+    MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
+    PublicCurrencyPage, RemotePublicCurrencyPage, client_ping, client_public_currency_page,
+    read_network_message, serve_ping_session, serve_public_currency_session, write_network_message,
 };
 pub use persistence::{PersistedNodeState, StateStore};
 pub use state::{ExecutionOutcome, SecondState};

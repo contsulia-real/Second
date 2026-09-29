@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::currency::Currency;
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, PublicCurrencyState, TaskId,
+    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError,
+    PublicCurrencyPage, PublicCurrencyState, TaskId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +109,36 @@ impl SecondState {
             .values()
             .map(Currency::public_state)
             .collect()
+    }
+
+    pub fn public_currency_page(
+        &self,
+        start: CurrencyAddress,
+        span: u16,
+    ) -> Result<PublicCurrencyPage, NetworkError> {
+        crate::network::validate_public_currency_span(span)?;
+
+        let frontier = self.protocol.next_currency_address;
+        if start.value() >= frontier {
+            return Ok(PublicCurrencyPage {
+                states: Vec::new(),
+                next_start: None,
+            });
+        }
+
+        let end = start.value().saturating_add(u64::from(span)).min(frontier);
+        let end_address = CurrencyAddress::new(end);
+
+        let states = self
+            .business
+            .currencies
+            .range(start..end_address)
+            .map(|(_, currency)| currency.public_state())
+            .collect();
+
+        let next_start = (end < frontier).then_some(end_address);
+
+        Ok(PublicCurrencyPage { states, next_start })
     }
 
     pub fn bound_request_digest(&self, task_id: TaskId) -> Option<[u8; 32]> {
