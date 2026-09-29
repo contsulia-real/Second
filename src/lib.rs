@@ -7,6 +7,7 @@ mod finality;
 mod ids;
 mod network;
 mod persistence;
+mod prepared;
 mod public_checkpoint;
 mod public_state;
 mod state;
@@ -36,6 +37,7 @@ pub use network::{
     serve_public_currency_session, write_network_message,
 };
 pub use persistence::{PersistedNodeState, StateStore};
+pub use prepared::{PreparationError, PreparationOutcome, PreparedTaskBook};
 pub use public_checkpoint::{
     CertifiedPublicCurrencyCheckpoint, PublicCheckpointError, PublicCurrencyCheckpoint,
     PublicCurrencyCheckpointProof,

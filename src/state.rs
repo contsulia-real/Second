@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::currency::Currency;
 use crate::{
     AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError,
-    PublicCurrencyPage, PublicCurrencyState, TaskId,
+    PublicCurrencyPage, PublicCurrencyState, TaskId, VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +131,31 @@ impl SecondState {
         let next_start = currencies.next().map(|(address, _)| *address);
 
         Ok(PublicCurrencyPage { states, next_start })
+    }
+
+    pub(crate) fn bind_task(&mut self, task: &VerifiedLegalTask) -> Result<bool, ExecutionError> {
+        match self.protocol.task_bindings.get(&task.task_id()) {
+            Some(binding) if binding.request_digest != task.request_digest() => {
+                Err(ExecutionError::TaskIdAlreadyBound)
+            }
+            Some(binding) => Ok(binding.succeeded),
+            None => {
+                self.protocol.task_bindings.insert(
+                    task.task_id(),
+                    TaskBinding {
+                        request_digest: task.request_digest(),
+                        succeeded: false,
+                    },
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    pub(crate) fn mark_task_succeeded(&mut self, task_id: TaskId) {
+        if let Some(binding) = self.protocol.task_bindings.get_mut(&task_id) {
+            binding.succeeded = true;
+        }
     }
 
     pub fn bound_request_digest(&self, task_id: TaskId) -> Option<[u8; 32]> {

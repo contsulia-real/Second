@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::currency::Currency;
-use crate::state::{BusinessState, ExecutionOutcome, SecondState, TaskBinding};
+use crate::state::{BusinessState, ExecutionOutcome, SecondState};
 use crate::{
     AccountAddress, ConcurrentExecutionError, CurrencyAddress, CurrencyClaimBook, CurrencyRole,
     ExecutionError, Operation, OperationClaimId, VerifiedLegalTask,
@@ -13,23 +13,8 @@ impl SecondState {
         task: &VerifiedLegalTask,
         now: u64,
     ) -> Result<ExecutionOutcome, ExecutionError> {
-        match self.protocol.task_bindings.get(&task.task_id()) {
-            Some(binding) if binding.request_digest != task.request_digest() => {
-                return Err(ExecutionError::TaskIdAlreadyBound);
-            }
-            Some(binding) if binding.succeeded => {
-                return Ok(ExecutionOutcome::AlreadySucceeded);
-            }
-            Some(_) => {}
-            None => {
-                self.protocol.task_bindings.insert(
-                    task.task_id(),
-                    TaskBinding {
-                        request_digest: task.request_digest(),
-                        succeeded: false,
-                    },
-                );
-            }
+        if self.bind_task(task)? {
+            return Ok(ExecutionOutcome::AlreadySucceeded);
         }
 
         if task.expires_at().is_some_and(|expires_at| now > expires_at) {
@@ -43,9 +28,7 @@ impl SecondState {
         }
 
         self.business = working;
-        if let Some(binding) = self.protocol.task_bindings.get_mut(&task.task_id()) {
-            binding.succeeded = true;
-        }
+        self.mark_task_succeeded(task.task_id());
 
         Ok(ExecutionOutcome::Succeeded)
     }
@@ -56,24 +39,9 @@ impl SecondState {
         now: u64,
         claims: &mut CurrencyClaimBook,
     ) -> Result<ExecutionOutcome, ConcurrentExecutionError> {
-        match self.protocol.task_bindings.get(&task.task_id()) {
-            Some(binding) if binding.request_digest != task.request_digest() => {
-                return Err(ExecutionError::TaskIdAlreadyBound.into());
-            }
-            Some(binding) if binding.succeeded => {
-                claims.release_task(task.task_id());
-                return Ok(ExecutionOutcome::AlreadySucceeded);
-            }
-            Some(_) => {}
-            None => {
-                self.protocol.task_bindings.insert(
-                    task.task_id(),
-                    TaskBinding {
-                        request_digest: task.request_digest(),
-                        succeeded: false,
-                    },
-                );
-            }
+        if self.bind_task(task)? {
+            claims.release_task(task.task_id());
+            return Ok(ExecutionOutcome::AlreadySucceeded);
         }
 
         if task.expires_at().is_some_and(|expires_at| now > expires_at) {
@@ -87,9 +55,7 @@ impl SecondState {
         match result {
             Ok(()) => {
                 self.business = working;
-                if let Some(binding) = self.protocol.task_bindings.get_mut(&task.task_id()) {
-                    binding.succeeded = true;
-                }
+                self.mark_task_succeeded(task.task_id());
                 claims.release_task(task.task_id());
                 Ok(ExecutionOutcome::Succeeded)
             }
@@ -142,15 +108,14 @@ impl SecondState {
                 self.claim_transfer_candidates(working, *source, *destination, &currencies)?;
             }
             Operation::Destroy { currencies } => {
-                self.destroy(working, currencies)?;
+                self.validate_destroy_targets(working, currencies)?;
+                claims.claim_explicit(claim_id, currencies)?;
+                self.apply_destroy(working, currencies);
             }
             Operation::LeakRepair { leaked } => {
                 let leaked_owners = self.validate_leaked_owners(working, leaked)?;
-                let reserve = claims.claim_reserve_in_business_state(
-                    claim_id,
-                    working,
-                    leaked.len() as u64,
-                )?;
+                let reserve =
+                    claims.claim_leak_repair_in_business_state(claim_id, working, leaked)?;
                 self.require_unique_currency_list(&reserve)?;
                 self.apply_leak_repair(working, leaked, leaked_owners, &reserve)?;
             }
@@ -184,19 +149,7 @@ impl SecondState {
     ) -> Result<(), ExecutionError> {
         self.require_account(working, account)?;
         let range = self.allocate_currency_range(count)?;
-
-        for address in range {
-            working.currencies.insert(
-                address,
-                Currency {
-                    address,
-                    role: CurrencyRole::Circulation,
-                    owner: Some(account),
-                },
-            );
-        }
-
-        Ok(())
+        self.apply_issue_preallocated(working, account, &range)
     }
 
     fn transfer(
@@ -241,7 +194,7 @@ impl SecondState {
         Ok(candidates)
     }
 
-    fn claim_transfer_candidates(
+    pub(crate) fn claim_transfer_candidates(
         &self,
         working: &mut BusinessState,
         source: AccountAddress,
@@ -276,6 +229,16 @@ impl SecondState {
         working: &mut BusinessState,
         currencies: &[CurrencyAddress],
     ) -> Result<(), ExecutionError> {
+        self.validate_destroy_targets(working, currencies)?;
+        self.apply_destroy(working, currencies);
+        Ok(())
+    }
+
+    pub(crate) fn validate_destroy_targets(
+        &self,
+        working: &BusinessState,
+        currencies: &[CurrencyAddress],
+    ) -> Result<(), ExecutionError> {
         self.require_unique_currency_list(currencies)?;
 
         for address in currencies {
@@ -292,11 +255,17 @@ impl SecondState {
             }
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn apply_destroy(
+        &self,
+        working: &mut BusinessState,
+        currencies: &[CurrencyAddress],
+    ) {
         for address in currencies {
             working.currencies.remove(address);
         }
-
-        Ok(())
     }
 
     fn leak_repair(
@@ -326,7 +295,7 @@ impl SecondState {
         self.apply_leak_repair(working, leaked, leaked_owners, &reserve)
     }
 
-    fn validate_leaked_owners(
+    pub(crate) fn validate_leaked_owners(
         &self,
         working: &BusinessState,
         leaked: &[CurrencyAddress],
@@ -360,6 +329,65 @@ impl SecondState {
         reserve: &[CurrencyAddress],
     ) -> Result<(), ExecutionError> {
         let replacement_reserve = self.allocate_currency_range(leaked.len() as u64)?;
+        self.apply_leak_repair_preallocated(
+            working,
+            leaked,
+            &leaked_owners,
+            reserve,
+            &replacement_reserve,
+        )
+    }
+
+    pub(crate) fn apply_leak_repair_preallocated(
+        &self,
+        working: &mut BusinessState,
+        leaked: &[CurrencyAddress],
+        leaked_owners: &[AccountAddress],
+        reserve: &[CurrencyAddress],
+        replacement_reserve: &[CurrencyAddress],
+    ) -> Result<(), ExecutionError> {
+        if leaked.len() != leaked_owners.len()
+            || leaked.len() != reserve.len()
+            || leaked.len() != replacement_reserve.len()
+        {
+            return Err(ExecutionError::ReserveUnavailable {
+                required: leaked.len() as u64,
+                available: reserve.len() as u64,
+            });
+        }
+
+        self.require_unique_currency_list(leaked)?;
+        self.require_unique_currency_list(reserve)?;
+        self.require_unique_currency_list(replacement_reserve)?;
+
+        for (address, expected_owner) in leaked.iter().zip(leaked_owners) {
+            let currency = working
+                .currencies
+                .get(address)
+                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
+            if currency.role != CurrencyRole::Circulation {
+                return Err(ExecutionError::CurrencyNotCirculation(*address));
+            }
+            if currency.owner != Some(*expected_owner) {
+                return Err(ExecutionError::CurrencyNotOwned(*address));
+            }
+        }
+
+        for address in reserve {
+            let currency = working
+                .currencies
+                .get(address)
+                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
+            if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
+                return Err(ExecutionError::CurrencyNotCirculation(*address));
+            }
+        }
+
+        for address in replacement_reserve {
+            if working.currencies.contains_key(address) {
+                return Err(ExecutionError::DuplicateCurrency(*address));
+            }
+        }
 
         for ((leaked_address, reserve_address), owner) in
             leaked.iter().zip(reserve.iter()).zip(leaked_owners)
@@ -371,14 +399,14 @@ impl SecondState {
                 .get_mut(reserve_address)
                 .ok_or(ExecutionError::CurrencyNotFound(*reserve_address))?;
             reserve_currency.role = CurrencyRole::Circulation;
-            reserve_currency.owner = Some(owner);
+            reserve_currency.owner = Some(*owner);
         }
 
         for address in replacement_reserve {
             working.currencies.insert(
-                address,
+                *address,
                 Currency {
-                    address,
+                    address: *address,
                     role: CurrencyRole::Reserve,
                     owner: None,
                 },
@@ -388,7 +416,36 @@ impl SecondState {
         Ok(())
     }
 
-    fn require_account(
+    pub(crate) fn apply_issue_preallocated(
+        &self,
+        working: &mut BusinessState,
+        account: AccountAddress,
+        addresses: &[CurrencyAddress],
+    ) -> Result<(), ExecutionError> {
+        self.require_account(working, account)?;
+        self.require_unique_currency_list(addresses)?;
+
+        for address in addresses {
+            if working.currencies.contains_key(address) {
+                return Err(ExecutionError::DuplicateCurrency(*address));
+            }
+        }
+
+        for address in addresses {
+            working.currencies.insert(
+                *address,
+                Currency {
+                    address: *address,
+                    role: CurrencyRole::Circulation,
+                    owner: Some(account),
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn require_account(
         &self,
         working: &BusinessState,
         account: AccountAddress,
@@ -400,7 +457,7 @@ impl SecondState {
         }
     }
 
-    fn require_unique_currency_list(
+    pub(crate) fn require_unique_currency_list(
         &self,
         currencies: &[CurrencyAddress],
     ) -> Result<(), ExecutionError> {
