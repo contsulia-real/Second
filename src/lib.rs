@@ -6,6 +6,7 @@ mod finality;
 mod ids;
 mod network;
 mod persistence;
+mod public_checkpoint;
 mod public_state;
 mod state;
 mod task;
@@ -31,6 +32,7 @@ pub use network::{
     serve_public_currency_session, write_network_message,
 };
 pub use persistence::{PersistedNodeState, StateStore};
+pub use public_checkpoint::{CertifiedPublicCurrencyCheckpoint, PublicCurrencyCheckpoint};
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
 pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
