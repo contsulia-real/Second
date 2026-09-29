@@ -62,6 +62,66 @@ fn temp_base(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
+    let base = temp_base("sync");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 10).with_reserve(600).unwrap();
+    store.save(&state, &validators()).unwrap();
+
+    let executable = env!("CARGO_BIN_EXE_second");
+    let mut server = Command::new(executable)
+        .args([
+            "serve-public-once",
+            "127.0.0.1:0",
+            "1",
+            base.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = server.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut listening = String::new();
+    reader.read_line(&mut listening).unwrap();
+
+    assert!(listening.starts_with("LISTENING "));
+    let address = listening.trim().strip_prefix("LISTENING ").unwrap();
+
+    let client = Command::new(executable)
+        .args(["sync-public", address, "2"])
+        .output()
+        .unwrap();
+
+    if !client.status.success() {
+        let _ = server.kill();
+        let _ = server.wait();
+        panic!(
+            "sync-public failed: {}",
+            String::from_utf8_lossy(&client.stderr)
+        );
+    }
+
+    let client_stdout = String::from_utf8(client.stdout).unwrap();
+    assert!(client_stdout.contains("SYNCED "));
+    assert!(client_stdout.contains("count=600"));
+    assert!(client_stdout.contains("supply=600"));
+    assert!(client_stdout.contains("reserve=600"));
+    assert!(client_stdout.contains("occupied=0"));
+    assert!(client_stdout.contains("next_currency=610"));
+
+    let lower = client_stdout.to_ascii_lowercase();
+    assert!(!lower.contains("owner"));
+    assert!(!lower.contains("balance"));
+
+    let status = server.wait().unwrap();
+    assert!(status.success());
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     let base = temp_base("roundtrip");
     let store = StateStore::new(&base);

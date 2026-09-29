@@ -53,7 +53,7 @@ fn one_handshake_supports_multiple_requests_until_clean_disconnect() {
         &mut client,
         &NetworkMessage::GetPublicCurrencies {
             start: CurrencyAddress::new(1),
-            span: 1,
+            limit: 1,
         },
     )
     .unwrap();
@@ -77,7 +77,7 @@ fn one_handshake_supports_multiple_requests_until_clean_disconnect() {
         &mut client,
         &NetworkMessage::GetPublicCurrencies {
             start: CurrencyAddress::new(2),
-            span: 2,
+            limit: 2,
         },
     )
     .unwrap();

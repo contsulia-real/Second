@@ -31,7 +31,7 @@ fn network_frames_round_trip_without_json_or_platform_dependent_layout() {
 fn oversized_frames_are_rejected_before_payload_allocation() {
     let mut frame = Vec::new();
     frame.extend_from_slice(b"SCND");
-    frame.extend_from_slice(&second::CURRENT_PROTOCOL_VERSION.to_be_bytes());
+    frame.extend_from_slice(&second::CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes());
     frame.extend_from_slice(&((MAX_NETWORK_FRAME_SIZE as u32) + 1).to_be_bytes());
 
     assert_eq!(
@@ -47,15 +47,15 @@ fn oversized_frames_are_rejected_before_payload_allocation() {
 fn protocol_version_mismatch_is_rejected_during_frame_read() {
     let mut frame = Vec::new();
     frame.extend_from_slice(b"SCND");
-    frame.extend_from_slice(&(second::CURRENT_PROTOCOL_VERSION + 1).to_be_bytes());
+    frame.extend_from_slice(&(second::CURRENT_NETWORK_PROTOCOL_VERSION + 1).to_be_bytes());
     frame.extend_from_slice(&1_u32.to_be_bytes());
     frame.push(2);
 
     assert_eq!(
         read_network_message(&mut Cursor::new(frame)),
         Err(NetworkError::UnsupportedProtocolVersion {
-            expected: second::CURRENT_PROTOCOL_VERSION,
-            actual: second::CURRENT_PROTOCOL_VERSION + 1,
+            expected: second::CURRENT_NETWORK_PROTOCOL_VERSION,
+            actual: second::CURRENT_NETWORK_PROTOCOL_VERSION + 1,
         })
     );
 }

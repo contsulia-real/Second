@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use second::{
     CurrencyAddress, CurrencyRole, NodeId, StateStore, client_ping, client_public_currency_page,
-    serve_ping_session, serve_public_currency_session,
+    client_sync_public_currency_view, serve_ping_session, serve_public_currency_connection,
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +34,9 @@ fn run() -> Result<(), String> {
             parse_u64("nonce", nonce)?,
         ),
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
+        [command, address, node_id] if command == "sync-public" => {
+            sync_public(address, parse_u64("node id", node_id)?)
+        }
         [command, address, node_id, snapshot_base] if command == "serve-public-once" => {
             serve_public_once(
                 address,
@@ -41,16 +44,16 @@ fn run() -> Result<(), String> {
                 snapshot_base,
             )
         }
-        [command, address, node_id, start, span] if command == "query-public" => {
+        [command, address, node_id, start, limit] if command == "query-public" => {
             query_public(
                 address,
                 parse_u64("node id", node_id)?,
                 parse_u64("currency start", start)?,
-                parse_u16("span", span)?,
+                parse_u16("limit", limit)?,
             )
         }
         _ => Err(
-            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <span-u16>"
+            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> | second sync-public <address> <node-id-u64>"
                 .to_owned(),
         ),
     }
@@ -116,14 +119,42 @@ fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> Result
     configure_stream(&stream)?;
 
     let peer =
-        serve_public_currency_session(&mut stream, NodeId::from_u64(node_id), &persisted.state)
-            .map_err(|error| format!("public currency session failed: {error:?}"))?;
+        serve_public_currency_connection(&mut stream, NodeId::from_u64(node_id), &persisted.state)
+            .map_err(|error| format!("public currency connection failed: {error:?}"))?;
 
     println!("PEER {peer}");
     Ok(())
 }
 
-fn query_public(address: &str, node_id: u64, start: u64, span: u16) -> Result<(), String> {
+fn sync_public(address: &str, node_id: u64) -> Result<(), String> {
+    let mut stream = TcpStream::connect(address)
+        .map_err(|error| format!("failed to connect {address}: {error}"))?;
+    configure_stream(&stream)?;
+
+    let synced = client_sync_public_currency_view(&mut stream, NodeId::from_u64(node_id))
+        .map_err(|error| format!("public currency sync failed: {error:?}"))?;
+    let summary = &synced.view.summary;
+    let digest = summary
+        .state_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    println!(
+        "SYNCED peer={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
+        synced.remote_node_id,
+        synced.view.states.len(),
+        summary.current_supply,
+        summary.reserve_count,
+        summary.occupied_count,
+        summary.next_currency_address,
+        digest,
+    );
+
+    Ok(())
+}
+
+fn query_public(address: &str, node_id: u64, start: u64, limit: u16) -> Result<(), String> {
     let mut stream = TcpStream::connect(address)
         .map_err(|error| format!("failed to connect {address}: {error}"))?;
     configure_stream(&stream)?;
@@ -132,7 +163,7 @@ fn query_public(address: &str, node_id: u64, start: u64, span: u16) -> Result<()
         &mut stream,
         NodeId::from_u64(node_id),
         CurrencyAddress::new(start),
-        span,
+        limit,
     )
     .map_err(|error| format!("public currency query failed: {error:?}"))?;
 

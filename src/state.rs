@@ -118,29 +118,17 @@ impl SecondState {
     pub fn public_currency_page(
         &self,
         start: CurrencyAddress,
-        span: u16,
+        limit: u16,
     ) -> Result<PublicCurrencyPage, NetworkError> {
-        crate::network::validate_public_currency_span(span)?;
+        crate::network::validate_public_currency_limit(limit)?;
 
-        let frontier = self.protocol.next_currency_address;
-        if start.value() >= frontier {
-            return Ok(PublicCurrencyPage {
-                states: Vec::new(),
-                next_start: None,
-            });
-        }
-
-        let end = start.value().saturating_add(u64::from(span)).min(frontier);
-        let end_address = CurrencyAddress::new(end);
-
-        let states = self
-            .business
-            .currencies
-            .range(start..end_address)
+        let mut currencies = self.business.currencies.range(start..);
+        let states = currencies
+            .by_ref()
+            .take(usize::from(limit))
             .map(|(_, currency)| currency.public_state())
-            .collect();
-
-        let next_start = (end < frontier).then_some(end_address);
+            .collect::<Vec<_>>();
+        let next_start = currencies.next().map(|(address, _)| *address);
 
         Ok(PublicCurrencyPage { states, next_start })
     }

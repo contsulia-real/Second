@@ -4,14 +4,19 @@ mod session;
 use std::fmt;
 use std::io;
 
-use crate::{CurrencyAddress, PublicCurrencyState, PublicCurrencySummary};
+use crate::{
+    CurrencyAddress, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
+    PublicStateError,
+};
 
 pub use codec::{read_network_message, write_network_message};
 pub use session::{
-    client_ping, client_public_currency_page, client_public_currency_summary, serve_ping_session,
-    serve_public_currency_connection, serve_public_currency_session,
+    client_ping, client_public_currency_page, client_public_currency_summary,
+    client_sync_public_currency_view, serve_ping_session, serve_public_currency_connection,
+    serve_public_currency_session,
 };
 
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -57,6 +62,12 @@ pub struct RemotePublicCurrencyPage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemotePublicCurrencyView {
+    pub remote_node_id: NodeId,
+    pub view: PublicCurrencyView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemotePublicCurrencySummary {
     pub remote_node_id: NodeId,
     pub summary: PublicCurrencySummary,
@@ -75,7 +86,7 @@ pub enum NetworkMessage {
     },
     GetPublicCurrencies {
         start: CurrencyAddress,
-        span: u16,
+        limit: u16,
     },
     PublicCurrencies {
         states: Vec<PublicCurrencyState>,
@@ -109,7 +120,7 @@ pub enum NetworkError {
     InvalidCurrencyRole(u8),
     InvalidBoolean(u8),
     InvalidCursorFlag(u8),
-    InvalidPublicCurrencySpan {
+    InvalidPublicCurrencyLimit {
         requested: u16,
         maximum: u16,
     },
@@ -117,6 +128,16 @@ pub enum NetworkError {
         announced: usize,
         maximum: usize,
     },
+    InvalidPublicCurrencyPage,
+    InvalidPublicCurrencyCursor {
+        current: CurrencyAddress,
+        next: CurrencyAddress,
+    },
+    SynchronizedCurrencyCountExceeded {
+        claimed: u64,
+        actual: u64,
+    },
+    PublicState(PublicStateError),
     UnexpectedMessage,
     NonceMismatch {
         expected: u64,
@@ -130,10 +151,10 @@ impl From<io::Error> for NetworkError {
     }
 }
 
-pub(crate) fn validate_public_currency_span(span: u16) -> Result<(), NetworkError> {
-    if span == 0 || span > MAX_PUBLIC_CURRENCY_PAGE {
-        Err(NetworkError::InvalidPublicCurrencySpan {
-            requested: span,
+pub(crate) fn validate_public_currency_limit(limit: u16) -> Result<(), NetworkError> {
+    if limit == 0 || limit > MAX_PUBLIC_CURRENCY_PAGE {
+        Err(NetworkError::InvalidPublicCurrencyLimit {
+            requested: limit,
             maximum: MAX_PUBLIC_CURRENCY_PAGE,
         })
     } else {

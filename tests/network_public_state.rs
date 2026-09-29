@@ -90,7 +90,7 @@ fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
 }
 
 #[test]
-fn address_gaps_are_skipped_but_cursor_still_advances() {
+fn address_gaps_are_skipped_without_empty_pages() {
     let alice = AccountAddress::new(1);
     let bob = AccountAddress::new(2);
     let mut state = SecondState::genesis([alice, bob], 1);
@@ -121,13 +121,7 @@ fn address_gaps_are_skipped_but_cursor_still_advances() {
     state.execute(&issue, 2).unwrap();
 
     let page = state
-        .public_currency_page(CurrencyAddress::new(1), 2)
-        .unwrap();
-    assert!(page.states.is_empty());
-    assert_eq!(page.next_start, Some(CurrencyAddress::new(3)));
-
-    let page = state
-        .public_currency_page(page.next_start.unwrap(), 1)
+        .public_currency_page(CurrencyAddress::new(1), 1)
         .unwrap();
     assert_eq!(page.states.len(), 1);
     assert_eq!(page.states[0].address, CurrencyAddress::new(3));
@@ -135,12 +129,53 @@ fn address_gaps_are_skipped_but_cursor_still_advances() {
 }
 
 #[test]
-fn public_currency_page_rejects_zero_or_excessive_span() {
+fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
+    let alice = AccountAddress::new(1);
+    let bob = AccountAddress::new(2);
+    let mut state = SecondState::genesis([alice, bob], 1);
+
+    let failing = verified_task(
+        10,
+        vec![
+            Operation::Issue {
+                account: alice,
+                count: 10_000,
+            },
+            Operation::Transfer {
+                source: bob,
+                destination: alice,
+                amount: 1,
+            },
+        ],
+    );
+    assert!(state.execute(&failing, 1).is_err());
+
+    let issue = verified_task(
+        11,
+        vec![Operation::Issue {
+            account: alice,
+            count: 2,
+        }],
+    );
+    state.execute(&issue, 2).unwrap();
+
+    let page = state
+        .public_currency_page(CurrencyAddress::new(1), 2)
+        .unwrap();
+
+    assert_eq!(page.states.len(), 2);
+    assert_eq!(page.states[0].address, CurrencyAddress::new(10_001));
+    assert_eq!(page.states[1].address, CurrencyAddress::new(10_002));
+    assert_eq!(page.next_start, None);
+}
+
+#[test]
+fn public_currency_page_rejects_zero_or_excessive_limit() {
     let state = SecondState::genesis([], 1);
 
     assert_eq!(
         state.public_currency_page(CurrencyAddress::new(1), 0),
-        Err(NetworkError::InvalidPublicCurrencySpan {
+        Err(NetworkError::InvalidPublicCurrencyLimit {
             requested: 0,
             maximum: MAX_PUBLIC_CURRENCY_PAGE,
         })
@@ -148,7 +183,7 @@ fn public_currency_page_rejects_zero_or_excessive_span() {
 
     assert_eq!(
         state.public_currency_page(CurrencyAddress::new(1), MAX_PUBLIC_CURRENCY_PAGE + 1,),
-        Err(NetworkError::InvalidPublicCurrencySpan {
+        Err(NetworkError::InvalidPublicCurrencyLimit {
             requested: MAX_PUBLIC_CURRENCY_PAGE + 1,
             maximum: MAX_PUBLIC_CURRENCY_PAGE,
         })

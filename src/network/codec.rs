@@ -1,13 +1,10 @@
 use std::io::{Read, Write};
 
-use crate::{
-    CURRENT_PROTOCOL_VERSION, CurrencyAddress, CurrencyRole, PublicCurrencyState,
-    PublicCurrencySummary,
-};
+use crate::{CurrencyAddress, CurrencyRole, PublicCurrencyState, PublicCurrencySummary};
 
 use super::{
-    MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
-    validate_public_currency_span,
+    CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE,
+    NetworkError, NetworkMessage, NodeId, validate_public_currency_limit,
 };
 
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
@@ -33,7 +30,7 @@ pub fn write_network_message<W: Write>(
     })?;
 
     writer.write_all(&NETWORK_MAGIC)?;
-    writer.write_all(&CURRENT_PROTOCOL_VERSION.to_be_bytes())?;
+    writer.write_all(&CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes())?;
     writer.write_all(&payload_len.to_be_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()?;
@@ -71,9 +68,9 @@ pub(crate) fn read_network_message_optional<R: Read>(
         }
     })?);
 
-    if protocol_version != CURRENT_PROTOCOL_VERSION {
+    if protocol_version != CURRENT_NETWORK_PROTOCOL_VERSION {
         return Err(NetworkError::UnsupportedProtocolVersion {
-            expected: CURRENT_PROTOCOL_VERSION,
+            expected: CURRENT_NETWORK_PROTOCOL_VERSION,
             actual: protocol_version,
         });
     }
@@ -119,12 +116,12 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
             payload.extend_from_slice(&nonce.to_be_bytes());
             Ok(payload)
         }
-        NetworkMessage::GetPublicCurrencies { start, span } => {
-            validate_public_currency_span(*span)?;
+        NetworkMessage::GetPublicCurrencies { start, limit } => {
+            validate_public_currency_limit(*limit)?;
             let mut payload = Vec::with_capacity(11);
             payload.push(4);
             payload.extend_from_slice(&start.value().to_be_bytes());
-            payload.extend_from_slice(&span.to_be_bytes());
+            payload.extend_from_slice(&limit.to_be_bytes());
             Ok(payload)
         }
         NetworkMessage::PublicCurrencies { states, next_start } => {
@@ -286,16 +283,16 @@ fn decode_public_currency_query(payload: &[u8]) -> Result<NetworkMessage, Networ
             actual: payload.len(),
         },
     )?));
-    let span = u16::from_be_bytes(payload[9..11].try_into().map_err(|_| {
+    let limit = u16::from_be_bytes(payload[9..11].try_into().map_err(|_| {
         NetworkError::InvalidMessageLength {
             message_type: 4,
             expected: 11,
             actual: payload.len(),
         }
     })?);
-    validate_public_currency_span(span)?;
+    validate_public_currency_limit(limit)?;
 
-    Ok(NetworkMessage::GetPublicCurrencies { start, span })
+    Ok(NetworkMessage::GetPublicCurrencies { start, limit })
 }
 
 fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
