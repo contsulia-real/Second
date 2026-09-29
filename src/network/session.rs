@@ -4,7 +4,8 @@ use crate::{CurrencyAddress, SecondState};
 
 use super::codec::{read_network_message, read_network_message_optional, write_network_message};
 use super::{
-    NetworkError, NetworkMessage, NodeId, RemotePublicCurrencyPage, validate_public_currency_span,
+    NetworkError, NetworkMessage, NodeId, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
+    validate_public_currency_span,
 };
 
 pub fn client_ping<S: Read + Write>(
@@ -66,6 +67,23 @@ pub fn client_public_currency_page<S: Read + Write>(
     }
 }
 
+pub fn client_public_currency_summary<S: Read + Write>(
+    stream: &mut S,
+    local_node_id: NodeId,
+) -> Result<RemotePublicCurrencySummary, NetworkError> {
+    let remote_node_id = client_handshake(stream, local_node_id)?;
+
+    write_network_message(stream, &NetworkMessage::GetPublicCurrencySummary)?;
+
+    match read_network_message(stream)? {
+        NetworkMessage::PublicCurrencySummary { summary } => Ok(RemotePublicCurrencySummary {
+            remote_node_id,
+            summary,
+        }),
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
 pub fn serve_public_currency_session<S: Read + Write>(
     stream: &mut S,
     local_node_id: NodeId,
@@ -101,6 +119,9 @@ pub fn serve_public_currency_connection<S: Read + Write>(
             NetworkMessage::GetPublicCurrencies { start, span } => {
                 write_public_currency_page(stream, state, start, span)?;
             }
+            NetworkMessage::GetPublicCurrencySummary => {
+                write_public_currency_summary(stream, state)?;
+            }
             _ => return Err(NetworkError::UnexpectedMessage),
         }
     }
@@ -118,6 +139,18 @@ fn write_public_currency_page<S: Write>(
         &NetworkMessage::PublicCurrencies {
             states: page.states,
             next_start: page.next_start,
+        },
+    )
+}
+
+fn write_public_currency_summary<S: Write>(
+    stream: &mut S,
+    state: &SecondState,
+) -> Result<(), NetworkError> {
+    write_network_message(
+        stream,
+        &NetworkMessage::PublicCurrencySummary {
+            summary: state.public_currency_summary(),
         },
     )
 }

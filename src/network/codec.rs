@@ -1,6 +1,9 @@
 use std::io::{Read, Write};
 
-use crate::{CURRENT_PROTOCOL_VERSION, CurrencyAddress, CurrencyRole, PublicCurrencyState};
+use crate::{
+    CURRENT_PROTOCOL_VERSION, CurrencyAddress, CurrencyRole, PublicCurrencyState,
+    PublicCurrencySummary,
+};
 
 use super::{
     MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
@@ -164,6 +167,17 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
 
             Ok(payload)
         }
+        NetworkMessage::GetPublicCurrencySummary => Ok(vec![6]),
+        NetworkMessage::PublicCurrencySummary { summary } => {
+            let mut payload = Vec::with_capacity(65);
+            payload.push(7);
+            payload.extend_from_slice(&summary.next_currency_address.to_be_bytes());
+            payload.extend_from_slice(&summary.current_supply.to_be_bytes());
+            payload.extend_from_slice(&summary.reserve_count.to_be_bytes());
+            payload.extend_from_slice(&summary.occupied_count.to_be_bytes());
+            payload.extend_from_slice(&summary.state_digest);
+            Ok(payload)
+        }
     }
 }
 
@@ -176,8 +190,64 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
         3 => decode_nonce_message(payload, true),
         4 => decode_public_currency_query(payload),
         5 => decode_public_currency_page(payload),
+        6 => {
+            require_message_length(6, payload, 1)?;
+            Ok(NetworkMessage::GetPublicCurrencySummary)
+        }
+        7 => decode_public_currency_summary(payload),
         other => Err(NetworkError::UnknownMessageType(other)),
     }
+}
+
+fn decode_public_currency_summary(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(7, payload, 65)?;
+
+    let next_currency_address = u64::from_be_bytes(payload[1..9].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 7,
+            expected: 65,
+            actual: payload.len(),
+        }
+    })?);
+    let current_supply = u64::from_be_bytes(payload[9..17].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 7,
+            expected: 65,
+            actual: payload.len(),
+        }
+    })?);
+    let reserve_count = u64::from_be_bytes(payload[17..25].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 7,
+            expected: 65,
+            actual: payload.len(),
+        }
+    })?);
+    let occupied_count = u64::from_be_bytes(payload[25..33].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 7,
+            expected: 65,
+            actual: payload.len(),
+        }
+    })?);
+    let state_digest =
+        payload[33..65]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidMessageLength {
+                message_type: 7,
+                expected: 65,
+                actual: payload.len(),
+            })?;
+
+    Ok(NetworkMessage::PublicCurrencySummary {
+        summary: PublicCurrencySummary {
+            next_currency_address,
+            current_supply,
+            reserve_count,
+            occupied_count,
+            state_digest,
+        },
+    })
 }
 
 fn decode_hello(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {

@@ -4,12 +4,12 @@ mod session;
 use std::fmt;
 use std::io;
 
-use crate::{CurrencyAddress, PublicCurrencyState};
+use crate::{CurrencyAddress, PublicCurrencyState, PublicCurrencySummary};
 
 pub use codec::{read_network_message, write_network_message};
 pub use session::{
-    client_ping, client_public_currency_page, serve_ping_session, serve_public_currency_connection,
-    serve_public_currency_session,
+    client_ping, client_public_currency_page, client_public_currency_summary, serve_ping_session,
+    serve_public_currency_connection, serve_public_currency_session,
 };
 
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
@@ -57,6 +57,12 @@ pub struct RemotePublicCurrencyPage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemotePublicCurrencySummary {
+    pub remote_node_id: NodeId,
+    pub summary: PublicCurrencySummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkMessage {
     Hello {
         node_id: NodeId,
@@ -74,6 +80,10 @@ pub enum NetworkMessage {
     PublicCurrencies {
         states: Vec<PublicCurrencyState>,
         next_start: Option<CurrencyAddress>,
+    },
+    GetPublicCurrencySummary,
+    PublicCurrencySummary {
+        summary: PublicCurrencySummary,
     },
 }
 

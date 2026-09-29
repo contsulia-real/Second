@@ -103,6 +103,10 @@ impl SecondState {
             .map(Currency::public_state)
     }
 
+    pub fn public_currency_summary(&self) -> crate::PublicCurrencySummary {
+        crate::public_state::summarize_public_currency_state(self)
+    }
+
     pub fn public_currency_states(&self) -> Vec<PublicCurrencyState> {
         self.business
             .currencies
