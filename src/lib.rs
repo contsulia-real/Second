@@ -32,7 +32,10 @@ pub use network::{
     serve_public_currency_session, write_network_message,
 };
 pub use persistence::{PersistedNodeState, StateStore};
-pub use public_checkpoint::{CertifiedPublicCurrencyCheckpoint, PublicCurrencyCheckpoint};
+pub use public_checkpoint::{
+    CertifiedPublicCurrencyCheckpoint, PublicCheckpointError, PublicCurrencyCheckpoint,
+    PublicCurrencyCheckpointProof,
+};
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
 pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};

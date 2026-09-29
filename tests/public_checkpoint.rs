@@ -1,8 +1,8 @@
 use ed25519_dalek::SigningKey;
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, FinalityError,
-    PublicCurrencyCheckpoint, SecondState, ValidatorCredential, ValidatorId, ValidatorSet,
-    ValidatorVote,
+    PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState, ValidatorCredential,
+    ValidatorId, ValidatorSet, ValidatorVote,
 };
 
 fn key(byte: u8) -> SigningKey {
@@ -57,6 +57,100 @@ fn checkpoint_digest_commits_epoch_and_exact_public_summary() {
 
     assert_ne!(epoch_10.digest(), epoch_11.digest());
     assert_ne!(epoch_10.digest(), different_summary.digest());
+}
+
+#[test]
+fn unverified_checkpoint_proof_must_be_revalidated_against_view_and_validator_set() {
+    let validators = validators();
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let summary = state.public_currency_summary();
+    let view =
+        second::PublicCurrencyView::new(summary.clone(), state.public_currency_states()).unwrap();
+    let checkpoint = PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 10, summary);
+    let proof = PublicCurrencyCheckpointProof::new(
+        checkpoint.clone(),
+        validators.version(),
+        votes(&checkpoint, &validators, &[1, 2, 3]),
+    );
+
+    let certified = proof.verify(&view, &validators).unwrap();
+
+    assert_eq!(certified.checkpoint(), &checkpoint);
+    assert_eq!(certified.certificate().vote_count(), 3);
+}
+
+#[test]
+fn certified_checkpoint_accepts_only_the_matching_verified_public_view() {
+    let validators = validators();
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let summary = state.public_currency_summary();
+    let view =
+        second::PublicCurrencyView::new(summary.clone(), state.public_currency_states()).unwrap();
+    let checkpoint = PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 10, summary);
+
+    let certified = CertifiedPublicCurrencyCheckpoint::new(
+        checkpoint.clone(),
+        votes(&checkpoint, &validators, &[1, 2, 3]),
+        &validators,
+    )
+    .unwrap();
+
+    assert_eq!(certified.verify_view(&view, &validators), Ok(()));
+}
+
+#[test]
+fn certified_checkpoint_rejects_a_different_public_view() {
+    let validators = validators();
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let other_state = SecondState::genesis([], 10).with_reserve(2).unwrap();
+
+    let summary = state.public_currency_summary();
+    let checkpoint = PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 10, summary);
+    let certified = CertifiedPublicCurrencyCheckpoint::new(
+        checkpoint.clone(),
+        votes(&checkpoint, &validators, &[1, 2, 3]),
+        &validators,
+    )
+    .unwrap();
+
+    let other_view = second::PublicCurrencyView::new(
+        other_state.public_currency_summary(),
+        other_state.public_currency_states(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        certified.verify_view(&other_view, &validators),
+        Err(second::PublicCheckpointError::SummaryMismatch)
+    );
+}
+
+#[test]
+fn certified_checkpoint_is_bound_to_validator_set_version() {
+    let validators = validators();
+    let other_version = ValidatorSet::new(5, (1..=4).map(credential)).unwrap();
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let summary = state.public_currency_summary();
+    let view =
+        second::PublicCurrencyView::new(summary.clone(), state.public_currency_states()).unwrap();
+    let checkpoint = PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 10, summary);
+
+    let certified = CertifiedPublicCurrencyCheckpoint::new(
+        checkpoint.clone(),
+        votes(&checkpoint, &validators, &[1, 2, 3]),
+        &validators,
+    )
+    .unwrap();
+
+    assert_eq!(
+        certified.verify_view(&view, &other_version),
+        Err(second::PublicCheckpointError::Finality(
+            FinalityError::WrongValidatorSetVersion {
+                expected: 5,
+                actual: 4,
+            }
+        ))
+    );
 }
 
 #[test]

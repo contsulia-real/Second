@@ -1,11 +1,18 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    FinalityCertificate, FinalityError, FinalityStatement, PublicCurrencySummary, ValidatorSet,
-    ValidatorVote,
+    FinalityCertificate, FinalityError, FinalityStatement, PublicCurrencySummary,
+    PublicCurrencyView, ValidatorSet, ValidatorVote,
 };
 
 const PUBLIC_CHECKPOINT_DOMAIN: &[u8] = b"SECOND_PUBLIC_CURRENCY_CHECKPOINT_V1\0";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicCheckpointError {
+    SummaryMismatch,
+    StatementMismatch,
+    Finality(FinalityError),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicCurrencyCheckpoint {
@@ -54,6 +61,62 @@ impl PublicCurrencyCheckpoint {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicCurrencyCheckpointProof {
+    checkpoint: PublicCurrencyCheckpoint,
+    validator_set_version: u64,
+    votes: Vec<ValidatorVote>,
+}
+
+impl PublicCurrencyCheckpointProof {
+    pub fn new(
+        checkpoint: PublicCurrencyCheckpoint,
+        validator_set_version: u64,
+        votes: Vec<ValidatorVote>,
+    ) -> Self {
+        Self {
+            checkpoint,
+            validator_set_version,
+            votes,
+        }
+    }
+
+    pub fn checkpoint(&self) -> &PublicCurrencyCheckpoint {
+        &self.checkpoint
+    }
+
+    pub const fn validator_set_version(&self) -> u64 {
+        self.validator_set_version
+    }
+
+    pub fn votes(&self) -> &[ValidatorVote] {
+        &self.votes
+    }
+
+    pub fn verify(
+        self,
+        view: &PublicCurrencyView,
+        validator_set: &ValidatorSet,
+    ) -> Result<CertifiedPublicCurrencyCheckpoint, PublicCheckpointError> {
+        if self.checkpoint.summary() != &view.summary {
+            return Err(PublicCheckpointError::SummaryMismatch);
+        }
+
+        let certificate = FinalityCertificate::new(
+            self.checkpoint
+                .finality_statement(self.validator_set_version),
+            self.votes,
+            validator_set,
+        )
+        .map_err(PublicCheckpointError::Finality)?;
+
+        Ok(CertifiedPublicCurrencyCheckpoint {
+            checkpoint: self.checkpoint,
+            certificate,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedPublicCurrencyCheckpoint {
     checkpoint: PublicCurrencyCheckpoint,
     certificate: FinalityCertificate,
@@ -83,5 +146,26 @@ impl CertifiedPublicCurrencyCheckpoint {
 
     pub fn certificate(&self) -> &FinalityCertificate {
         &self.certificate
+    }
+
+    pub fn verify_view(
+        &self,
+        view: &PublicCurrencyView,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), PublicCheckpointError> {
+        if self.checkpoint.summary() != &view.summary {
+            return Err(PublicCheckpointError::SummaryMismatch);
+        }
+
+        let statement = self.certificate.statement();
+        if statement.protocol_version() != self.checkpoint.protocol_version()
+            || statement.subject_digest() != self.checkpoint.digest()
+        {
+            return Err(PublicCheckpointError::StatementMismatch);
+        }
+
+        self.certificate
+            .verify(validator_set)
+            .map_err(PublicCheckpointError::Finality)
     }
 }
