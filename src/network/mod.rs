@@ -18,7 +18,7 @@ pub use session::{
     serve_public_currency_connection_with_checkpoint, serve_public_currency_session,
 };
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 3;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 4;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -131,6 +131,7 @@ pub enum NetworkError {
         expected: usize,
         actual: usize,
     },
+    InvalidCheckpointProof,
     InvalidCurrencyRole(u8),
     InvalidBoolean(u8),
     InvalidCursorFlag(u8),

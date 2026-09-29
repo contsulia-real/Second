@@ -6,6 +6,14 @@ use crate::{
 };
 
 const PUBLIC_CHECKPOINT_DOMAIN: &[u8] = b"SECOND_PUBLIC_CURRENCY_CHECKPOINT_V1\0";
+const CHECKPOINT_PROOF_FIXED_SIZE: usize = 92;
+const CHECKPOINT_VOTE_ENCODED_SIZE: usize = 72;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckpointProofCodecError {
+    LengthOverflow,
+    InvalidLength,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicCheckpointError {
@@ -91,6 +99,128 @@ impl PublicCurrencyCheckpointProof {
 
     pub fn votes(&self) -> &[ValidatorVote] {
         &self.votes
+    }
+
+    pub(crate) fn encode_bytes(&self) -> Result<Vec<u8>, CheckpointProofCodecError> {
+        let encoded_len = self
+            .votes
+            .len()
+            .checked_mul(CHECKPOINT_VOTE_ENCODED_SIZE)
+            .and_then(|len| CHECKPOINT_PROOF_FIXED_SIZE.checked_add(len))
+            .ok_or(CheckpointProofCodecError::LengthOverflow)?;
+        let vote_count = u64::try_from(self.votes.len())
+            .map_err(|_| CheckpointProofCodecError::LengthOverflow)?;
+
+        let checkpoint = self.checkpoint();
+        let summary = checkpoint.summary();
+        let mut bytes = Vec::with_capacity(encoded_len);
+        bytes.extend_from_slice(&checkpoint.protocol_version().to_be_bytes());
+        bytes.extend_from_slice(&checkpoint.epoch().to_be_bytes());
+        bytes.extend_from_slice(&summary.next_currency_address.to_be_bytes());
+        bytes.extend_from_slice(&summary.current_supply.to_be_bytes());
+        bytes.extend_from_slice(&summary.reserve_count.to_be_bytes());
+        bytes.extend_from_slice(&summary.occupied_count.to_be_bytes());
+        bytes.extend_from_slice(&summary.state_digest);
+        bytes.extend_from_slice(&self.validator_set_version.to_be_bytes());
+        bytes.extend_from_slice(&vote_count.to_be_bytes());
+
+        for vote in &self.votes {
+            bytes.extend_from_slice(&vote.validator_id().value().to_be_bytes());
+            bytes.extend_from_slice(&vote.signature_bytes());
+        }
+
+        Ok(bytes)
+    }
+
+    pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<Self, CheckpointProofCodecError> {
+        if bytes.len() < CHECKPOINT_PROOF_FIXED_SIZE {
+            return Err(CheckpointProofCodecError::InvalidLength);
+        }
+
+        let protocol_version = u32::from_be_bytes(
+            bytes[0..4]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let epoch = u64::from_be_bytes(
+            bytes[4..12]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let next_currency_address = u64::from_be_bytes(
+            bytes[12..20]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let current_supply = u64::from_be_bytes(
+            bytes[20..28]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let reserve_count = u64::from_be_bytes(
+            bytes[28..36]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let occupied_count = u64::from_be_bytes(
+            bytes[36..44]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let state_digest = bytes[44..76]
+            .try_into()
+            .map_err(|_| CheckpointProofCodecError::InvalidLength)?;
+        let validator_set_version = u64::from_be_bytes(
+            bytes[76..84]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        );
+        let vote_count = usize::try_from(u64::from_be_bytes(
+            bytes[84..92]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+        ))
+        .map_err(|_| CheckpointProofCodecError::LengthOverflow)?;
+
+        let expected_len = vote_count
+            .checked_mul(CHECKPOINT_VOTE_ENCODED_SIZE)
+            .and_then(|len| CHECKPOINT_PROOF_FIXED_SIZE.checked_add(len))
+            .ok_or(CheckpointProofCodecError::LengthOverflow)?;
+        if bytes.len() != expected_len {
+            return Err(CheckpointProofCodecError::InvalidLength);
+        }
+
+        let mut votes = Vec::with_capacity(vote_count);
+        let mut offset = CHECKPOINT_PROOF_FIXED_SIZE;
+        for _ in 0..vote_count {
+            let validator_id = crate::ValidatorId::new(u64::from_be_bytes(
+                bytes[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| CheckpointProofCodecError::InvalidLength)?,
+            ));
+            offset += 8;
+            let signature = bytes[offset..offset + 64]
+                .try_into()
+                .map_err(|_| CheckpointProofCodecError::InvalidLength)?;
+            offset += 64;
+            votes.push(ValidatorVote::from_parts(validator_id, signature));
+        }
+
+        Ok(Self::new(
+            PublicCurrencyCheckpoint::new(
+                protocol_version,
+                epoch,
+                PublicCurrencySummary {
+                    next_currency_address,
+                    current_supply,
+                    reserve_count,
+                    occupied_count,
+                    state_digest,
+                },
+            ),
+            validator_set_version,
+            votes,
+        ))
     }
 
     pub fn verify(
