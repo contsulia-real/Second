@@ -47,6 +47,23 @@ pub enum ValidatorSetError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PersistenceError {
+    Io(std::io::ErrorKind),
+    SnapshotTooLarge,
+    UnsupportedSnapshotVersion(u32),
+    ChecksumMismatch,
+    InvalidSnapshot,
+    NoValidSnapshot,
+    GenerationOverflow,
+}
+
+impl PersistenceError {
+    pub(crate) fn from_io(error: std::io::Error) -> Self {
+        Self::Io(error.kind())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FinalityError {
     WrongProtocolVersion { expected: u32, actual: u32 },
     WrongValidatorSetVersion { expected: u64, actual: u64 },

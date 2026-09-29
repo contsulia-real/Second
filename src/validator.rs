@@ -100,4 +100,8 @@ impl ValidatorSet {
     pub(crate) fn credential(&self, validator: ValidatorId) -> Option<&ValidatorCredential> {
         self.validators.get(&validator)
     }
+
+    pub(crate) fn credentials(&self) -> impl Iterator<Item = &ValidatorCredential> {
+        self.validators.values()
+    }
 }
