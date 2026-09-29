@@ -39,8 +39,22 @@ pub fn write_network_message<W: Write>(
 }
 
 pub fn read_network_message<R: Read>(reader: &mut R) -> Result<NetworkMessage, NetworkError> {
+    read_network_message_optional(reader)?
+        .ok_or(NetworkError::Io(std::io::ErrorKind::UnexpectedEof))
+}
+
+pub(crate) fn read_network_message_optional<R: Read>(
+    reader: &mut R,
+) -> Result<Option<NetworkMessage>, NetworkError> {
     let mut header = [0_u8; FRAME_HEADER_SIZE];
-    reader.read_exact(&mut header)?;
+
+    match reader.read_exact(&mut header[..1]) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(NetworkError::from(error)),
+    }
+
+    reader.read_exact(&mut header[1..])?;
 
     if header[0..4] != NETWORK_MAGIC {
         return Err(NetworkError::InvalidMagic);
@@ -79,7 +93,7 @@ pub fn read_network_message<R: Read>(reader: &mut R) -> Result<NetworkMessage, N
     let mut payload = vec![0_u8; announced];
     reader.read_exact(&mut payload)?;
 
-    decode_message_payload(&payload)
+    decode_message_payload(&payload).map(Some)
 }
 
 fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 
 use crate::{CurrencyAddress, SecondState};
 
-use super::codec::{read_network_message, write_network_message};
+use super::codec::{read_network_message, read_network_message_optional, write_network_message};
 use super::{
     NetworkError, NetworkMessage, NodeId, RemotePublicCurrencyPage, validate_public_currency_span,
 };
@@ -75,18 +75,51 @@ pub fn serve_public_currency_session<S: Read + Write>(
 
     match read_network_message(stream)? {
         NetworkMessage::GetPublicCurrencies { start, span } => {
-            let page = state.public_currency_page(start, span)?;
-            write_network_message(
-                stream,
-                &NetworkMessage::PublicCurrencies {
-                    states: page.states,
-                    next_start: page.next_start,
-                },
-            )?;
+            write_public_currency_page(stream, state, start, span)?;
             Ok(remote_node_id)
         }
         _ => Err(NetworkError::UnexpectedMessage),
     }
+}
+
+pub fn serve_public_currency_connection<S: Read + Write>(
+    stream: &mut S,
+    local_node_id: NodeId,
+    state: &SecondState,
+) -> Result<NodeId, NetworkError> {
+    let remote_node_id = server_handshake(stream, local_node_id)?;
+
+    loop {
+        let Some(message) = read_network_message_optional(stream)? else {
+            return Ok(remote_node_id);
+        };
+
+        match message {
+            NetworkMessage::Ping { nonce } => {
+                write_network_message(stream, &NetworkMessage::Pong { nonce })?;
+            }
+            NetworkMessage::GetPublicCurrencies { start, span } => {
+                write_public_currency_page(stream, state, start, span)?;
+            }
+            _ => return Err(NetworkError::UnexpectedMessage),
+        }
+    }
+}
+
+fn write_public_currency_page<S: Write>(
+    stream: &mut S,
+    state: &SecondState,
+    start: CurrencyAddress,
+    span: u16,
+) -> Result<(), NetworkError> {
+    let page = state.public_currency_page(start, span)?;
+    write_network_message(
+        stream,
+        &NetworkMessage::PublicCurrencies {
+            states: page.states,
+            next_start: page.next_start,
+        },
+    )
 }
 
 fn client_handshake<S: Read + Write>(

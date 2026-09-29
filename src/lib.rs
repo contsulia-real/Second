@@ -24,7 +24,8 @@ pub use ids::{AccountAddress, CurrencyAddress, PaymentAddress, TaskId, Validator
 pub use network::{
     MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
     PublicCurrencyPage, RemotePublicCurrencyPage, client_ping, client_public_currency_page,
-    read_network_message, serve_ping_session, serve_public_currency_session, write_network_message,
+    read_network_message, serve_ping_session, serve_public_currency_connection,
+    serve_public_currency_session, write_network_message,
 };
 pub use persistence::{PersistedNodeState, StateStore};
 pub use state::{ExecutionOutcome, SecondState};

@@ -8,7 +8,8 @@ use crate::{CurrencyAddress, PublicCurrencyState};
 
 pub use codec::{read_network_message, write_network_message};
 pub use session::{
-    client_ping, client_public_currency_page, serve_ping_session, serve_public_currency_session,
+    client_ping, client_public_currency_page, serve_ping_session, serve_public_currency_connection,
+    serve_public_currency_session,
 };
 
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
