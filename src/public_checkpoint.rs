@@ -60,6 +60,7 @@ impl PublicCurrencyCheckpoint {
     }
 }
 
+// Transport/storage form only. Receiving or decoding this type does not authenticate it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicCurrencyCheckpointProof {
     checkpoint: PublicCurrencyCheckpoint,

@@ -1,11 +1,14 @@
 use std::io::{Read, Write};
 
-use crate::{CurrencyAddress, PublicCurrencyView, SecondState};
+use crate::{
+    CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyView, SecondState, ValidatorSet,
+};
 
 use super::codec::{read_network_message, read_network_message_optional, write_network_message};
 use super::{
-    MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, RemotePublicCurrencyPage,
-    RemotePublicCurrencySummary, RemotePublicCurrencyView, validate_public_currency_limit,
+    MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
+    RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
+    RemotePublicCurrencyView, validate_public_currency_limit,
 };
 
 pub fn client_ping<S: Read + Write>(
@@ -76,12 +79,53 @@ pub fn client_public_currency_summary<S: Read + Write>(
     })
 }
 
+pub fn client_public_currency_checkpoint_proof<S: Read + Write>(
+    stream: &mut S,
+    local_node_id: NodeId,
+) -> Result<Option<PublicCurrencyCheckpointProof>, NetworkError> {
+    let _remote_node_id = client_handshake(stream, local_node_id)?;
+    request_public_currency_checkpoint_proof(stream)
+}
+
+pub fn client_sync_certified_public_currency_view<S: Read + Write>(
+    stream: &mut S,
+    local_node_id: NodeId,
+    validator_set: &ValidatorSet,
+) -> Result<RemoteCertifiedPublicCurrencyView, NetworkError> {
+    let remote_node_id = client_handshake(stream, local_node_id)?;
+    let proof = request_public_currency_checkpoint_proof(stream)?
+        .ok_or(NetworkError::MissingPublicCurrencyCheckpoint)?;
+    let summary = proof.checkpoint().summary().clone();
+    let view = sync_public_currency_view_for_summary(stream, summary)?;
+    let checkpoint = proof
+        .verify(&view, validator_set)
+        .map_err(NetworkError::PublicCheckpoint)?;
+
+    Ok(RemoteCertifiedPublicCurrencyView {
+        remote_node_id,
+        view,
+        checkpoint,
+    })
+}
+
 pub fn client_sync_public_currency_view<S: Read + Write>(
     stream: &mut S,
     local_node_id: NodeId,
 ) -> Result<RemotePublicCurrencyView, NetworkError> {
     let remote_node_id = client_handshake(stream, local_node_id)?;
     let summary = request_public_currency_summary(stream)?;
+    let view = sync_public_currency_view_for_summary(stream, summary)?;
+
+    Ok(RemotePublicCurrencyView {
+        remote_node_id,
+        view,
+    })
+}
+
+fn sync_public_currency_view_for_summary<S: Read + Write>(
+    stream: &mut S,
+    summary: crate::PublicCurrencySummary,
+) -> Result<PublicCurrencyView, NetworkError> {
     let mut states = Vec::new();
 
     if summary.current_supply > 0 {
@@ -125,12 +169,7 @@ pub fn client_sync_public_currency_view<S: Read + Write>(
         }
     }
 
-    let view = PublicCurrencyView::new(summary, states).map_err(NetworkError::PublicState)?;
-
-    Ok(RemotePublicCurrencyView {
-        remote_node_id,
-        view,
-    })
+    PublicCurrencyView::new(summary, states).map_err(NetworkError::PublicState)
 }
 
 pub fn serve_public_currency_session<S: Read + Write>(
@@ -154,6 +193,21 @@ pub fn serve_public_currency_connection<S: Read + Write>(
     local_node_id: NodeId,
     state: &SecondState,
 ) -> Result<NodeId, NetworkError> {
+    serve_public_currency_connection_with_checkpoint(stream, local_node_id, state, None)
+}
+
+pub fn serve_public_currency_connection_with_checkpoint<S: Read + Write>(
+    stream: &mut S,
+    local_node_id: NodeId,
+    state: &SecondState,
+    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+) -> Result<NodeId, NetworkError> {
+    if checkpoint_proof
+        .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
+    {
+        return Err(NetworkError::CheckpointDoesNotMatchServedState);
+    }
+
     let remote_node_id = server_handshake(stream, local_node_id)?;
 
     loop {
@@ -170,6 +224,13 @@ pub fn serve_public_currency_connection<S: Read + Write>(
             }
             NetworkMessage::GetPublicCurrencySummary => {
                 write_public_currency_summary(stream, state)?;
+            }
+            NetworkMessage::GetPublicCurrencyCheckpoint => {
+                let response = checkpoint_proof
+                    .cloned()
+                    .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
+                    .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint);
+                write_network_message(stream, &response)?;
             }
             _ => return Err(NetworkError::UnexpectedMessage),
         }
@@ -189,6 +250,18 @@ fn request_public_currency_page<S: Read + Write>(
 
     match read_network_message(stream)? {
         NetworkMessage::PublicCurrencies { states, next_start } => Ok((states, next_start)),
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
+fn request_public_currency_checkpoint_proof<S: Read + Write>(
+    stream: &mut S,
+) -> Result<Option<PublicCurrencyCheckpointProof>, NetworkError> {
+    write_network_message(stream, &NetworkMessage::GetPublicCurrencyCheckpoint)?;
+
+    match read_network_message(stream)? {
+        NetworkMessage::PublicCurrencyCheckpointProof { proof } => Ok(Some(proof)),
+        NetworkMessage::NoPublicCurrencyCheckpoint => Ok(None),
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }

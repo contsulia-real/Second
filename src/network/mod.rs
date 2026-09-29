@@ -5,18 +5,20 @@ use std::fmt;
 use std::io;
 
 use crate::{
-    CurrencyAddress, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
+    CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCheckpointError,
+    PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
     PublicStateError,
 };
 
 pub use codec::{read_network_message, write_network_message};
 pub use session::{
-    client_ping, client_public_currency_page, client_public_currency_summary,
+    client_ping, client_public_currency_checkpoint_proof, client_public_currency_page,
+    client_public_currency_summary, client_sync_certified_public_currency_view,
     client_sync_public_currency_view, serve_ping_session, serve_public_currency_connection,
-    serve_public_currency_session,
+    serve_public_currency_connection_with_checkpoint, serve_public_currency_session,
 };
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 2;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -68,6 +70,13 @@ pub struct RemotePublicCurrencyView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteCertifiedPublicCurrencyView {
+    pub remote_node_id: NodeId,
+    pub view: PublicCurrencyView,
+    pub checkpoint: CertifiedPublicCurrencyCheckpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemotePublicCurrencySummary {
     pub remote_node_id: NodeId,
     pub summary: PublicCurrencySummary,
@@ -96,6 +105,11 @@ pub enum NetworkMessage {
     PublicCurrencySummary {
         summary: PublicCurrencySummary,
     },
+    GetPublicCurrencyCheckpoint,
+    PublicCurrencyCheckpointProof {
+        proof: PublicCurrencyCheckpointProof,
+    },
+    NoPublicCurrencyCheckpoint,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +152,9 @@ pub enum NetworkError {
         actual: u64,
     },
     PublicState(PublicStateError),
+    PublicCheckpoint(PublicCheckpointError),
+    MissingPublicCurrencyCheckpoint,
+    CheckpointDoesNotMatchServedState,
     UnexpectedMessage,
     NonceMismatch {
         expected: u64,

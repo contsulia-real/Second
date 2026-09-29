@@ -1,6 +1,9 @@
 use std::io::{Read, Write};
 
-use crate::{CurrencyAddress, CurrencyRole, PublicCurrencyState, PublicCurrencySummary};
+use crate::{
+    CurrencyAddress, CurrencyRole, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
+    PublicCurrencyState, PublicCurrencySummary, ValidatorId, ValidatorVote,
+};
 
 use super::{
     CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE,
@@ -10,6 +13,8 @@ use super::{
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
 const FRAME_HEADER_SIZE: usize = 12;
 const PUBLIC_CURRENCY_ENCODED_SIZE: usize = 11;
+const CHECKPOINT_PROOF_BASE_SIZE: usize = 87;
+const CHECKPOINT_VOTE_ENCODED_SIZE: usize = 72;
 
 pub fn write_network_message<W: Write>(
     writer: &mut W,
@@ -175,6 +180,9 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
             payload.extend_from_slice(&summary.state_digest);
             Ok(payload)
         }
+        NetworkMessage::GetPublicCurrencyCheckpoint => Ok(vec![8]),
+        NetworkMessage::PublicCurrencyCheckpointProof { proof } => encode_checkpoint_proof(proof),
+        NetworkMessage::NoPublicCurrencyCheckpoint => Ok(vec![10]),
     }
 }
 
@@ -192,8 +200,189 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
             Ok(NetworkMessage::GetPublicCurrencySummary)
         }
         7 => decode_public_currency_summary(payload),
+        8 => {
+            require_message_length(8, payload, 1)?;
+            Ok(NetworkMessage::GetPublicCurrencyCheckpoint)
+        }
+        9 => decode_checkpoint_proof(payload),
+        10 => {
+            require_message_length(10, payload, 1)?;
+            Ok(NetworkMessage::NoPublicCurrencyCheckpoint)
+        }
         other => Err(NetworkError::UnknownMessageType(other)),
     }
+}
+
+fn encode_checkpoint_proof(proof: &PublicCurrencyCheckpointProof) -> Result<Vec<u8>, NetworkError> {
+    let encoded_len = proof
+        .votes()
+        .len()
+        .checked_mul(CHECKPOINT_VOTE_ENCODED_SIZE)
+        .and_then(|len| CHECKPOINT_PROOF_BASE_SIZE.checked_add(len))
+        .ok_or(NetworkError::FrameTooLarge {
+            announced: usize::MAX,
+            maximum: MAX_NETWORK_FRAME_SIZE,
+        })?;
+
+    if encoded_len > MAX_NETWORK_FRAME_SIZE {
+        return Err(NetworkError::FrameTooLarge {
+            announced: encoded_len,
+            maximum: MAX_NETWORK_FRAME_SIZE,
+        });
+    }
+
+    let vote_count =
+        u16::try_from(proof.votes().len()).map_err(|_| NetworkError::FrameTooLarge {
+            announced: encoded_len,
+            maximum: MAX_NETWORK_FRAME_SIZE,
+        })?;
+
+    let checkpoint = proof.checkpoint();
+    let summary = checkpoint.summary();
+    let mut payload = Vec::with_capacity(encoded_len);
+    payload.push(9);
+    payload.extend_from_slice(&checkpoint.protocol_version().to_be_bytes());
+    payload.extend_from_slice(&checkpoint.epoch().to_be_bytes());
+    payload.extend_from_slice(&summary.next_currency_address.to_be_bytes());
+    payload.extend_from_slice(&summary.current_supply.to_be_bytes());
+    payload.extend_from_slice(&summary.reserve_count.to_be_bytes());
+    payload.extend_from_slice(&summary.occupied_count.to_be_bytes());
+    payload.extend_from_slice(&summary.state_digest);
+    payload.extend_from_slice(&proof.validator_set_version().to_be_bytes());
+    payload.extend_from_slice(&vote_count.to_be_bytes());
+
+    for vote in proof.votes() {
+        payload.extend_from_slice(&vote.validator_id().value().to_be_bytes());
+        payload.extend_from_slice(&vote.signature_bytes());
+    }
+
+    Ok(payload)
+}
+
+fn decode_checkpoint_proof(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() < CHECKPOINT_PROOF_BASE_SIZE {
+        return Err(NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        });
+    }
+
+    let protocol_version = u32::from_be_bytes(payload[1..5].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let epoch = u64::from_be_bytes(payload[5..13].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let next_currency_address = u64::from_be_bytes(payload[13..21].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let current_supply = u64::from_be_bytes(payload[21..29].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let reserve_count = u64::from_be_bytes(payload[29..37].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let occupied_count = u64::from_be_bytes(payload[37..45].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let state_digest =
+        payload[45..77]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidMessageLength {
+                message_type: 9,
+                expected: CHECKPOINT_PROOF_BASE_SIZE,
+                actual: payload.len(),
+            })?;
+    let validator_set_version = u64::from_be_bytes(payload[77..85].try_into().map_err(|_| {
+        NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        }
+    })?);
+    let vote_count = usize::from(u16::from_be_bytes(payload[85..87].try_into().map_err(
+        |_| NetworkError::InvalidMessageLength {
+            message_type: 9,
+            expected: CHECKPOINT_PROOF_BASE_SIZE,
+            actual: payload.len(),
+        },
+    )?));
+
+    let expected = vote_count
+        .checked_mul(CHECKPOINT_VOTE_ENCODED_SIZE)
+        .and_then(|len| CHECKPOINT_PROOF_BASE_SIZE.checked_add(len))
+        .ok_or(NetworkError::FrameTooLarge {
+            announced: payload.len(),
+            maximum: MAX_NETWORK_FRAME_SIZE,
+        })?;
+    require_message_length(9, payload, expected)?;
+
+    let mut votes = Vec::with_capacity(vote_count);
+    let mut offset = CHECKPOINT_PROOF_BASE_SIZE;
+
+    for _ in 0..vote_count {
+        let validator_id = ValidatorId::new(u64::from_be_bytes(
+            payload[offset..offset + 8].try_into().map_err(|_| {
+                NetworkError::InvalidMessageLength {
+                    message_type: 9,
+                    expected,
+                    actual: payload.len(),
+                }
+            })?,
+        ));
+        offset += 8;
+
+        let signature = payload[offset..offset + 64].try_into().map_err(|_| {
+            NetworkError::InvalidMessageLength {
+                message_type: 9,
+                expected,
+                actual: payload.len(),
+            }
+        })?;
+        offset += 64;
+
+        votes.push(ValidatorVote::from_parts(validator_id, signature));
+    }
+
+    let checkpoint = PublicCurrencyCheckpoint::new(
+        protocol_version,
+        epoch,
+        PublicCurrencySummary {
+            next_currency_address,
+            current_supply,
+            reserve_count,
+            occupied_count,
+            state_digest,
+        },
+    );
+    let proof = PublicCurrencyCheckpointProof::new(checkpoint, validator_set_version, votes);
+
+    Ok(NetworkMessage::PublicCurrencyCheckpointProof { proof })
 }
 
 fn decode_public_currency_summary(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
