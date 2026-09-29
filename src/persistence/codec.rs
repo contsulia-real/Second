@@ -10,8 +10,8 @@ use crate::{
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 1;
-const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V1\0";
+const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V2\0";
 const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
@@ -149,7 +149,9 @@ fn encode_payload(
     push_len(&mut out, validator_set.len())?;
     for credential in validator_set.credentials() {
         out.extend_from_slice(&credential.id().value().to_be_bytes());
+        out.extend_from_slice(&credential.identity_public_key());
         out.extend_from_slice(&credential.consensus_public_key());
+        out.extend_from_slice(&credential.recovery_public_key());
     }
 
     Ok(out)
@@ -245,10 +247,17 @@ fn decode_payload(payload: &[u8]) -> Result<(SecondState, ValidatorSet), Persist
 
     for _ in 0..validator_count {
         let id = ValidatorId::new(decoder.read_u64()?);
-        let public_key = decoder.read_array_32()?;
+        let identity_public_key = decoder.read_array_32()?;
+        let consensus_public_key = decoder.read_array_32()?;
+        let recovery_public_key = decoder.read_array_32()?;
         validators.push(
-            ValidatorCredential::new(id, public_key)
-                .map_err(|_| PersistenceError::InvalidSnapshot)?,
+            ValidatorCredential::new(
+                id,
+                identity_public_key,
+                consensus_public_key,
+                recovery_public_key,
+            )
+            .map_err(|_| PersistenceError::InvalidSnapshot)?,
         );
     }
 

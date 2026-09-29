@@ -11,7 +11,9 @@ fn key(byte: u8) -> SigningKey {
 fn validator(id: u64, key_byte: u8) -> ValidatorCredential {
     ValidatorCredential::new(
         ValidatorId::new(id),
+        key(key_byte.wrapping_add(40)).verifying_key().to_bytes(),
         key(key_byte).verifying_key().to_bytes(),
+        key(key_byte.wrapping_add(80)).verifying_key().to_bytes(),
     )
     .unwrap()
 }
@@ -125,8 +127,20 @@ fn duplicate_consensus_keys_are_not_valid_validator_credentials_in_one_set() {
         ValidatorSet::new(
             1,
             [
-                ValidatorCredential::new(ValidatorId::new(1), shared).unwrap(),
-                ValidatorCredential::new(ValidatorId::new(2), shared).unwrap(),
+                ValidatorCredential::new(
+                    ValidatorId::new(1),
+                    key(41).verifying_key().to_bytes(),
+                    shared,
+                    key(81).verifying_key().to_bytes(),
+                )
+                .unwrap(),
+                ValidatorCredential::new(
+                    ValidatorId::new(2),
+                    key(42).verifying_key().to_bytes(),
+                    shared,
+                    key(82).verifying_key().to_bytes(),
+                )
+                .unwrap(),
             ],
         )
         .is_err()

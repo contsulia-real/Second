@@ -2,8 +2,16 @@ use ed25519_dalek::SigningKey;
 use second::{ValidatorCredential, ValidatorId, ValidatorSet};
 
 fn credential(id: u64) -> ValidatorCredential {
-    let key = SigningKey::from_bytes(&[id as u8; 32]);
-    ValidatorCredential::new(ValidatorId::new(id), key.verifying_key().to_bytes()).unwrap()
+    let consensus = SigningKey::from_bytes(&[id as u8; 32]);
+    let identity = SigningKey::from_bytes(&[(id as u8).wrapping_add(40); 32]);
+    let recovery = SigningKey::from_bytes(&[(id as u8).wrapping_add(80); 32]);
+    ValidatorCredential::new(
+        ValidatorId::new(id),
+        identity.verifying_key().to_bytes(),
+        consensus.verifying_key().to_bytes(),
+        recovery.verifying_key().to_bytes(),
+    )
+    .unwrap()
 }
 
 #[test]

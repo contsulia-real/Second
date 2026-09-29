@@ -42,8 +42,11 @@ pub enum ExecutionError {
 pub enum ValidatorSetError {
     EmptySet,
     DuplicateValidator,
-    DuplicateConsensusKey,
+    DuplicateValidatorKey,
+    InvalidIdentityKey(ValidatorId),
     InvalidConsensusKey(ValidatorId),
+    InvalidRecoveryKey(ValidatorId),
+    ReusedCredentialKey(ValidatorId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,4 +75,16 @@ pub enum FinalityError {
     InvalidValidatorKey(ValidatorId),
     InvalidSignature(ValidatorId),
     InsufficientVotes { required: usize, actual: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatorTransitionError {
+    UnsupportedProtocolVersion { expected: u32, actual: u32 },
+    WrongCurrentValidatorSetVersion { expected: u64, actual: u64 },
+    WrongNextValidatorSetVersion { expected: u64, actual: u64 },
+    ValidatorSetVersionOverflow,
+    EpochOverflow,
+    IdentityKeyChanged(ValidatorId),
+    WrongActivationEpoch { expected: u64, actual: u64 },
+    Finality(FinalityError),
 }

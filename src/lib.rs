@@ -9,12 +9,13 @@ mod persistence;
 mod state;
 mod task;
 mod validator;
+mod validator_transition;
 
 pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
 pub use currency::{CurrencyRole, PublicCurrencyState};
 pub use error::{
     AuthorizationError, ExecutionError, FinalityError, PersistenceError, TaskEncodingError,
-    ValidatorSetError,
+    ValidatorSetError, ValidatorTransitionError,
 };
 pub use finality::{FinalityCertificate, FinalityStatement, ValidatorVote};
 pub use ids::{AccountAddress, CurrencyAddress, PaymentAddress, TaskId, ValidatorId};
@@ -26,3 +27,4 @@ pub use persistence::{PersistedNodeState, StateStore};
 pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use validator::{ValidatorCredential, ValidatorSet};
+pub use validator_transition::{CertifiedValidatorSetTransition, ValidatorSetTransition};

@@ -37,7 +37,9 @@ fn validators() -> ValidatorSet {
         (1..=4).map(|id| {
             ValidatorCredential::new(
                 ValidatorId::new(id),
+                key((id as u8).wrapping_add(40)).verifying_key().to_bytes(),
                 key(id as u8).verifying_key().to_bytes(),
+                key((id as u8).wrapping_add(80)).verifying_key().to_bytes(),
             )
             .unwrap()
         }),
