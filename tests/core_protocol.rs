@@ -1,10 +1,29 @@
+use ed25519_dalek::SigningKey;
 use second::{
-    AccountAddress, CurrencyRole, ExecutionError, ExecutionOutcome, LegalTask, Operation,
-    SecondState, TaskId,
+    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError,
+    ExecutionOutcome, LegalTask, LegalTaskPayload, Operation, SecondState, TaskId,
+    VerifiedLegalTask,
 };
 
-fn digest(byte: u8) -> [u8; 32] {
-    [byte; 32]
+fn verified_task(
+    task_id: u128,
+    expires_at: Option<u64>,
+    operations: Vec<Operation>,
+) -> VerifiedLegalTask {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let authorizers =
+        AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
+    let payload = LegalTaskPayload::new(
+        TaskId::new(task_id),
+        CURRENT_PROTOCOL_VERSION,
+        expires_at,
+        operations,
+    );
+
+    LegalTask::sign(payload, &key)
+        .unwrap()
+        .verify(&authorizers)
+        .unwrap()
 }
 
 #[test]
@@ -12,9 +31,8 @@ fn issue_creates_distinct_currency_and_balance_is_derived() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 1000);
 
-    let task = LegalTask::new(
-        TaskId::new(1),
-        digest(1),
+    let task = verified_task(
+        1,
         None,
         vec![Operation::Issue {
             account: alice,
@@ -37,9 +55,8 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
     let bob = AccountAddress::new(2);
     let mut state = SecondState::genesis([alice, bob], 1);
 
-    let issue = LegalTask::new(
-        TaskId::new(1),
-        digest(1),
+    let issue = verified_task(
+        1,
         None,
         vec![Operation::Issue {
             account: alice,
@@ -48,9 +65,8 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
     );
     state.execute(&issue, 1).unwrap();
 
-    let transfer = LegalTask::new(
-        TaskId::new(2),
-        digest(2),
+    let transfer = verified_task(
+        2,
         None,
         vec![Operation::Transfer {
             source: alice,
@@ -62,7 +78,6 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
 
     assert_eq!(state.balance(alice), 2);
     assert_eq!(state.balance(bob), 2);
-
     assert_eq!(state.public_currency_states().len(), 4);
 }
 
@@ -71,9 +86,8 @@ fn public_currency_state_exposes_occupancy_but_not_owner() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 10);
 
-    let task = LegalTask::new(
-        TaskId::new(1),
-        digest(1),
+    let task = verified_task(
+        1,
         None,
         vec![Operation::Issue {
             account: alice,
@@ -97,9 +111,8 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
     let bob = AccountAddress::new(2);
     let mut state = SecondState::genesis([alice, bob], 500);
 
-    let task = LegalTask::new(
-        TaskId::new(77),
-        digest(7),
+    let task = verified_task(
+        77,
         None,
         vec![
             Operation::Issue {
@@ -113,6 +126,7 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
             },
         ],
     );
+    let request_digest = task.request_digest();
 
     assert!(matches!(
         state.execute(&task, 10),
@@ -122,7 +136,10 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.current_supply(), 0);
     assert_eq!(state.next_currency_address(), 502);
-    assert_eq!(state.bound_request_digest(TaskId::new(77)), Some(digest(7)));
+    assert_eq!(
+        state.bound_request_digest(TaskId::new(77)),
+        Some(request_digest)
+    );
 }
 
 #[test]
@@ -131,9 +148,8 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
     let bob = AccountAddress::new(2);
     let mut state = SecondState::genesis([alice, bob], 1);
 
-    let first = LegalTask::new(
-        TaskId::new(9),
-        digest(1),
+    let first = verified_task(
+        9,
         None,
         vec![Operation::Transfer {
             source: alice,
@@ -143,9 +159,8 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
     );
     assert!(state.execute(&first, 1).is_err());
 
-    let different = LegalTask::new(
-        TaskId::new(9),
-        digest(2),
+    let different = verified_task(
+        9,
         None,
         vec![Operation::Issue {
             account: alice,
@@ -164,9 +179,8 @@ fn successful_task_replay_is_idempotent_even_after_expiry() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 1);
 
-    let task = LegalTask::new(
-        TaskId::new(1),
-        digest(1),
+    let task = verified_task(
+        1,
         Some(5),
         vec![Operation::Issue {
             account: alice,
@@ -191,9 +205,8 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(2).unwrap();
 
-    let issue = LegalTask::new(
-        TaskId::new(1),
-        digest(1),
+    let issue = verified_task(
+        1,
         None,
         vec![Operation::Issue {
             account: alice,
@@ -206,9 +219,8 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
     let before_supply = state.current_supply();
     let before_reserve = state.reserve_count();
 
-    let repair = LegalTask::new(
-        TaskId::new(2),
-        digest(2),
+    let repair = verified_task(
+        2,
         None,
         vec![Operation::LeakRepair {
             leaked: vec![leaked],

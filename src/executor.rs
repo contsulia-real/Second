@@ -2,12 +2,14 @@ use std::collections::BTreeSet;
 
 use crate::currency::Currency;
 use crate::state::{BusinessState, ExecutionOutcome, SecondState, TaskBinding};
-use crate::{AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, LegalTask, Operation};
+use crate::{
+    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, Operation, VerifiedLegalTask,
+};
 
 impl SecondState {
     pub fn execute(
         &mut self,
-        task: &LegalTask,
+        task: &VerifiedLegalTask,
         now: u64,
     ) -> Result<ExecutionOutcome, ExecutionError> {
         match self.protocol.task_bindings.get(&task.task_id()) {
