@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 
-use crate::{AccountAddress, CurrencyAddress, CurrencyRole, SecondState, TaskId};
+use crate::state::BusinessState;
+use crate::{AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, SecondState, TaskId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationClaimId {
     task_id: TaskId,
-    operation_index: u32,
+    operation_index: u64,
 }
 
 impl OperationClaimId {
-    pub const fn new(task_id: TaskId, operation_index: u32) -> Self {
+    pub const fn new(task_id: TaskId, operation_index: u64) -> Self {
         Self {
             task_id,
             operation_index,
@@ -20,8 +21,27 @@ impl OperationClaimId {
         self.task_id
     }
 
-    pub const fn operation_index(self) -> u32 {
+    pub const fn operation_index(self) -> u64 {
         self.operation_index
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConcurrentExecutionError {
+    Execution(ExecutionError),
+    Claim(ClaimError),
+    OperationIndexOverflow,
+}
+
+impl From<ExecutionError> for ConcurrentExecutionError {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
+    }
+}
+
+impl From<ClaimError> for ConcurrentExecutionError {
+    fn from(error: ClaimError) -> Self {
+        Self::Claim(error)
     }
 }
 
@@ -62,10 +82,16 @@ struct ClaimRecord {
     currencies: Vec<CurrencyAddress>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CurrencyClaimOwner {
+    task_id: TaskId,
+    references: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CurrencyClaimBook {
     records: BTreeMap<OperationClaimId, ClaimRecord>,
-    claimed_by_currency: BTreeMap<CurrencyAddress, OperationClaimId>,
+    claimed_by_currency: BTreeMap<CurrencyAddress, CurrencyClaimOwner>,
 }
 
 impl CurrencyClaimBook {
@@ -76,6 +102,16 @@ impl CurrencyClaimBook {
     pub fn claim_transfer(
         &mut self,
         state: &SecondState,
+        claim_id: OperationClaimId,
+        source: AccountAddress,
+        amount: u64,
+    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+        self.claim_transfer_in_business_state(&state.business, claim_id, source, amount)
+    }
+
+    pub(crate) fn claim_transfer_in_business_state(
+        &mut self,
+        business: &BusinessState,
         claim_id: OperationClaimId,
         source: AccountAddress,
         amount: u64,
@@ -92,13 +128,17 @@ impl CurrencyClaimBook {
         let mut total_owned = 0_u64;
         let mut available = Vec::new();
 
-        for (address, currency) in &state.business.currencies {
+        for (address, currency) in &business.currencies {
             if currency.role != CurrencyRole::Circulation || currency.owner != Some(source) {
                 continue;
             }
 
             total_owned += 1;
-            if !self.claimed_by_currency.contains_key(address) {
+            if self
+                .claimed_by_currency
+                .get(address)
+                .is_none_or(|owner| owner.task_id == claim_id.task_id())
+            {
                 available.push(*address);
             }
         }
@@ -136,6 +176,15 @@ impl CurrencyClaimBook {
         state: &SecondState,
         count: u64,
     ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+        self.claim_reserve_in_business_state(claim_id, &state.business, count)
+    }
+
+    pub(crate) fn claim_reserve_in_business_state(
+        &mut self,
+        claim_id: OperationClaimId,
+        business: &BusinessState,
+        count: u64,
+    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
         let requested_kind = ClaimKind::Reserve { count };
         if let Some(existing) = self.records.get(&claim_id) {
             return if existing.kind == requested_kind {
@@ -148,13 +197,17 @@ impl CurrencyClaimBook {
         let mut total_reserve = 0_u64;
         let mut available = Vec::new();
 
-        for (address, currency) in &state.business.currencies {
+        for (address, currency) in &business.currencies {
             if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
                 continue;
             }
 
             total_reserve += 1;
-            if !self.claimed_by_currency.contains_key(address) {
+            if self
+                .claimed_by_currency
+                .get(address)
+                .is_none_or(|owner| owner.task_id == claim_id.task_id())
+            {
                 available.push(*address);
             }
         }
@@ -190,7 +243,20 @@ impl CurrencyClaimBook {
         };
 
         for address in record.currencies {
-            if self.claimed_by_currency.get(&address) == Some(&claim_id) {
+            let should_remove = if let Some(owner) = self.claimed_by_currency.get_mut(&address) {
+                if owner.task_id != claim_id.task_id() {
+                    false
+                } else if owner.references > 1 {
+                    owner.references -= 1;
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if should_remove {
                 self.claimed_by_currency.remove(&address);
             }
         }
@@ -220,7 +286,23 @@ impl CurrencyClaimBook {
         currencies: Vec<CurrencyAddress>,
     ) {
         for address in &currencies {
-            self.claimed_by_currency.insert(*address, claim_id);
+            match self.claimed_by_currency.get_mut(address) {
+                Some(owner) if owner.task_id == claim_id.task_id() => {
+                    owner.references = owner.references.saturating_add(1);
+                }
+                Some(_) => {
+                    unreachable!("different task claim must be excluded before insertion");
+                }
+                None => {
+                    self.claimed_by_currency.insert(
+                        *address,
+                        CurrencyClaimOwner {
+                            task_id: claim_id.task_id(),
+                            references: 1,
+                        },
+                    );
+                }
+            }
         }
 
         self.records

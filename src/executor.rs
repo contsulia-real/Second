@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use crate::currency::Currency;
 use crate::state::{BusinessState, ExecutionOutcome, SecondState, TaskBinding};
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, Operation, VerifiedLegalTask,
+    AccountAddress, ConcurrentExecutionError, CurrencyAddress, CurrencyClaimBook, CurrencyRole,
+    ExecutionError, Operation, OperationClaimId, VerifiedLegalTask,
 };
 
 impl SecondState {
@@ -47,6 +48,113 @@ impl SecondState {
         }
 
         Ok(ExecutionOutcome::Succeeded)
+    }
+
+    pub fn execute_with_claims(
+        &mut self,
+        task: &VerifiedLegalTask,
+        now: u64,
+        claims: &mut CurrencyClaimBook,
+    ) -> Result<ExecutionOutcome, ConcurrentExecutionError> {
+        match self.protocol.task_bindings.get(&task.task_id()) {
+            Some(binding) if binding.request_digest != task.request_digest() => {
+                return Err(ExecutionError::TaskIdAlreadyBound.into());
+            }
+            Some(binding) if binding.succeeded => {
+                claims.release_task(task.task_id());
+                return Ok(ExecutionOutcome::AlreadySucceeded);
+            }
+            Some(_) => {}
+            None => {
+                self.protocol.task_bindings.insert(
+                    task.task_id(),
+                    TaskBinding {
+                        request_digest: task.request_digest(),
+                        succeeded: false,
+                    },
+                );
+            }
+        }
+
+        if task.expires_at().is_some_and(|expires_at| now > expires_at) {
+            claims.release_task(task.task_id());
+            return Err(ExecutionError::TaskExpired.into());
+        }
+
+        let mut working = self.business.clone();
+        let result = self.execute_operations_with_claims(&mut working, task, claims);
+
+        match result {
+            Ok(()) => {
+                self.business = working;
+                if let Some(binding) = self.protocol.task_bindings.get_mut(&task.task_id()) {
+                    binding.succeeded = true;
+                }
+                claims.release_task(task.task_id());
+                Ok(ExecutionOutcome::Succeeded)
+            }
+            Err(error) => {
+                claims.release_task(task.task_id());
+                Err(error)
+            }
+        }
+    }
+
+    fn execute_operations_with_claims(
+        &mut self,
+        working: &mut BusinessState,
+        task: &VerifiedLegalTask,
+        claims: &mut CurrencyClaimBook,
+    ) -> Result<(), ConcurrentExecutionError> {
+        let mut operation_index = 0_u64;
+
+        for operation in task.operations() {
+            let claim_id = OperationClaimId::new(task.task_id(), operation_index);
+            self.execute_operation_with_claims(working, operation, claim_id, claims)?;
+            operation_index = operation_index
+                .checked_add(1)
+                .ok_or(ConcurrentExecutionError::OperationIndexOverflow)?;
+        }
+
+        Ok(())
+    }
+
+    fn execute_operation_with_claims(
+        &mut self,
+        working: &mut BusinessState,
+        operation: &Operation,
+        claim_id: OperationClaimId,
+        claims: &mut CurrencyClaimBook,
+    ) -> Result<(), ConcurrentExecutionError> {
+        match operation {
+            Operation::Issue { account, count } => {
+                self.issue(working, *account, *count)?;
+            }
+            Operation::Transfer {
+                source,
+                destination,
+                amount,
+            } => {
+                self.require_account(working, *source)?;
+                self.require_account(working, *destination)?;
+                let currencies =
+                    claims.claim_transfer_in_business_state(working, claim_id, *source, *amount)?;
+                self.claim_transfer_candidates(working, *source, *destination, &currencies)?;
+            }
+            Operation::Destroy { currencies } => {
+                self.destroy(working, currencies)?;
+            }
+            Operation::LeakRepair { leaked } => {
+                let reserve = claims.claim_reserve_in_business_state(
+                    claim_id,
+                    working,
+                    leaked.len() as u64,
+                )?;
+                self.leak_repair_with_reserve(working, leaked, &reserve)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn execute_operation(
@@ -231,6 +339,63 @@ impl SecondState {
             });
         }
 
+        self.apply_leak_repair(working, leaked, leaked_owners, &reserve)
+    }
+
+    fn leak_repair_with_reserve(
+        &mut self,
+        working: &mut BusinessState,
+        leaked: &[CurrencyAddress],
+        reserve: &[CurrencyAddress],
+    ) -> Result<(), ExecutionError> {
+        self.require_unique_currency_list(leaked)?;
+        self.require_unique_currency_list(reserve)?;
+
+        if reserve.len() != leaked.len() {
+            return Err(ExecutionError::ReserveUnavailable {
+                required: leaked.len() as u64,
+                available: reserve.len() as u64,
+            });
+        }
+
+        let leaked_owners = leaked
+            .iter()
+            .map(|address| {
+                let currency = working
+                    .currencies
+                    .get(address)
+                    .ok_or(ExecutionError::CurrencyNotFound(*address))?;
+
+                if currency.role != CurrencyRole::Circulation {
+                    return Err(ExecutionError::CurrencyNotCirculation(*address));
+                }
+
+                currency
+                    .owner
+                    .ok_or(ExecutionError::CurrencyNotOwned(*address))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for address in reserve {
+            let currency = working
+                .currencies
+                .get(address)
+                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
+            if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
+                return Err(ExecutionError::CurrencyNotCirculation(*address));
+            }
+        }
+
+        self.apply_leak_repair(working, leaked, leaked_owners, reserve)
+    }
+
+    fn apply_leak_repair(
+        &mut self,
+        working: &mut BusinessState,
+        leaked: &[CurrencyAddress],
+        leaked_owners: Vec<AccountAddress>,
+        reserve: &[CurrencyAddress],
+    ) -> Result<(), ExecutionError> {
         let replacement_reserve = self.allocate_currency_range(leaked.len() as u64)?;
 
         for ((leaked_address, reserve_address), owner) in

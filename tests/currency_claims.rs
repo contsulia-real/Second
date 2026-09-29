@@ -120,6 +120,27 @@ fn same_claim_id_cannot_be_reused_for_different_transfer() {
 }
 
 #[test]
+fn later_operation_in_same_task_can_reuse_a_task_claimed_currency() {
+    let (state, alice, _) = issued_state(1);
+    let mut claims = CurrencyClaimBook::new();
+    let task_id = TaskId::new(10);
+    let first_id = OperationClaimId::new(task_id, 0);
+    let second_id = OperationClaimId::new(task_id, 1);
+
+    let first = claims.claim_transfer(&state, first_id, alice, 1).unwrap();
+    let second = claims.claim_transfer(&state, second_id, alice, 1).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(claims.claimed_currency_count(), 1);
+
+    claims.release(first_id);
+    assert_eq!(claims.claimed_currency_count(), 1);
+
+    claims.release(second_id);
+    assert_eq!(claims.claimed_currency_count(), 0);
+}
+
+#[test]
 fn releasing_one_operation_makes_its_currencies_claimable_again() {
     let (state, alice, _) = issued_state(2);
     let mut claims = CurrencyClaimBook::new();
@@ -145,7 +166,7 @@ fn releasing_task_releases_all_of_its_operation_claims() {
         .claim_transfer(&state, OperationClaimId::new(task_id, 0), alice, 1)
         .unwrap();
     claims
-        .claim_transfer(&state, OperationClaimId::new(task_id, 1), alice, 1)
+        .claim_transfer(&state, OperationClaimId::new(task_id, 1), alice, 2)
         .unwrap();
 
     assert_eq!(claims.claimed_currency_count(), 2);
