@@ -159,6 +159,26 @@ fn ordered_operations_in_one_task_can_reuse_the_same_claimed_currency() {
 }
 
 #[test]
+fn leak_repair_validates_leaked_currency_before_reserve_availability() {
+    let mut state = SecondState::genesis([], 1);
+    let mut claims = CurrencyClaimBook::new();
+    let task = verified_task(
+        199,
+        vec![Operation::LeakRepair {
+            leaked: vec![999.into()],
+        }],
+    );
+
+    assert_eq!(
+        state.execute_with_claims(&task, 2, &mut claims),
+        Err(ConcurrentExecutionError::Execution(
+            second::ExecutionError::CurrencyNotFound(999.into())
+        ))
+    );
+    assert_eq!(claims.claimed_currency_count(), 0);
+}
+
+#[test]
 fn leak_repair_reports_reserve_contention_when_reserve_is_claimed_elsewhere() {
     let alice = AccountAddress::new(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();

@@ -145,12 +145,14 @@ impl SecondState {
                 self.destroy(working, currencies)?;
             }
             Operation::LeakRepair { leaked } => {
+                let leaked_owners = self.validate_leaked_owners(working, leaked)?;
                 let reserve = claims.claim_reserve_in_business_state(
                     claim_id,
                     working,
                     leaked.len() as u64,
                 )?;
-                self.leak_repair_with_reserve(working, leaked, &reserve)?;
+                self.require_unique_currency_list(&reserve)?;
+                self.apply_leak_repair(working, leaked, leaked_owners, &reserve)?;
             }
         }
 
@@ -302,25 +304,7 @@ impl SecondState {
         working: &mut BusinessState,
         leaked: &[CurrencyAddress],
     ) -> Result<(), ExecutionError> {
-        self.require_unique_currency_list(leaked)?;
-
-        let leaked_owners = leaked
-            .iter()
-            .map(|address| {
-                let currency = working
-                    .currencies
-                    .get(address)
-                    .ok_or(ExecutionError::CurrencyNotFound(*address))?;
-
-                if currency.role != CurrencyRole::Circulation {
-                    return Err(ExecutionError::CurrencyNotCirculation(*address));
-                }
-
-                currency
-                    .owner
-                    .ok_or(ExecutionError::CurrencyNotOwned(*address))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let leaked_owners = self.validate_leaked_owners(working, leaked)?;
 
         let reserve = working
             .currencies
@@ -342,23 +326,14 @@ impl SecondState {
         self.apply_leak_repair(working, leaked, leaked_owners, &reserve)
     }
 
-    fn leak_repair_with_reserve(
-        &mut self,
-        working: &mut BusinessState,
+    fn validate_leaked_owners(
+        &self,
+        working: &BusinessState,
         leaked: &[CurrencyAddress],
-        reserve: &[CurrencyAddress],
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Vec<AccountAddress>, ExecutionError> {
         self.require_unique_currency_list(leaked)?;
-        self.require_unique_currency_list(reserve)?;
 
-        if reserve.len() != leaked.len() {
-            return Err(ExecutionError::ReserveUnavailable {
-                required: leaked.len() as u64,
-                available: reserve.len() as u64,
-            });
-        }
-
-        let leaked_owners = leaked
+        leaked
             .iter()
             .map(|address| {
                 let currency = working
@@ -374,19 +349,7 @@ impl SecondState {
                     .owner
                     .ok_or(ExecutionError::CurrencyNotOwned(*address))
             })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        for address in reserve {
-            let currency = working
-                .currencies
-                .get(address)
-                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
-            if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
-                return Err(ExecutionError::CurrencyNotCirculation(*address));
-            }
-        }
-
-        self.apply_leak_repair(working, leaked, leaked_owners, reserve)
+            .collect()
     }
 
     fn apply_leak_repair(
