@@ -857,7 +857,7 @@ NodeId 的认证权威是 Hello peer-auth Ed25519 key：Hello signature 的签�
 
 长期 server 当前用同一 transport Ed25519 key 生成 self-signed TLS certificate 和 Hello proof，使 certificate pin 与 NodeId 都能随同一持久 identity 稳定重建；但协议不把这描述成 mTLS。`QuicClient` 不向 server 提交 TLS client certificate，server 对 client NodeId 的认证来自 channel-bound Hello proof。对 server，显式 certificate pin 认证 TLS endpoint，Hello proof 再认证该会话上的 NodeId；当前接收端不额外解析 certificate SPKI 去重复证明“certificate key == Hello key”。
 
-当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
+当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。首次创建使用邻接 lock 文件串行化，并先把完整 identity 写入并 `sync_all` 到 `.transport.new`，再原子 rename 发布为 `.transport`；因此崩溃留下的 `.new` 不是 identity authority，下次启动可安全覆盖，只有最终 `.transport` 才是已发布身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
 
 transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；trust/discovery/admission 仍需要独立规则。
 

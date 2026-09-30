@@ -1,6 +1,7 @@
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -37,13 +38,6 @@ impl QuicTransportIdentity {
     pub fn load_or_generate(path: impl AsRef<Path>) -> Result<Self, NetworkError> {
         let path = path.as_ref();
 
-        match fs::read(path) {
-            Ok(bytes) => return Self::decode_file(&bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(identity_error(error)),
-        }
-
-        let identity = Self::generate()?;
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -51,19 +45,28 @@ impl QuicTransportIdentity {
             fs::create_dir_all(parent).map_err(identity_error)?;
         }
 
-        let encoded = identity.encode_file()?;
-        match create_identity_file(path) {
-            Ok(mut file) => {
-                file.write_all(&encoded).map_err(identity_error)?;
-                file.sync_all().map_err(identity_error)?;
-                Ok(identity)
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let bytes = fs::read(path).map_err(identity_error)?;
-                Self::decode_file(&bytes)
-            }
-            Err(error) => Err(identity_error(error)),
+        let lock_path = append_suffix(path, ".lock");
+        let lock_file = open_identity_lock(&lock_path).map_err(identity_error)?;
+        File::lock(&lock_file).map_err(identity_error)?;
+
+        match fs::read(path) {
+            Ok(bytes) => return Self::decode_file(&bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(identity_error(error)),
         }
+
+        let identity = Self::generate()?;
+        let encoded = identity.encode_file()?;
+        let staging_path = append_suffix(path, ".new");
+        write_staged_identity(&staging_path, &encoded).map_err(identity_error)?;
+
+        if let Err(error) = fs::rename(&staging_path, path) {
+            let _ = fs::remove_file(&staging_path);
+            return Err(identity_error(error));
+        }
+
+        sync_parent_directory(path).map_err(identity_error)?;
+        Ok(identity)
     }
 
     pub const fn node_id(&self) -> NodeId {
@@ -176,7 +179,22 @@ impl QuicTransportIdentity {
     }
 }
 
-fn create_identity_file(path: &Path) -> io::Result<File> {
+fn open_identity_lock(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+fn write_staged_identity(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
 
@@ -186,7 +204,29 @@ fn create_identity_file(path: &Path) -> io::Result<File> {
         options.mode(0o600);
     }
 
-    options.open(path)
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = OsString::from(path.as_os_str());
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn peer_auth_message(channel_binding: &[u8; 32], role: PeerAuthRole) -> Vec<u8> {
@@ -204,7 +244,71 @@ fn identity_error(error: impl std::fmt::Display) -> NetworkError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    fn temp_identity_path(label: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "second-transport-{label}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after unix epoch")
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+
+    #[test]
+    fn persisted_identity_preserves_node_id_and_certificate_pin() {
+        let path = temp_identity_path("identity");
+
+        let first = QuicTransportIdentity::load_or_generate(&path).unwrap();
+        let node_id = first.node_id();
+        let certificate = first.certificate_der().to_vec();
+        drop(first);
+
+        let restored = QuicTransportIdentity::load_or_generate(&path).unwrap();
+        assert_eq!(restored.node_id(), node_id);
+        assert_eq!(restored.certificate_der(), certificate);
+
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(append_suffix(&path, ".lock")).unwrap();
+    }
+
+    #[test]
+    fn unpublished_staging_file_does_not_replace_or_block_identity_creation() {
+        let path = temp_identity_path("staging");
+        let staging_path = append_suffix(&path, ".new");
+        fs::write(&staging_path, b"partial unpublished identity").unwrap();
+
+        let identity = QuicTransportIdentity::load_or_generate(&path).unwrap();
+        let restored = QuicTransportIdentity::load_or_generate(&path).unwrap();
+        assert_eq!(restored.node_id(), identity.node_id());
+        assert_eq!(restored.certificate_der(), identity.certificate_der());
+        assert!(!staging_path.exists());
+
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(append_suffix(&path, ".lock")).unwrap();
+    }
+
+    #[test]
+    fn invalid_published_identity_fails_closed_without_rotation() {
+        let path = temp_identity_path("invalid");
+        fs::write(&path, b"corrupted published identity").unwrap();
+
+        assert!(matches!(
+            QuicTransportIdentity::load_or_generate(&path),
+            Err(NetworkError::InvalidTransportIdentity)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"corrupted published identity");
+
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(append_suffix(&path, ".lock")).unwrap();
+    }
 
     #[test]
     fn peer_authentication_is_bound_to_connection_and_role() {

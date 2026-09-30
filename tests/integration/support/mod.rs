@@ -300,9 +300,22 @@ pub fn transport_identity_path(base: &Path) -> PathBuf {
 }
 
 pub fn remove_transport_identity(base: &Path) {
-    match fs::remove_file(transport_identity_path(base)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => panic!("failed to remove transport identity: {error}"),
+    let identity = transport_identity_path(base);
+    for path in [
+        identity.clone(),
+        append_suffix(&identity, ".lock"),
+        append_suffix(&identity, ".new"),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to remove transport identity artifact: {error}"),
+        }
     }
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = OsString::from(path.as_os_str());
+    value.push(suffix);
+    PathBuf::from(value)
 }
