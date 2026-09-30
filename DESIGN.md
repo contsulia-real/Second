@@ -978,7 +978,7 @@ snapshot 中的 active PreparedTask 不能只满足字节格式正确：写入�
 
 所有持久 Validator vote-lock 的 `ValidatorId` 还必须存在于永久 `ValidatorRegistry` 历史中；已经 retired 的 Validator 仍可保留历史 lock，但从未被网络授权过的 ValidatorId 不能出现在 snapshot vote-lock 中。
 
-Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 authority 必须在同一 store 锁临界区绑定到 durable snapshot，而不是只信调用方传入的同版本对象：调用方提供的 `ValidatorSet` 必须与持久 `ValidatorRegistry` 的 current set 精确一致；PublicCheckpoint 的 summary 必须等于锁内最新 durable public Currency state；ValidatorSetTransition 的 next set 必须重新通过锁内最新永久 `ValidatorRegistry` history 校验。subject-specific 校验成功后才能持久化 vote-lock。已经存在的同 digest lock 仍允许确定性重放；同 scope 不同 digest 继续 fail-closed 为 double-sign conflict。
+Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 authority 必须在同一 store 锁临界区绑定到 durable snapshot，而不是只信调用方传入的同版本对象：调用方提供的 `ValidatorSet` 必须与持久 `ValidatorRegistry` 的 current set 精确一致；PublicCheckpoint 的 summary 必须等于锁内最新 durable public Currency state，且其 epoch 不得低于已持久化的 `checkpoint_floor_epoch`；ValidatorSetTransition 的 next set 必须重新通过锁内最新永久 `ValidatorRegistry` history 校验。subject-specific 校验成功后才能持久化 vote-lock。已经存在的同 digest lock 仍允许确定性重放；同 scope 不同 digest 继续 fail-closed 为 double-sign conflict。
 
 正式 LegalTask 状态写入还必须防止 stale writer 覆盖已经 durable 的更新。`PreparedTaskBook` 对包含 `SecondState` 与 PreparedTask 集合的 read-modify-write 使用语义 compare-and-swap：写入 candidate state 时，锁内最新 snapshot 的 `SecondState` 必须仍等于本次计算 candidate 所基于的 base state，并且 PreparedTask map 必须仍等于本地 book 所基于的旧 map；仅修改 PreparedTask lifecycle 时也必须以旧 map 做 compare-base。任一比较不成立都 fail-closed，调用方必须重新加载最新持久状态，不能自动把两份冻结计划或业务状态合并。
 

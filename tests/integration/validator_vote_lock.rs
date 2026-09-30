@@ -278,6 +278,51 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
 }
 
 #[test]
+fn public_checkpoint_signer_rejects_epoch_below_persisted_floor() {
+    let store = StateStore::new(temp_base("checkpoint-vote-floor"));
+    let set = validators();
+    let validator_id = ValidatorId::new(1);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    store.initialize(&state, &set).unwrap();
+
+    let trusted = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        42,
+        state.public_currency_summary(),
+    );
+    let statement = trusted.finality_statement(set.version());
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+    let certified =
+        second::CertifiedPublicCurrencyCheckpoint::new(trusted.clone(), votes, &set).unwrap();
+    store.advance_checkpoint_floor(&certified).unwrap();
+
+    let stale = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        41,
+        state.public_currency_summary(),
+    );
+    assert_eq!(
+        ValidatorSigner::new(validator_id, key(1), store.clone())
+            .sign_public_checkpoint(&stale, &set),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::StaleCheckpointEpoch {
+                minimum: 42,
+                actual: 41,
+            }
+        ))
+    );
+
+    ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_public_checkpoint(&trusted, &set)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn public_checkpoint_signer_rejects_summary_that_is_not_the_persisted_state() {
     let store = StateStore::new(temp_base("checkpoint-vote-state"));
     let set = validators();

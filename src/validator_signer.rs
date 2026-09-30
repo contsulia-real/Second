@@ -72,6 +72,12 @@ impl ValidatorSigner {
             validator_set,
             FinalityScope::PublicCheckpoint(checkpoint.epoch()),
             |latest| {
+                if checkpoint.epoch() < latest.checkpoint_floor_epoch {
+                    return Err(PersistenceError::StaleCheckpointEpoch {
+                        minimum: latest.checkpoint_floor_epoch,
+                        actual: checkpoint.epoch(),
+                    });
+                }
                 if checkpoint.summary() != &latest.state.public_currency_summary() {
                     return Err(PersistenceError::CheckpointDoesNotMatchState);
                 }
