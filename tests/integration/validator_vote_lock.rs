@@ -4,22 +4,64 @@ use support::FinalizedExecute as _;
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation,
     PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState, StateStore,
-    ValidatorCredential, ValidatorId, ValidatorSet, ValidatorSigner, ValidatorSigningError,
+    ValidatorAdmissionRequest, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorSetTransition, ValidatorSigner, ValidatorSigningError,
 };
 use support::{key, payment_address, register_payment_addresses, temp_base, verified_task};
 
+fn validator_credential(id: u64) -> ValidatorCredential {
+    ValidatorCredential::new(
+        ValidatorId::new(id),
+        key((id as u8).wrapping_add(40)).verifying_key().to_bytes(),
+        key(id as u8).verifying_key().to_bytes(),
+        key((id as u8).wrapping_add(80)).verifying_key().to_bytes(),
+    )
+    .unwrap()
+}
+
 fn validators() -> ValidatorSet {
-    ValidatorSet::new(
-        7,
-        (1..=4).map(|id| {
-            ValidatorCredential::new(
-                ValidatorId::new(id),
-                key((id as u8).wrapping_add(40)).verifying_key().to_bytes(),
-                key(id as u8).verifying_key().to_bytes(),
-                key((id as u8).wrapping_add(80)).verifying_key().to_bytes(),
-            )
-            .unwrap()
-        }),
+    ValidatorSet::new(7, (1..=4).map(validator_credential)).unwrap()
+}
+
+fn transition_with_candidate(
+    current: &ValidatorSet,
+    registry: &ValidatorRegistry,
+    candidate_id: u64,
+    key_seed: u8,
+) -> ValidatorSetTransition {
+    let identity_key = key(key_seed);
+    let consensus_key = key(key_seed.wrapping_add(1));
+    let recovery_key = key(key_seed.wrapping_add(2));
+    let credential = ValidatorCredential::new(
+        ValidatorId::new(candidate_id),
+        identity_key.verifying_key().to_bytes(),
+        consensus_key.verifying_key().to_bytes(),
+        recovery_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let admission = ValidatorAdmissionRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        credential.clone(),
+        &identity_key,
+        &consensus_key,
+        &recovery_key,
+    )
+    .unwrap()
+    .verify()
+    .unwrap();
+
+    let mut credentials = (1..=4).map(validator_credential).collect::<Vec<_>>();
+    credentials.push(credential);
+    let next = ValidatorSet::new(current.version() + 1, credentials).unwrap();
+
+    ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        20,
+        current,
+        registry,
+        next,
+        vec![admission],
+        Vec::new(),
     )
     .unwrap()
 }
@@ -235,6 +277,40 @@ fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() 
     let recovered = ValidatorSigner::new(validator_id, key(1), store.clone());
     assert!(matches!(
         recovered.sign_public_checkpoint(&conflicting, &set),
+        Err(ValidatorSigningError::VoteLocked {
+            validator_id: locked_validator,
+            ..
+        }) if locked_validator == validator_id
+    ));
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_next_set() {
+    let store = StateStore::new(temp_base("validator-transition-vote-lock"));
+    let set = validators();
+    let registry = ValidatorRegistry::from_validator_set(&set).unwrap();
+    let state = SecondState::genesis([], 1);
+    store.save(&state, &set).unwrap();
+
+    let first = transition_with_candidate(&set, &registry, 5, 100);
+    let conflicting = transition_with_candidate(&set, &registry, 6, 110);
+    let validator_id = ValidatorId::new(1);
+
+    let first_vote = ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_validator_set_transition(&first, &set)
+        .unwrap();
+
+    let recovered = ValidatorSigner::new(validator_id, key(1), store.clone());
+    assert_eq!(
+        recovered
+            .sign_validator_set_transition(&first, &set)
+            .unwrap(),
+        first_vote
+    );
+    assert!(matches!(
+        recovered.sign_validator_set_transition(&conflicting, &set),
         Err(ValidatorSigningError::VoteLocked {
             validator_id: locked_validator,
             ..
