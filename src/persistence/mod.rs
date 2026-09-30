@@ -1,4 +1,6 @@
 mod codec;
+#[cfg(test)]
+mod codec_tests;
 mod local_codec;
 mod slot;
 mod store;

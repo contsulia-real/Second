@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
-use crate::prepared_plan::PreparedTask;
+use crate::prepared_plan::{PreparedOperation, PreparedTask};
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
 use crate::validator_signer::FinalityScope;
 use crate::{
@@ -469,6 +469,12 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     };
 
     let (prepared_tasks, validator_vote_locks) = decode_local_state(&mut decoder)?;
+    validate_prepared_snapshot_links(
+        &task_bindings,
+        &payment_addresses,
+        &payment_executions,
+        &prepared_tasks,
+    )?;
 
     decoder.finish()?;
 
@@ -495,6 +501,66 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         prepared_tasks,
         validator_vote_locks,
     })
+}
+
+pub(super) fn validate_prepared_snapshot_links(
+    task_bindings: &BTreeMap<TaskId, TaskBinding>,
+    payment_addresses: &BTreeMap<PaymentAddress, PaymentAddressRecord>,
+    payment_executions: &BTreeMap<OperationClaimId, PaymentExecution>,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+) -> Result<(), PersistenceError> {
+    for (task_id, prepared) in prepared_tasks {
+        let binding = task_bindings
+            .get(task_id)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        if binding.succeeded || binding.request_digest != prepared.request_digest {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let mut expected_transfer_claims = BTreeSet::new();
+        for (index, operation) in prepared.operations.iter().enumerate() {
+            let operation_index =
+                u64::try_from(index).map_err(|_| PersistenceError::InvalidSnapshot)?;
+            let claim_id = OperationClaimId::new(task_id.clone(), operation_index);
+
+            if let PreparedOperation::Transfer { transfer, .. } = operation {
+                let source = payment_addresses
+                    .get(&transfer.source)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                let destination = payment_addresses
+                    .get(&transfer.destination)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                if source.account != transfer.source_account
+                    || destination.account != transfer.destination_account
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+
+                let execution = payment_executions
+                    .get(&claim_id)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                if !execution.matches(
+                    transfer.source,
+                    transfer.destination,
+                    transfer.amount,
+                    transfer.expires_at,
+                ) {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+                expected_transfer_claims.insert(claim_id);
+            }
+        }
+
+        if payment_executions
+            .keys()
+            .filter(|claim_id| claim_id.task_id() == task_id)
+            .any(|claim_id| !expected_transfer_claims.contains(claim_id))
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_checkpoint_attachment(
