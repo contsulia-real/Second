@@ -47,6 +47,32 @@ fn checkpoint_proof(
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
 }
 
+fn execute_in_store(
+    store: &StateStore,
+    state: &mut SecondState,
+    validator_set: &ValidatorSet,
+    task: &second::VerifiedLegalTask,
+    now: u64,
+) {
+    let mut book = second::PreparedTaskBook::new(store.clone()).unwrap();
+    assert_eq!(
+        book.prepare(state, task, now, validator_set).unwrap(),
+        second::PreparationOutcome::Prepared
+    );
+    let statement = book
+        .prepared_finality_statement(task.task_id(), validator_set)
+        .unwrap();
+    let certificate = support::certificate_from_keys(
+        statement,
+        validator_set,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key(id as u8))),
+    );
+    book.commit(state, task.task_id(), &certificate, validator_set)
+        .unwrap();
+}
+
 #[test]
 fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_it() {
     let base = temp_base("checkpoint-proof");
@@ -55,12 +81,8 @@ fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_
     let set = validators();
     let proof = checkpoint_proof(&state, &set, 42);
 
-    assert_eq!(
-        store
-            .save_with_checkpoint_proof(&state, &set, Some(&proof))
-            .unwrap(),
-        1
-    );
+    assert_eq!(store.initialize(&state, &set).unwrap(), 1);
+    assert_eq!(store.attach_checkpoint_proof(Some(&proof)).unwrap(), 2);
 
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.public_checkpoint_proof, Some(proof.clone()));
@@ -92,11 +114,17 @@ fn snapshot_refuses_checkpoint_proof_for_a_different_public_state() {
     let set = validators();
     let proof = checkpoint_proof(&other_state, &set, 1);
 
+    store.initialize(&state, &set).unwrap();
     assert_eq!(
-        store.save_with_checkpoint_proof(&state, &set, Some(&proof)),
+        store.attach_checkpoint_proof(Some(&proof)),
         Err(second::PersistenceError::CheckpointDoesNotMatchState)
     );
-    assert!(store.load().unwrap().is_none());
+    let restored = store.load().unwrap().unwrap();
+    assert!(restored.public_checkpoint_proof.is_none());
+    assert_eq!(
+        restored.state.public_currency_summary(),
+        state.public_currency_summary()
+    );
 }
 
 #[test]
@@ -112,14 +140,17 @@ fn snapshot_refuses_checkpoint_proof_for_a_different_validator_set_version() {
         valid.votes().to_vec(),
     );
 
+    store.initialize(&state, &set).unwrap();
     assert_eq!(
-        store.save_with_checkpoint_proof(&state, &set, Some(&proof)),
+        store.attach_checkpoint_proof(Some(&proof)),
         Err(second::PersistenceError::CheckpointValidatorSetMismatch {
             expected: set.version(),
             actual: set.version() + 1,
         })
     );
-    assert!(store.load().unwrap().is_none());
+    let restored = store.load().unwrap().unwrap();
+    assert!(restored.public_checkpoint_proof.is_none());
+    assert_eq!(restored.validator_set, set);
 }
 
 #[test]
@@ -140,9 +171,8 @@ fn snapshot_checksum_does_not_turn_an_invalid_signature_into_a_certified_checkpo
         ],
     );
 
-    store
-        .save_with_checkpoint_proof(&state, &set, Some(&proof))
-        .unwrap();
+    store.initialize(&state, &set).unwrap();
+    store.attach_checkpoint_proof(Some(&proof)).unwrap();
 
     let restored = store.load().unwrap().unwrap();
     let view = second::PublicCurrencyView::new(
@@ -185,27 +215,21 @@ fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoin
     let certified =
         second::CertifiedPublicCurrencyCheckpoint::new(checkpoint, votes, &set).unwrap();
 
-    store
-        .save_with_certified_checkpoint(&state, &set, &certified)
-        .unwrap();
+    store.initialize(&state, &set).unwrap();
+    store.attach_certified_checkpoint(&certified).unwrap();
 
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.checkpoint_floor_epoch, 42);
     assert!(restored.public_checkpoint_proof.is_some());
 
-    state
-        .execute_finalized(
-            &verified_task(
-                1,
-                vec![Operation::Issue {
-                    account: alice,
-                    count: 1,
-                }],
-            ),
-            1,
-        )
-        .unwrap();
-    store.save(&state, &set).unwrap();
+    let issue = verified_task(
+        1,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    execute_in_store(&store, &mut state, &set, &issue, 1);
 
     let advanced = store.load().unwrap().unwrap();
     assert_eq!(advanced.checkpoint_floor_epoch, 42);
@@ -225,7 +249,7 @@ fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoin
         .unwrap();
 
     assert_eq!(
-        store.save_with_certified_checkpoint(&state, &set, &stale),
+        store.attach_certified_checkpoint(&stale),
         Err(second::PersistenceError::StaleCheckpointEpoch {
             minimum: 42,
             actual: 41,
@@ -234,7 +258,7 @@ fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoin
 
     let stale_unverified = stale.to_unverified_proof();
     assert_eq!(
-        store.save_with_checkpoint_proof(&state, &set, Some(&stale_unverified)),
+        store.attach_checkpoint_proof(Some(&stale_unverified)),
         Err(second::PersistenceError::StaleCheckpointEpoch {
             minimum: 42,
             actual: 41,
@@ -276,7 +300,7 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     );
     state.execute_finalized(&transfer, 2).unwrap();
 
-    let generation = store.save(&state, &validators()).unwrap();
+    let generation = store.initialize(&state, &validators()).unwrap();
     assert_eq!(generation, 1);
 
     let PersistedNodeState {
@@ -314,7 +338,7 @@ fn newer_snapshot_wins_and_generation_increments() {
     let mut state = SecondState::genesis([alice], 1);
     let set = validators();
 
-    assert_eq!(store.save(&state, &set).unwrap(), 1);
+    assert_eq!(store.initialize(&state, &set).unwrap(), 1);
 
     let issue = verified_task(
         1,
@@ -323,12 +347,10 @@ fn newer_snapshot_wins_and_generation_increments() {
             count: 1,
         }],
     );
-    state.execute_finalized(&issue, 1).unwrap();
-
-    assert_eq!(store.save(&state, &set).unwrap(), 2);
+    execute_in_store(&store, &mut state, &set, &issue, 1);
 
     let restored = store.load().unwrap().unwrap();
-    assert_eq!(restored.generation, 2);
+    assert_eq!(restored.generation, 4);
     assert_eq!(restored.state.balance(alice), 1);
 
     store.remove_files().unwrap();
@@ -338,34 +360,21 @@ fn newer_snapshot_wins_and_generation_increments() {
 fn durable_primary_commit_survives_mirror_write_failure() {
     let base = temp_base("mirror-write-failure");
     let store = StateStore::new(&base);
-    let alice = support::account(1);
-    let mut state = SecondState::genesis([alice], 1);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     let set = validators();
+    let proof = checkpoint_proof(&state, &set, 1);
 
-    assert_eq!(store.save(&state, &set).unwrap(), 1);
+    assert_eq!(store.initialize(&state, &set).unwrap(), 1);
 
     let blocked_mirror = store.slot_path_for_generation(1);
     fs::remove_file(&blocked_mirror).unwrap();
     fs::create_dir(&blocked_mirror).unwrap();
 
-    state
-        .execute_finalized(
-            &verified_task(
-                1,
-                vec![Operation::Issue {
-                    account: alice,
-                    count: 1,
-                }],
-            ),
-            1,
-        )
-        .unwrap();
-
-    assert_eq!(store.save(&state, &set).unwrap(), 2);
+    assert_eq!(store.attach_checkpoint_proof(Some(&proof)).unwrap(), 2);
 
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.generation, 2);
-    assert_eq!(restored.state.balance(alice), 1);
+    assert_eq!(restored.public_checkpoint_proof, Some(proof));
 
     fs::remove_dir(&blocked_mirror).unwrap();
     store.remove_files().unwrap();
@@ -376,28 +385,19 @@ fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
     let base = temp_base("fallback");
     let store = StateStore::new(&base);
 
-    let alice = support::account(1);
-    let mut state = SecondState::genesis([alice], 1);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     let set = validators();
+    let proof = checkpoint_proof(&state, &set, 1);
 
-    assert_eq!(store.save(&state, &set).unwrap(), 1);
-
-    let issue = verified_task(
-        1,
-        vec![Operation::Issue {
-            account: alice,
-            count: 1,
-        }],
-    );
-    state.execute_finalized(&issue, 1).unwrap();
-    assert_eq!(store.save(&state, &set).unwrap(), 2);
+    assert_eq!(store.initialize(&state, &set).unwrap(), 1);
+    assert_eq!(store.attach_checkpoint_proof(Some(&proof)).unwrap(), 2);
 
     let newest = store.slot_path_for_generation(2);
     fs::write(&newest, b"corrupted").unwrap();
 
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.generation, 2);
-    assert_eq!(restored.state.balance(alice), 1);
+    assert_eq!(restored.public_checkpoint_proof, Some(proof));
 
     store.remove_files().unwrap();
 }
@@ -412,7 +412,7 @@ fn same_generation_with_different_valid_contents_is_rejected() {
     let set = validators();
 
     let first_state = SecondState::genesis([alice], 1);
-    first_store.save(&first_state, &set).unwrap();
+    first_store.initialize(&first_state, &set).unwrap();
 
     let mut second_state = SecondState::genesis([alice], 1);
     second_state
@@ -427,7 +427,7 @@ fn same_generation_with_different_valid_contents_is_rejected() {
             1,
         )
         .unwrap();
-    second_store.save(&second_state, &set).unwrap();
+    second_store.initialize(&second_state, &set).unwrap();
 
     let divergent = fs::read(second_store.slot_path_for_generation(1)).unwrap();
     fs::write(first_store.slot_path_for_generation(2), divergent).unwrap();
@@ -442,6 +442,40 @@ fn same_generation_with_different_valid_contents_is_rejected() {
 }
 
 #[test]
+fn initialized_store_rejects_arbitrary_state_replacement() {
+    let base = temp_base("no-state-replacement");
+    let store = StateStore::new(&base);
+    let alice = support::account(1);
+    let set = validators();
+    let initial = SecondState::genesis([alice], 1);
+    let mut replacement = initial.clone();
+    replacement
+        .execute_finalized(
+            &verified_task(
+                1,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+
+    store.initialize(&initial, &set).unwrap();
+    assert_eq!(
+        store.initialize(&replacement, &set),
+        Err(second::PersistenceError::AlreadyInitialized)
+    );
+
+    let restored = store.load().unwrap().unwrap();
+    assert_eq!(restored.state.balance(alice), 0);
+    assert_eq!(restored.state.next_currency_address(), 1);
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn no_snapshot_returns_none_instead_of_inventing_state() {
     let base = temp_base("empty");
     let store = StateStore::new(&base);
@@ -450,24 +484,16 @@ fn no_snapshot_returns_none_instead_of_inventing_state() {
 }
 
 #[test]
-fn two_corrupted_slots_are_reported_and_save_refuses_to_reset_state() {
+fn two_corrupted_slots_are_reported_and_initialize_refuses_to_reset_state() {
     let base = temp_base("double-corruption");
     let store = StateStore::new(&base);
 
-    let alice = support::account(1);
-    let mut state = SecondState::genesis([alice], 1);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     let set = validators();
+    let proof = checkpoint_proof(&state, &set, 1);
 
-    store.save(&state, &set).unwrap();
-    let issue = verified_task(
-        1,
-        vec![Operation::Issue {
-            account: alice,
-            count: 1,
-        }],
-    );
-    state.execute_finalized(&issue, 1).unwrap();
-    store.save(&state, &set).unwrap();
+    store.initialize(&state, &set).unwrap();
+    store.attach_checkpoint_proof(Some(&proof)).unwrap();
 
     fs::write(store.slot_path_for_generation(1), b"broken-a").unwrap();
     fs::write(store.slot_path_for_generation(2), b"broken-b").unwrap();
@@ -477,7 +503,7 @@ fn two_corrupted_slots_are_reported_and_save_refuses_to_reset_state() {
         Err(second::PersistenceError::NoValidSnapshot)
     ));
     assert_eq!(
-        store.save(&state, &set),
+        store.initialize(&state, &set),
         Err(second::PersistenceError::NoValidSnapshot)
     );
 

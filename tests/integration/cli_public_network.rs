@@ -77,12 +77,13 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let set = validators();
     let proof = checkpoint_proof(&state, &set, 77);
 
-    server_store
-        .save_with_checkpoint_proof(&state, &set, Some(&proof))
-        .unwrap();
+    server_store.initialize(&state, &set).unwrap();
+    server_store.attach_checkpoint_proof(Some(&proof)).unwrap();
 
     let unrelated_trust_state = SecondState::genesis([], 999);
-    trust_store.save(&unrelated_trust_state, &set).unwrap();
+    trust_store
+        .initialize(&unrelated_trust_state, &set)
+        .unwrap();
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
@@ -152,7 +153,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     let base = temp_base("sync");
     let store = StateStore::new(&base);
     let state = SecondState::genesis([], 10).with_reserve(600).unwrap();
-    store.save(&state, &validators()).unwrap();
+    store.initialize(&state, &validators()).unwrap();
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
@@ -222,7 +223,7 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
             1,
         )
         .unwrap();
-    store.save(&state, &validators()).unwrap();
+    store.initialize(&state, &validators()).unwrap();
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)

@@ -258,7 +258,7 @@ fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() 
     let validator_id = ValidatorId::new(1);
     let first_state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     let second_state = SecondState::genesis([], 1).with_reserve(2).unwrap();
-    store.save(&first_state, &set).unwrap();
+    store.initialize(&first_state, &set).unwrap();
     let first = PublicCurrencyCheckpoint::new(
         CURRENT_PROTOCOL_VERSION,
         10,
@@ -292,7 +292,7 @@ fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_ne
     let set = validators();
     let registry = ValidatorRegistry::from_validator_set(&set).unwrap();
     let state = SecondState::genesis([], 1);
-    store.save(&state, &set).unwrap();
+    store.initialize(&state, &set).unwrap();
 
     let first = transition_with_candidate(&set, &registry, 5, 100);
     let conflicting = transition_with_candidate(&set, &registry, 6, 110);

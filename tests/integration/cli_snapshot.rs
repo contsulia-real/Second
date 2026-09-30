@@ -59,7 +59,9 @@ fn state_with_issue() -> SecondState {
 fn snapshot_status_reports_only_public_safe_summary() {
     let base = temp_base("status");
     let store = StateStore::new(&base);
-    store.save(&state_with_issue(), &validators()).unwrap();
+    store
+        .initialize(&state_with_issue(), &validators())
+        .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_second"))
         .arg("snapshot-status")
@@ -90,7 +92,9 @@ fn snapshot_status_reports_only_public_safe_summary() {
 fn snapshot_status_refuses_corrupted_state_instead_of_starting_fresh() {
     let base = temp_base("corrupt");
     let store = StateStore::new(&base);
-    store.save(&state_with_issue(), &validators()).unwrap();
+    store
+        .initialize(&state_with_issue(), &validators())
+        .unwrap();
 
     fs::write(store.slot_path_for_generation(1), b"broken-a").unwrap();
     fs::write(store.slot_path_for_generation(2), b"broken-b").unwrap();

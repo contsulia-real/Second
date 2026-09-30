@@ -11,7 +11,7 @@ async fn runtime_keeps_only_one_active_connection_per_authenticated_node_id() {
     let store = StateStore::new(&base);
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     store
-        .save(&state, &support::validator_set(1, 1..=4))
+        .initialize(&state, &support::validator_set(1, 1..=4))
         .unwrap();
 
     let runtime =

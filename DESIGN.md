@@ -980,6 +980,8 @@ snapshot 中的 active PreparedTask 不能只满足字节格式正确：写入�
 
 这里不使用 snapshot `generation` 作为业务 CAS token，因为 vote-lock、checkpoint floor 等独立持久元数据也会合法推进 generation；这些元数据更新不应无故让未冲突的 LegalTask writer 失败。store 锁负责原子检查+写入，语义 base-state / base-prepared 比较负责防 lost update。
 
+`StateStore` 本身不是资产或协议状态 mutation API。空 store 可以通过 `initialize` 一次性写入 bootstrap state；需要携带既有 ValidatorRegistry 历史时使用同样仅限空 store 的初始化入口。初始化完成后，不再提供接受任意 `SecondState` 并覆盖当前 snapshot 的公开 writer。checkpoint proof / checkpoint floor 更新只作用于锁内读取到的最新 snapshot metadata，不接受调用方附带另一份 state。后续 LegalTask 导致的 `SecondState` 演进只能由正式 `PreparedTaskBook` 的 prepare / finality / commit 持久化路径完成。
+
 ---
 
 ## 18. 当前模块边界

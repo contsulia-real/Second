@@ -46,107 +46,116 @@ impl StateStore {
         &self.base_path
     }
 
-    pub fn save(
+    pub fn initialize(
         &self,
         state: &SecondState,
         validator_set: &ValidatorSet,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
-        let latest = self.load_unlocked()?;
-        let registry = registry_for_write(latest.as_ref(), validator_set)?;
-        let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), None)?;
-        let checkpoint = latest
-            .as_ref()
-            .and_then(|snapshot| snapshot.public_checkpoint_proof.clone())
-            .filter(|proof| checkpoint_matches(proof, state, validator_set));
-        let prepared_tasks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.prepared_tasks.clone())
-            .unwrap_or_default();
-        let vote_locks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.validator_vote_locks.clone())
-            .unwrap_or_default();
+        if self.load_unlocked()?.is_some() {
+            return Err(PersistenceError::AlreadyInitialized);
+        }
+
+        let validator_registry = ValidatorRegistry::from_validator_set(validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        let prepared_tasks = BTreeMap::new();
+        let validator_vote_locks = BTreeMap::new();
 
         self.write_next_unlocked(
-            latest.as_ref().map(|snapshot| snapshot.generation),
+            None,
             SnapshotContents {
                 state,
                 validator_set,
-                public_checkpoint_proof: checkpoint.as_ref(),
-                checkpoint_floor_epoch,
-                validator_registry: &registry,
+                public_checkpoint_proof: None,
+                checkpoint_floor_epoch: 0,
+                validator_registry: &validator_registry,
                 prepared_tasks: &prepared_tasks,
-                validator_vote_locks: &vote_locks,
+                validator_vote_locks: &validator_vote_locks,
             },
         )
     }
 
-    pub fn save_with_checkpoint_proof(
+    pub fn initialize_with_validator_registry(
         &self,
         state: &SecondState,
         validator_set: &ValidatorSet,
+        validator_registry: &ValidatorRegistry,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        if self.load_unlocked()?.is_some() {
+            return Err(PersistenceError::AlreadyInitialized);
+        }
+
+        validator_registry
+            .validate_current_set(validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        let prepared_tasks = BTreeMap::new();
+        let validator_vote_locks = BTreeMap::new();
+
+        self.write_next_unlocked(
+            None,
+            SnapshotContents {
+                state,
+                validator_set,
+                public_checkpoint_proof: None,
+                checkpoint_floor_epoch: 0,
+                validator_registry,
+                prepared_tasks: &prepared_tasks,
+                validator_vote_locks: &validator_vote_locks,
+            },
+        )
+    }
+
+    pub fn attach_checkpoint_proof(
+        &self,
         public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
-        let latest = self.load_unlocked()?;
-        let registry = registry_for_write(latest.as_ref(), validator_set)?;
-        let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), None)?;
-        let prepared_tasks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.prepared_tasks.clone())
-            .unwrap_or_default();
-        let vote_locks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.validator_vote_locks.clone())
-            .unwrap_or_default();
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
 
         self.write_next_unlocked(
-            latest.as_ref().map(|snapshot| snapshot.generation),
+            Some(latest.generation),
             SnapshotContents {
-                state,
-                validator_set,
+                state: &latest.state,
+                validator_set: &latest.validator_set,
                 public_checkpoint_proof,
-                checkpoint_floor_epoch,
-                validator_registry: &registry,
-                prepared_tasks: &prepared_tasks,
-                validator_vote_locks: &vote_locks,
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
             },
         )
     }
 
-    pub fn save_with_certified_checkpoint(
+    pub fn attach_certified_checkpoint(
         &self,
-        state: &SecondState,
-        validator_set: &ValidatorSet,
         certified_checkpoint: &CertifiedPublicCurrencyCheckpoint,
     ) -> Result<u64, PersistenceError> {
-        let proof = certified_checkpoint.to_unverified_proof();
-        validate_certified_checkpoint_for_state(state, validator_set, certified_checkpoint)?;
-
         let _guard = self.lock()?;
-        let latest = self.load_unlocked()?;
-        let registry = registry_for_write(latest.as_ref(), validator_set)?;
-        let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), Some(&proof))?;
-        let prepared_tasks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.prepared_tasks.clone())
-            .unwrap_or_default();
-        let vote_locks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.validator_vote_locks.clone())
-            .unwrap_or_default();
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        validate_certified_checkpoint_for_state(
+            &latest.state,
+            &latest.validator_set,
+            certified_checkpoint,
+        )?;
+        let proof = certified_checkpoint.to_unverified_proof();
+        let checkpoint_floor_epoch = checkpoint_floor_for_write(Some(&latest), Some(&proof))?;
 
         self.write_next_unlocked(
-            latest.as_ref().map(|snapshot| snapshot.generation),
+            Some(latest.generation),
             SnapshotContents {
-                state,
-                validator_set,
+                state: &latest.state,
+                validator_set: &latest.validator_set,
                 public_checkpoint_proof: Some(&proof),
                 checkpoint_floor_epoch,
-                validator_registry: &registry,
-                prepared_tasks: &prepared_tasks,
-                validator_vote_locks: &vote_locks,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
             },
         )
     }
@@ -178,43 +187,6 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
-            },
-        )
-    }
-
-    pub fn save_with_validator_registry(
-        &self,
-        state: &SecondState,
-        validator_set: &ValidatorSet,
-        validator_registry: &ValidatorRegistry,
-    ) -> Result<u64, PersistenceError> {
-        let _guard = self.lock()?;
-        let latest = self.load_unlocked()?;
-        validate_registry_history_for_write(latest.as_ref(), validator_set, validator_registry)?;
-        let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), None)?;
-        let checkpoint = latest
-            .as_ref()
-            .and_then(|snapshot| snapshot.public_checkpoint_proof.clone())
-            .filter(|proof| checkpoint_matches(proof, state, validator_set));
-        let prepared_tasks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.prepared_tasks.clone())
-            .unwrap_or_default();
-        let vote_locks = latest
-            .as_ref()
-            .map(|snapshot| snapshot.validator_vote_locks.clone())
-            .unwrap_or_default();
-
-        self.write_next_unlocked(
-            latest.as_ref().map(|snapshot| snapshot.generation),
-            SnapshotContents {
-                state,
-                validator_set,
-                public_checkpoint_proof: checkpoint.as_ref(),
-                checkpoint_floor_epoch,
-                validator_registry,
-                prepared_tasks: &prepared_tasks,
-                validator_vote_locks: &vote_locks,
             },
         )
     }
@@ -398,36 +370,6 @@ impl StateStore {
         write_slots(&self.base_path, generation, &bytes)?;
         Ok(generation)
     }
-}
-
-fn validate_registry_history_for_write(
-    latest: Option<&PersistedNodeState>,
-    validator_set: &ValidatorSet,
-    validator_registry: &ValidatorRegistry,
-) -> Result<(), PersistenceError> {
-    let Some(latest) = latest else {
-        return validator_registry
-            .validate_current_set(validator_set)
-            .map_err(|_| PersistenceError::ValidatorRegistryMismatch);
-    };
-
-    if validator_set.version() == latest.validator_set.version() {
-        if validator_registry == &latest.validator_registry {
-            return Ok(());
-        }
-        return Err(PersistenceError::ValidatorRegistryMismatch);
-    }
-
-    let mut expected = latest.validator_registry.clone();
-    expected
-        .apply_next_set(validator_set)
-        .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
-
-    if &expected != validator_registry {
-        return Err(PersistenceError::ValidatorRegistryMismatch);
-    }
-
-    Ok(())
 }
 
 fn registry_for_write(

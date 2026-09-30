@@ -89,7 +89,7 @@ fn retired_identity_history_survives_snapshot_restart() {
     let store = StateStore::new(temp_base("validator-registry"));
     let state = SecondState::genesis([], 1);
     store
-        .save_with_validator_registry(&state, &without_four, &registry)
+        .initialize_with_validator_registry(&state, &without_four, &registry)
         .unwrap();
 
     let restored = store.load().unwrap().unwrap();
@@ -110,12 +110,6 @@ fn retired_identity_history_survives_snapshot_restart() {
         Err(ValidatorRegistryError::ValidatorIdAlreadyUsed(
             ValidatorId::new(4)
         ))
-    );
-
-    let forgotten = ValidatorRegistry::from_validator_set(&restored.validator_set).unwrap();
-    assert_eq!(
-        store.save_with_validator_registry(&restored.state, &restored.validator_set, &forgotten,),
-        Err(second::PersistenceError::ValidatorRegistryMismatch)
     );
 
     store.remove_files().unwrap();

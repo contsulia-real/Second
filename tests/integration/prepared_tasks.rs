@@ -630,7 +630,7 @@ fn stale_book_cannot_cancel_task_after_another_book_begins_voting() {
     let store = StateStore::new(temp_base("stale-cancel-voting"));
     let set = validators();
     let mut state = SecondState::genesis([alice], 1);
-    store.save(&state, &set).unwrap();
+    store.initialize(&state, &set).unwrap();
 
     let task = verified_task(
         900,
@@ -670,7 +670,7 @@ fn stale_preparer_cannot_overwrite_newer_finalized_state() {
     let store = StateStore::new(temp_base("stale-finalized-state"));
     let set = validators();
     let initial = SecondState::genesis([alice], 1);
-    store.save(&initial, &set).unwrap();
+    store.initialize(&initial, &set).unwrap();
 
     let mut first_state = initial.clone();
     let mut stale_state = initial;
