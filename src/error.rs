@@ -83,6 +83,8 @@ pub enum PersistenceError {
     NoValidSnapshot,
     MissingSnapshot,
     StoreLockPoisoned,
+    StaleState,
+    StalePreparedTasks,
     ValidatorRegistryMismatch,
     GenerationOverflow,
     ConflictingSnapshotGeneration(u64),

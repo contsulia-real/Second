@@ -972,6 +972,10 @@ Second 不默认要求：
 
 不能因进程重启让“永久事实”消失或让 Validator 获得改票机会。
 
+正式 LegalTask 状态写入还必须防止 stale writer 覆盖已经 durable 的更新。`PreparedTaskBook` 对包含 `SecondState` 与 PreparedTask 集合的 read-modify-write 使用语义 compare-and-swap：写入 candidate state 时，锁内最新 snapshot 的 `SecondState` 必须仍等于本次计算 candidate 所基于的 base state，并且 PreparedTask map 必须仍等于本地 book 所基于的旧 map；仅修改 PreparedTask lifecycle 时也必须以旧 map 做 compare-base。任一比较不成立都 fail-closed，调用方必须重新加载最新持久状态，不能自动把两份冻结计划或业务状态合并。
+
+这里不使用 snapshot `generation` 作为业务 CAS token，因为 vote-lock、checkpoint floor 等独立持久元数据也会合法推进 generation；这些元数据更新不应无故让未冲突的 LegalTask writer 失败。store 锁负责原子检查+写入，语义 base-state / base-prepared 比较负责防 lost update。
+
 ---
 
 ## 18. 当前模块边界

@@ -13,13 +13,13 @@ pub enum ExecutionOutcome {
     AlreadySucceeded,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskBinding {
     pub(crate) request_digest: [u8; 32],
     pub(crate) succeeded: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProtocolState {
     pub(crate) next_currency_address: u64,
     pub(crate) task_bindings: BTreeMap<TaskId, TaskBinding>,
@@ -30,7 +30,7 @@ pub(crate) struct PrerequisiteState {
     pub(crate) payment_executions: BTreeMap<OperationClaimId, PaymentExecution>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BusinessState {
     pub(crate) accounts: BTreeSet<AccountAddress>,
     pub(crate) payment_addresses: BTreeMap<PaymentAddress, PaymentAddressRecord>,
@@ -45,6 +45,12 @@ pub struct SecondState {
 }
 
 impl SecondState {
+    pub(crate) fn same_persisted_state(&self, other: &Self) -> bool {
+        self.protocol == other.protocol
+            && self.prerequisite == other.prerequisite
+            && self.business == other.business
+    }
+
     pub fn genesis<I>(accounts: I, first_currency_address: u64) -> Self
     where
         I: IntoIterator<Item = AccountAddress>,

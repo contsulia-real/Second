@@ -4,8 +4,8 @@ use support::FinalizedExecute as _;
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, ExecutionError,
     ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
-    PreparationError, PreparationOutcome, PreparedTaskBook, SecondState, StateStore, TaskId,
-    ValidatorId, ValidatorSet,
+    PersistenceError, PreparationError, PreparationOutcome, PreparedTaskBook, SecondState,
+    StateStore, TaskId, ValidatorId, ValidatorSet,
 };
 use support::{
     FinalityHarness, certificate_from_keys, key, payment_address, register_payment_addresses,
@@ -622,4 +622,96 @@ fn destroy_and_leak_repair_targets_are_claimed_during_preparation() {
             }
         ))
     );
+}
+
+#[test]
+fn stale_book_cannot_cancel_task_after_another_book_begins_voting() {
+    let alice = support::account(1);
+    let store = StateStore::new(temp_base("stale-cancel-voting"));
+    let set = validators();
+    let mut state = SecondState::genesis([alice], 1);
+    store.save(&state, &set).unwrap();
+
+    let task = verified_task(
+        900,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    let mut original = PreparedTaskBook::new(store.clone()).unwrap();
+    original.prepare(&mut state, &task, 1, &set).unwrap();
+
+    let mut stale = PreparedTaskBook::new(store.clone()).unwrap();
+    let mut voting = PreparedTaskBook::new(store.clone()).unwrap();
+    voting
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4), &set)
+        .unwrap();
+
+    assert_eq!(
+        stale.cancel(task.task_id()),
+        Err(PreparationError::Persistence(
+            PersistenceError::StalePreparedTasks
+        ))
+    );
+
+    let mut recovered = PreparedTaskBook::new(store.clone()).unwrap();
+    assert_eq!(
+        recovered.cancel(task.task_id()),
+        Err(PreparationError::CancellationClosed(task.task_id()))
+    );
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn stale_preparer_cannot_overwrite_newer_finalized_state() {
+    let alice = support::account(1);
+    let store = StateStore::new(temp_base("stale-finalized-state"));
+    let set = validators();
+    let initial = SecondState::genesis([alice], 1);
+    store.save(&initial, &set).unwrap();
+
+    let mut first_state = initial.clone();
+    let mut stale_state = initial;
+    let mut first = PreparedTaskBook::new(store.clone()).unwrap();
+    let mut stale = PreparedTaskBook::new(store.clone()).unwrap();
+
+    let first_task = verified_task(
+        901,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    first
+        .prepare(&mut first_state, &first_task, 1, &set)
+        .unwrap();
+    let certificate = certify(&first, first_task.task_id(), &set);
+    assert_eq!(
+        first
+            .commit(&mut first_state, first_task.task_id(), &certificate, &set)
+            .unwrap(),
+        ExecutionOutcome::Succeeded
+    );
+
+    let stale_task = verified_task(
+        902,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        stale.prepare(&mut stale_state, &stale_task, 1, &set),
+        Err(PreparationError::Persistence(PersistenceError::StaleState))
+    );
+
+    let restored = store.load().unwrap().unwrap();
+    assert_eq!(restored.state.balance(alice), 1);
+    assert_eq!(restored.state.next_currency_address(), 2);
+    assert_eq!(stale_state.balance(alice), 0);
+    assert_eq!(stale_state.next_currency_address(), 1);
+
+    store.remove_files().unwrap();
 }

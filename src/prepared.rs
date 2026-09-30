@@ -121,17 +121,21 @@ impl PreparedTaskBook {
         match result {
             Ok(BuildOutcome::AlreadySucceeded) => Ok(PreparationOutcome::AlreadySucceeded),
             Ok(BuildOutcome::Prepared(prepared)) => {
-                self.tasks.insert(task.task_id(), prepared);
+                let mut updated_tasks = self.tasks.clone();
+                updated_tasks.insert(task.task_id(), prepared);
 
-                if let Err(error) =
-                    self.store
-                        .save_with_prepared(&candidate, validator_set, &self.tasks)
-                {
-                    self.tasks.remove(&task.task_id());
+                if let Err(error) = self.store.save_with_prepared(
+                    state,
+                    &candidate,
+                    validator_set,
+                    &self.tasks,
+                    &updated_tasks,
+                ) {
                     self.claims.release_task(task.task_id());
                     return Err(error.into());
                 }
 
+                self.tasks = updated_tasks;
                 *state = candidate;
                 Ok(PreparationOutcome::Prepared)
             }
@@ -139,8 +143,13 @@ impl PreparedTaskBook {
                 self.claims.release_task(task.task_id());
 
                 if protocol_changed || durable_prerequisite_changed {
-                    self.store
-                        .save_with_prepared(&candidate, validator_set, &self.tasks)?;
+                    self.store.save_with_prepared(
+                        state,
+                        &candidate,
+                        validator_set,
+                        &self.tasks,
+                        &self.tasks,
+                    )?;
                     *state = candidate;
                 }
 
@@ -184,12 +193,17 @@ impl PreparedTaskBook {
 
         match outcome {
             ExecutionOutcome::Succeeded => {
-                self.store
-                    .save_with_prepared(&candidate, validator_set, &remaining)?;
+                self.store.save_with_prepared(
+                    state,
+                    &candidate,
+                    validator_set,
+                    &self.tasks,
+                    &remaining,
+                )?;
                 *state = candidate;
             }
             ExecutionOutcome::AlreadySucceeded => {
-                self.store.replace_prepared_tasks(&remaining)?;
+                self.store.replace_prepared_tasks(&self.tasks, &remaining)?;
             }
         }
 
@@ -290,7 +304,7 @@ impl PreparedTaskBook {
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?
             .advance_phase(phase);
 
-        self.store.replace_prepared_tasks(&updated)?;
+        self.store.replace_prepared_tasks(&self.tasks, &updated)?;
         self.tasks = updated;
         Ok(())
     }
@@ -301,7 +315,7 @@ impl PreparedTaskBook {
             return Err(PreparationError::NotPrepared(task_id));
         }
 
-        self.store.replace_prepared_tasks(&remaining)?;
+        self.store.replace_prepared_tasks(&self.tasks, &remaining)?;
         self.tasks = remaining;
         self.claims.release_task(task_id);
         Ok(())

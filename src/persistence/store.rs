@@ -221,12 +221,24 @@ impl StateStore {
 
     pub(crate) fn save_with_prepared(
         &self,
+        expected_state: &SecondState,
         state: &SecondState,
         validator_set: &ValidatorSet,
+        expected_prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
         prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self.load_unlocked()?;
+
+        if let Some(snapshot) = latest.as_ref() {
+            if !snapshot.state.same_persisted_state(expected_state) {
+                return Err(PersistenceError::StaleState);
+            }
+            if &snapshot.prepared_tasks != expected_prepared_tasks {
+                return Err(PersistenceError::StalePreparedTasks);
+            }
+        }
+
         let registry = registry_for_write(latest.as_ref(), validator_set)?;
         let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), None)?;
         let checkpoint = latest
@@ -254,12 +266,17 @@ impl StateStore {
 
     pub(crate) fn replace_prepared_tasks(
         &self,
+        expected_prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
         prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
+
+        if &latest.prepared_tasks != expected_prepared_tasks {
+            return Err(PersistenceError::StalePreparedTasks);
+        }
 
         self.write_next_unlocked(
             Some(latest.generation),
