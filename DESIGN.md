@@ -972,6 +972,8 @@ Second 不默认要求：
 
 不能因进程重启让“永久事实”消失或让 Validator 获得改票机会。
 
+snapshot 中的 active PreparedTask 不能只满足字节格式正确：写入与恢复都必须验证 frozen plan 与 durable `SecondState` 的跨字段一致性。校验复用正式 `PreparedTask::apply()` / claim restore 语义，不在 persistence 层复制一套执行规则；Transfer 的 frozen Currency 数量必须等于 frozen amount，Issue / LeakRepair 的预分配 Currency identity 必须已经落在持久 allocator frontier 之下，并且 active prepared plans 之间不能重复占用同一预分配 identity 或产生互相冲突的 Currency claims。任何不可按当前 durable prerequisite/business state 验证的 active frozen plan 都视为无效 snapshot。
+
 正式 LegalTask 状态写入还必须防止 stale writer 覆盖已经 durable 的更新。`PreparedTaskBook` 对包含 `SecondState` 与 PreparedTask 集合的 read-modify-write 使用语义 compare-and-swap：写入 candidate state 时，锁内最新 snapshot 的 `SecondState` 必须仍等于本次计算 candidate 所基于的 base state，并且 PreparedTask map 必须仍等于本地 book 所基于的旧 map；仅修改 PreparedTask lifecycle 时也必须以旧 map 做 compare-base。任一比较不成立都 fail-closed，调用方必须重新加载最新持久状态，不能自动把两份冻结计划或业务状态合并。
 
 这里不使用 snapshot `generation` 作为业务 CAS token，因为 vote-lock、checkpoint floor 等独立持久元数据也会合法推进 generation；这些元数据更新不应无故让未冲突的 LegalTask writer 失败。store 锁负责原子检查+写入，语义 base-state / base-prepared 比较负责防 lost update。

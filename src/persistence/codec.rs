@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
-use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
+use crate::prepared_plan::PreparedTask;
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
 use crate::validator_signer::FinalityScope;
 use crate::{
@@ -14,6 +14,9 @@ use crate::{
 };
 
 use super::local_codec::{decode_local_state, encode_local_state};
+use super::prepared_validation::{
+    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
+};
 use super::validator_codec::{decode_validator_registry, encode_validator_registry};
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
@@ -60,6 +63,14 @@ pub(super) fn encode_snapshot(
         .validator_registry
         .validate_current_set(contents.validator_set)
         .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    validate_prepared_snapshot_links(
+        &contents.state.protocol.task_bindings,
+        &contents.state.business.payment_addresses,
+        &contents.state.prerequisite.payment_executions,
+        contents.prepared_tasks,
+        contents.validator_vote_locks,
+    )?;
+    validate_prepared_plans_against_state(contents.state, contents.prepared_tasks)?;
     let payload = encode_payload(
         contents.state,
         contents.validator_set,
@@ -478,32 +489,34 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     };
 
     let (prepared_tasks, validator_vote_locks) = decode_local_state(&mut decoder)?;
-    validate_prepared_snapshot_links(
-        &task_bindings,
-        &payment_addresses,
-        &payment_executions,
-        &prepared_tasks,
-        &validator_vote_locks,
-    )?;
 
     decoder.finish()?;
 
     let validator_set = ValidatorSet::new(validator_set_version, validators)
         .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    let state = SecondState {
+        protocol: ProtocolState {
+            next_currency_address,
+            task_bindings,
+        },
+        prerequisite: PrerequisiteState { payment_executions },
+        business: BusinessState {
+            accounts,
+            payment_addresses,
+            currencies,
+        },
+    };
+    validate_prepared_snapshot_links(
+        &state.protocol.task_bindings,
+        &state.business.payment_addresses,
+        &state.prerequisite.payment_executions,
+        &prepared_tasks,
+        &validator_vote_locks,
+    )?;
+    validate_prepared_plans_against_state(&state, &prepared_tasks)?;
 
     Ok(DecodedSnapshotPayload {
-        state: SecondState {
-            protocol: ProtocolState {
-                next_currency_address,
-                task_bindings,
-            },
-            prerequisite: PrerequisiteState { payment_executions },
-            business: BusinessState {
-                accounts,
-                payment_addresses,
-                currencies,
-            },
-        },
+        state,
         validator_set,
         public_checkpoint_proof,
         checkpoint_floor_epoch,
@@ -511,88 +524,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         prepared_tasks,
         validator_vote_locks,
     })
-}
-
-pub(super) fn validate_prepared_snapshot_links(
-    task_bindings: &BTreeMap<TaskId, TaskBinding>,
-    payment_addresses: &BTreeMap<PaymentAddress, PaymentAddressRecord>,
-    payment_executions: &BTreeMap<OperationClaimId, PaymentExecution>,
-    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
-    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
-) -> Result<(), PersistenceError> {
-    for (task_id, prepared) in prepared_tasks {
-        let binding = task_bindings
-            .get(task_id)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        if binding.succeeded || binding.request_digest != prepared.request_digest {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-
-        let mut expected_transfer_claims = BTreeSet::new();
-        for (index, operation) in prepared.operations.iter().enumerate() {
-            let operation_index =
-                u64::try_from(index).map_err(|_| PersistenceError::InvalidSnapshot)?;
-            let claim_id = OperationClaimId::new(task_id.clone(), operation_index);
-
-            if let PreparedOperation::Transfer { transfer, .. } = operation {
-                let source = payment_addresses
-                    .get(&transfer.source)
-                    .ok_or(PersistenceError::InvalidSnapshot)?;
-                let destination = payment_addresses
-                    .get(&transfer.destination)
-                    .ok_or(PersistenceError::InvalidSnapshot)?;
-                if source.account != transfer.source_account
-                    || destination.account != transfer.destination_account
-                {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
-
-                let execution = payment_executions
-                    .get(&claim_id)
-                    .ok_or(PersistenceError::InvalidSnapshot)?;
-                if !execution.matches(transfer.source, transfer.destination, transfer.amount) {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
-                expected_transfer_claims.insert(claim_id);
-            }
-        }
-
-        if payment_executions
-            .keys()
-            .filter(|claim_id| claim_id.task_id() == task_id)
-            .any(|claim_id| !expected_transfer_claims.contains(claim_id))
-        {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-    }
-
-    for ((_, scope), locked_digest) in validator_vote_locks {
-        let FinalityScope::PreparedTask(task_id) = scope else {
-            continue;
-        };
-        let binding = task_bindings
-            .get(task_id)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        let Some(prepared) = prepared_tasks.get(task_id) else {
-            if !binding.succeeded {
-                return Err(PersistenceError::InvalidSnapshot);
-            }
-            continue;
-        };
-
-        if prepared.phase == PreparedTaskPhase::Prepared || binding.succeeded {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-
-        let expected_digest = prepared
-            .plan_digest()
-            .map_err(|_| PersistenceError::InvalidSnapshot)?;
-        if locked_digest != &expected_digest {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_checkpoint_attachment(

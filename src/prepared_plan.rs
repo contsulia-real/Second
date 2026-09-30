@@ -40,12 +40,19 @@ impl PreparedOperation {
     ) -> Result<(), PreparationError> {
         match self {
             Self::Issue { account, addresses } => {
+                validate_preallocated_addresses(state, addresses)?;
                 state.apply_issue_preallocated(working, *account, addresses)?;
             }
             Self::Transfer {
                 transfer,
                 currencies,
             } => {
+                let actual = u64::try_from(currencies.len())
+                    .map_err(|_| PreparationError::LengthOverflow)?;
+                if transfer.amount == 0 || actual != transfer.amount {
+                    return Err(PreparationError::InvalidPreparedPlan);
+                }
+                state.require_unique_currency_list(currencies)?;
                 state.apply_established_transfer(
                     working,
                     prerequisite,
@@ -55,6 +62,9 @@ impl PreparedOperation {
                 )?;
             }
             Self::Destroy { currencies } => {
+                if currencies.is_empty() {
+                    return Err(PreparationError::InvalidPreparedPlan);
+                }
                 state.validate_destroy_targets(working, currencies)?;
                 state.apply_destroy(working, currencies);
             }
@@ -64,6 +74,14 @@ impl PreparedOperation {
                 reserve,
                 replacement_reserve,
             } => {
+                if leaked.is_empty()
+                    || leaked.len() != leaked_owners.len()
+                    || leaked.len() != reserve.len()
+                    || leaked.len() != replacement_reserve.len()
+                {
+                    return Err(PreparationError::InvalidPreparedPlan);
+                }
+                validate_preallocated_addresses(state, replacement_reserve)?;
                 state.apply_leak_repair_preallocated(
                     working,
                     leaked,
@@ -242,6 +260,21 @@ impl PreparedTask {
         state.prerequisite = prerequisite;
         Ok(())
     }
+}
+
+fn validate_preallocated_addresses(
+    state: &SecondState,
+    addresses: &[CurrencyAddress],
+) -> Result<(), PreparationError> {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| address.value() >= state.next_currency_address())
+    {
+        return Err(PreparationError::InvalidPreparedPlan);
+    }
+
+    Ok(())
 }
 
 fn hash_addresses(

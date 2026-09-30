@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use super::codec::validate_prepared_snapshot_links;
+use super::prepared_validation::{
+    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
+};
 use crate::payment::{
     EstablishedTransfer, PaymentAddressRecord, PaymentAddressStatus, PaymentExecution,
 };
@@ -8,8 +10,8 @@ use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
 use crate::{
-    AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError, TaskId,
-    ValidatorId,
+    AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError,
+    PreparationError, SecondState, TaskId, ValidatorId,
 };
 
 #[test]
@@ -251,5 +253,109 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
             &vote_locks,
         ),
         Ok(())
+    );
+}
+
+#[test]
+fn prepared_transfer_rejects_currency_count_different_from_frozen_amount() {
+    let task_id = TaskId::parse("transfer-count-mismatch").unwrap();
+    let source = PaymentAddress::from_bytes([1; 32]);
+    let destination = PaymentAddress::from_bytes([2; 32]);
+    let source_account = AccountAddress::from_bytes([3; 32]);
+    let destination_account = AccountAddress::from_bytes([4; 32]);
+    let prepared = PreparedTask::new(
+        task_id,
+        [7; 32],
+        1,
+        vec![PreparedOperation::Transfer {
+            transfer: EstablishedTransfer {
+                source,
+                destination,
+                source_account,
+                destination_account,
+                amount: 2,
+            },
+            currencies: vec![CurrencyAddress::new(1)],
+        }],
+    );
+    let mut state = SecondState::genesis([source_account, destination_account], 10);
+    let mut working = state.business.clone();
+
+    assert_eq!(
+        prepared.apply(&mut state, &mut working),
+        Err(PreparationError::InvalidPreparedPlan)
+    );
+}
+
+#[test]
+fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique() {
+    let account = AccountAddress::from_bytes([3; 32]);
+    let state = SecondState::genesis([account], 10);
+
+    let valid = BTreeMap::from([(
+        TaskId::parse("valid-preallocation").unwrap(),
+        PreparedTask::new(
+            TaskId::parse("valid-preallocation").unwrap(),
+            [1; 32],
+            1,
+            vec![PreparedOperation::Issue {
+                account,
+                addresses: vec![CurrencyAddress::new(9)],
+            }],
+        ),
+    )]);
+    assert_eq!(
+        validate_prepared_plans_against_state(&state, &valid),
+        Ok(())
+    );
+
+    let beyond_frontier = BTreeMap::from([(
+        TaskId::parse("bad-frontier").unwrap(),
+        PreparedTask::new(
+            TaskId::parse("bad-frontier").unwrap(),
+            [2; 32],
+            1,
+            vec![PreparedOperation::Issue {
+                account,
+                addresses: vec![CurrencyAddress::new(10)],
+            }],
+        ),
+    )]);
+    assert_eq!(
+        validate_prepared_plans_against_state(&state, &beyond_frontier),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+
+    let first_id = TaskId::parse("duplicate-preallocation-a").unwrap();
+    let second_id = TaskId::parse("duplicate-preallocation-b").unwrap();
+    let duplicate = BTreeMap::from([
+        (
+            first_id.clone(),
+            PreparedTask::new(
+                first_id,
+                [3; 32],
+                1,
+                vec![PreparedOperation::Issue {
+                    account,
+                    addresses: vec![CurrencyAddress::new(8)],
+                }],
+            ),
+        ),
+        (
+            second_id.clone(),
+            PreparedTask::new(
+                second_id,
+                [4; 32],
+                1,
+                vec![PreparedOperation::Issue {
+                    account,
+                    addresses: vec![CurrencyAddress::new(8)],
+                }],
+            ),
+        ),
+    ]);
+    assert_eq!(
+        validate_prepared_plans_against_state(&state, &duplicate),
+        Err(PersistenceError::InvalidSnapshot)
     );
 }

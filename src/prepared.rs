@@ -35,6 +35,7 @@ pub enum PreparationError {
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
     CancellationClosed(TaskId),
+    InvalidPreparedPlan,
     OperationIndexOverflow,
     LengthOverflow,
 }

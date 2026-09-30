@@ -2,6 +2,7 @@ mod codec;
 #[cfg(test)]
 mod codec_tests;
 mod local_codec;
+mod prepared_validation;
 mod slot;
 mod store;
 mod validator_codec;
