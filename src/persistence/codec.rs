@@ -8,10 +8,9 @@ use crate::prepared_plan::PreparedTask;
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
 use crate::validator_signer::FinalityScope;
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, MAX_CURRENCY_SEQUENCE, OperationClaimId,
-    PaymentAddress, PaymentAddressStatus, PersistedNodeState, PersistenceError,
-    PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorCredential, ValidatorId,
-    ValidatorRegistry, ValidatorSet,
+    AccountAddress, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
+    PaymentAddressStatus, PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof,
+    SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
 use super::local_codec::{decode_local_state, encode_local_state};
@@ -179,12 +178,11 @@ fn encode_payload(
 ) -> Result<Vec<u8>, PersistenceError> {
     let mut out = Vec::new();
 
-    let exhausted_sentinel = MAX_CURRENCY_SEQUENCE + 1;
-    if state.protocol.next_currency_address > exhausted_sentinel
-        || state.business.currencies.values().any(|currency| {
-            currency.address.value() > MAX_CURRENCY_SEQUENCE
-                || currency.address.value() >= state.protocol.next_currency_address
-        })
+    if state
+        .business
+        .currencies
+        .values()
+        .any(|currency| currency.address.value() >= state.protocol.next_currency_address)
     {
         return Err(PersistenceError::InvalidSnapshot);
     }
@@ -276,9 +274,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     let mut decoder = Decoder::new(payload);
 
     let next_currency_address = decoder.read_u64()?;
-    if next_currency_address > MAX_CURRENCY_SEQUENCE + 1 {
-        return Err(PersistenceError::InvalidSnapshot);
-    }
 
     let account_count = decoder.read_len()?;
     if account_count > decoder.remaining() / 32 {
@@ -337,7 +332,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     let mut currencies = BTreeMap::new();
     for _ in 0..currency_count {
         let address = CurrencyAddress::new(decoder.read_u64()?);
-        if address.value() > MAX_CURRENCY_SEQUENCE || address.value() >= next_currency_address {
+        if address.value() >= next_currency_address {
             return Err(PersistenceError::InvalidSnapshot);
         }
 

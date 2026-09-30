@@ -154,15 +154,12 @@ impl FromStr for TaskId {
 const CURRENCY_BASE62_ALPHABET: &[u8; 62] =
     b"0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
 
-pub const MAX_CURRENCY_SEQUENCE: u64 = i64::MAX as u64;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrencyAddressParseError {
     WrongPrefix,
     EmptyPayload,
     InvalidCharacter,
     Overflow,
-    OutOfRange,
     NonCanonical,
 }
 
@@ -196,10 +193,6 @@ impl CurrencyAddress {
                 .checked_mul(62)
                 .and_then(|current| current.checked_add(digit))
                 .ok_or(CurrencyAddressParseError::Overflow)?;
-        }
-
-        if sequence > MAX_CURRENCY_SEQUENCE {
-            return Err(CurrencyAddressParseError::OutOfRange);
         }
 
         let address = Self(sequence);

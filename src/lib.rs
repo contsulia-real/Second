@@ -12,7 +12,6 @@ mod prepared;
 mod prepared_plan;
 mod public_checkpoint;
 mod public_state;
-pub mod server;
 mod state;
 mod task;
 mod transaction;
@@ -33,8 +32,8 @@ pub use error::{
 };
 pub use finality::{FinalityCertificate, FinalityStatement, ValidatorVote};
 pub use ids::{
-    AccountAddress, AddressParseError, CurrencyAddress, CurrencyAddressParseError,
-    MAX_CURRENCY_SEQUENCE, PaymentAddress, TaskId, TaskIdParseError, ValidatorId,
+    AccountAddress, AddressParseError, CurrencyAddress, CurrencyAddressParseError, PaymentAddress,
+    TaskId, TaskIdParseError, ValidatorId,
 };
 pub use network::{
     CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE,

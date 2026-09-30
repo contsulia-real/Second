@@ -76,10 +76,4 @@ fn currency_address_rejects_noncanonical_invalid_and_overflowing_forms() {
         CurrencyAddress::parse("0lxiiZZZZZZZZZZZZ"),
         Err(CurrencyAddressParseError::Overflow)
     );
-
-    let out_of_range = CurrencyAddress::new(second::MAX_CURRENCY_SEQUENCE + 1).to_string();
-    assert_eq!(
-        CurrencyAddress::parse(&out_of_range),
-        Err(CurrencyAddressParseError::OutOfRange)
-    );
 }

@@ -3,9 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, MAX_CURRENCY_SEQUENCE,
-    NetworkError, OperationClaimId, PaymentAddress, PublicCurrencyPage, PublicCurrencyState,
-    TaskId, VerifiedLegalTask,
+    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError, OperationClaimId,
+    PaymentAddress, PublicCurrencyPage, PublicCurrencyState, TaskId, VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,17 +192,9 @@ impl SecondState {
         }
 
         let start = self.protocol.next_currency_address;
-        let exhausted_sentinel = MAX_CURRENCY_SEQUENCE + 1;
-        if start > MAX_CURRENCY_SEQUENCE {
-            return Err(ExecutionError::CurrencySequenceSpaceExhausted);
-        }
-
         let end_exclusive = start
             .checked_add(count)
             .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
-        if end_exclusive > exhausted_sentinel {
-            return Err(ExecutionError::CurrencySequenceSpaceExhausted);
-        }
 
         self.protocol.next_currency_address = end_exclusive;
 

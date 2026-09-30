@@ -238,9 +238,9 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
 }
 
 #[test]
-fn currency_sequence_allocator_stops_at_postgresql_bigint_boundary() {
+fn currency_sequence_allocator_reports_numeric_exhaustion() {
     let alice = support::account(1);
-    let mut state = SecondState::genesis([alice], second::MAX_CURRENCY_SEQUENCE);
+    let mut state = SecondState::genesis([alice], u64::MAX - 1);
 
     let last = verified_task(
         900,
@@ -254,7 +254,7 @@ fn currency_sequence_allocator_stops_at_postgresql_bigint_boundary() {
         state.execute(&last, 1).unwrap(),
         ExecutionOutcome::Succeeded
     );
-    assert!(state.currency_exists(second::CurrencyAddress::new(second::MAX_CURRENCY_SEQUENCE)));
+    assert!(state.currency_exists(second::CurrencyAddress::new(u64::MAX - 1)));
 
     let exhausted = verified_task(
         901,
