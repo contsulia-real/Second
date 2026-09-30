@@ -2,8 +2,9 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, Operation, SecondState,
-    client_public_currency_page, serve_public_currency_connection,
+    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage,
+    Operation, PublicCurrencyState, SecondState, client_public_currency_page,
+    serve_public_currency_connection,
 };
 use support::{payment_address, register_payment_addresses, verified_task};
 
@@ -53,6 +54,53 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
 
     peer.close();
     assert_eq!(server_task.await.unwrap(), client_node_id);
+}
+
+#[tokio::test]
+async fn direct_page_query_rejects_peer_response_exceeding_requested_limit() {
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept().await.unwrap();
+        let request = peer.accept_request().await.unwrap().unwrap();
+        assert_eq!(
+            request.message(),
+            &NetworkMessage::GetPublicCurrencies {
+                start: CurrencyAddress::new(10),
+                limit: 1,
+            }
+        );
+        request
+            .respond(&NetworkMessage::PublicCurrencies {
+                states: vec![
+                    PublicCurrencyState {
+                        address: CurrencyAddress::new(10),
+                        occupied: false,
+                        role: CurrencyRole::Reserve,
+                    },
+                    PublicCurrencyState {
+                        address: CurrencyAddress::new(11),
+                        occupied: false,
+                        role: CurrencyRole::Reserve,
+                    },
+                ],
+                next_start: None,
+            })
+            .await
+            .unwrap();
+    });
+
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address).await.unwrap();
+
+    assert_eq!(
+        client_public_currency_page(&peer, CurrencyAddress::new(10), 1).await,
+        Err(NetworkError::InvalidPublicCurrencyPage)
+    );
+
+    peer.close();
+    server_task.await.unwrap();
 }
 
 #[test]

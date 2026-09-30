@@ -232,7 +232,10 @@ async fn request_public_currency_page(
         .exchange(&NetworkMessage::GetPublicCurrencies { start, limit })
         .await?
     {
-        NetworkMessage::PublicCurrencies { states, next_start } => Ok((states, next_start)),
+        NetworkMessage::PublicCurrencies { states, next_start } => {
+            validate_public_currency_page(start, limit, &states, next_start)?;
+            Ok((states, next_start))
+        }
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
@@ -269,10 +272,9 @@ fn max_public_sync_states() -> u64 {
     u64::try_from(MAX_PUBLIC_SYNC_STATE_BYTES / element_size).unwrap_or(u64::MAX)
 }
 
-fn validate_synced_page(
+fn validate_public_currency_page(
     start: CurrencyAddress,
     limit: u16,
-    frontier: u64,
     states: &[crate::PublicCurrencyState],
     next_start: Option<CurrencyAddress>,
 ) -> Result<(), NetworkError> {
@@ -301,10 +303,28 @@ fn validate_synced_page(
         }
 
         let current = states.last().map(|state| state.address).unwrap_or(start);
-
-        if next <= current || next.value() >= frontier {
+        if next <= current {
             return Err(NetworkError::InvalidPublicCurrencyCursor { current, next });
         }
+    }
+
+    Ok(())
+}
+
+fn validate_synced_page(
+    start: CurrencyAddress,
+    limit: u16,
+    frontier: u64,
+    states: &[crate::PublicCurrencyState],
+    next_start: Option<CurrencyAddress>,
+) -> Result<(), NetworkError> {
+    validate_public_currency_page(start, limit, states, next_start)?;
+
+    if let Some(next) = next_start
+        && next.value() >= frontier
+    {
+        let current = states.last().map(|state| state.address).unwrap_or(start);
+        return Err(NetworkError::InvalidPublicCurrencyCursor { current, next });
     }
 
     Ok(())
