@@ -155,6 +155,13 @@ pub enum NetworkError {
         claimed: u64,
         actual: u64,
     },
+    PublicCurrencySyncTooLarge {
+        announced: u64,
+        maximum: u64,
+    },
+    PublicCurrencySyncAllocationFailed {
+        requested: u64,
+    },
     PublicState(PublicStateError),
     PublicCheckpoint(PublicCheckpointError),
     MissingPublicCurrencyCheckpoint,

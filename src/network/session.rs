@@ -1,8 +1,11 @@
 use crate::{
-    CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyView, SecondState, ValidatorSet,
+    CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencyView,
+    SecondState, ValidatorSet,
 };
 
 use super::quic::QuicPeer;
+
+const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 use super::{
     MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
@@ -117,7 +120,26 @@ async fn sync_public_currency_view_for_summary(
     peer: &QuicPeer,
     summary: crate::PublicCurrencySummary,
 ) -> Result<PublicCurrencyView, NetworkError> {
+    let maximum = max_public_sync_states();
+    if summary.current_supply > maximum {
+        return Err(NetworkError::PublicCurrencySyncTooLarge {
+            announced: summary.current_supply,
+            maximum,
+        });
+    }
+
+    let requested = usize::try_from(summary.current_supply).map_err(|_| {
+        NetworkError::PublicCurrencySyncTooLarge {
+            announced: summary.current_supply,
+            maximum,
+        }
+    })?;
     let mut states = Vec::new();
+    states.try_reserve_exact(requested).map_err(|_| {
+        NetworkError::PublicCurrencySyncAllocationFailed {
+            requested: summary.current_supply,
+        }
+    })?;
 
     if summary.current_supply > 0 {
         let mut start = CurrencyAddress::new(0);
@@ -238,6 +260,13 @@ async fn request_public_currency_summary(
         NetworkMessage::PublicCurrencySummary { summary } => Ok(summary),
         _ => Err(NetworkError::UnexpectedMessage),
     }
+}
+
+fn max_public_sync_states() -> u64 {
+    let element_size = std::mem::size_of::<PublicCurrencyState>();
+    debug_assert!(element_size > 0);
+
+    u64::try_from(MAX_PUBLIC_SYNC_STATE_BYTES / element_size).unwrap_or(u64::MAX)
 }
 
 fn validate_synced_page(

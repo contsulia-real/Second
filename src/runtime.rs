@@ -1,5 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const MAX_ACTIVE_CONNECTIONS: usize = 128;
 
 use crate::{
     NetworkError, NodeId, PersistenceError, PublicCurrencyCheckpointProof, QuicServer,
@@ -61,13 +64,21 @@ impl NodeRuntime {
     }
 
     pub async fn run(self) -> Result<(), NodeRuntimeError> {
+        let active_connections = Arc::new(AtomicUsize::new(0));
+
         loop {
             let incoming = self.server.accept_incoming().await?;
+            let Some(permit) = ActiveConnectionPermit::try_acquire(&active_connections) else {
+                drop(incoming);
+                continue;
+            };
+
             let state = Arc::clone(&self.state);
             let public_checkpoint_proof = self.public_checkpoint_proof.clone();
             let local_node_id = self.local_node_id;
 
             tokio::spawn(async move {
+                let _permit = permit;
                 let Ok(peer) = incoming.handshake(local_node_id).await else {
                     return;
                 };
@@ -80,5 +91,29 @@ impl NodeRuntime {
                 .await;
             });
         }
+    }
+}
+
+struct ActiveConnectionPermit {
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl ActiveConnectionPermit {
+    fn try_acquire(active_connections: &Arc<AtomicUsize>) -> Option<Self> {
+        active_connections
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_ACTIVE_CONNECTIONS).then_some(active + 1)
+            })
+            .ok()?;
+
+        Some(Self {
+            active_connections: Arc::clone(active_connections),
+        })
+    }
+}
+
+impl Drop for ActiveConnectionPermit {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::AcqRel);
     }
 }

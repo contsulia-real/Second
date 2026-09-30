@@ -136,3 +136,41 @@ async fn sync_rejects_non_advancing_page_cursor() {
     peer.close();
     server_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn sync_rejects_remote_supply_that_exceeds_local_materialization_budget() {
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        let request = peer.accept_request().await.unwrap().unwrap();
+        assert_eq!(request.message(), &NetworkMessage::GetPublicCurrencySummary);
+        request
+            .respond(&NetworkMessage::PublicCurrencySummary {
+                summary: second::PublicCurrencySummary {
+                    next_currency_address: u64::MAX,
+                    current_supply: u64::MAX,
+                    reserve_count: 0,
+                    occupied_count: 0,
+                    state_digest: [0; 32],
+                },
+            })
+            .await
+            .unwrap();
+    });
+
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
+
+    assert!(matches!(
+        client_sync_public_currency_view(&peer).await,
+        Err(NetworkError::PublicCurrencySyncTooLarge {
+            announced: u64::MAX,
+            ..
+        })
+    ));
+
+    peer.close();
+    server_task.await.unwrap();
+}

@@ -843,7 +843,9 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前 `second node` 每次启动生成独立 transport certificate，并将 certificate 输出给显式 pin 的客户端；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
 
-当前长期节点入口为 `second node <listen-address> <node-id> <snapshot-base>`。节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
+当前长期节点入口为 `second node <listen-address> <node-id> <snapshot-base>`。节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+
+当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。Hello 中的 NodeId 目前仍未被密码学认证，因此不能拿它作为连接配额、peer 去重或 Validator 身份的安全依据。
 
 每个 stream 内仍使用统一的自定义二进制 frame：
 
@@ -862,6 +864,8 @@ payload
 - 公共 summary；
 - public checkpoint proof；
 - certified public state sync。
+
+full public sync 的本地 materialization budget 当前为 64 MiB，仅约束客户端为 `Vec<PublicCurrencyState>` 物化整份公开状态所允许占用的元素存储空间。允许的 state 数量通过当前 `size_of::<PublicCurrencyState>()` 动态换算，而不是把 Currency 数量写成协议上限；远端 summary 声明的 `current_supply` 超出预算时，客户端必须在请求任何分页数据之前拒绝。实际 Vec 使用 `try_reserve_exact`，无法满足本地分配时返回错误而不是继续无界增长。该预算同样是本地资源保护策略，不限制 Second 协议本身允许存在多少 Currency。
 
 ### 16.1 Node 与 Validator 分离
 
@@ -1135,7 +1139,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有长期 node runtime 上继续完成 peer 管理、连接总量限制与 full public sync 总量预算；单 connection 的并发 bidi stream 已按当前串行 session 收紧为 1；
+- 在现有长期 node runtime 上继续完成经过认证的 peer identity / peer 管理；当前连接总量、单 connection stream 并发与 full public sync materialization 已有本地资源边界，但 NodeId Hello 尚不能作为安全身份；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；
