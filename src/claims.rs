@@ -170,10 +170,7 @@ impl CurrencyClaimBook {
             });
         }
 
-        let selected = available
-            .into_iter()
-            .take(amount as usize)
-            .collect::<Vec<_>>();
+        let selected = Self::take_first_currencies(available, amount);
         self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
 
         Ok(selected)
@@ -399,10 +396,22 @@ impl CurrencyClaimBook {
             });
         }
 
-        Ok(available
-            .into_iter()
-            .take(count as usize)
-            .collect::<Vec<_>>())
+        Ok(Self::take_first_currencies(available, count))
+    }
+
+    fn take_first_currencies(currencies: Vec<CurrencyAddress>, count: u64) -> Vec<CurrencyAddress> {
+        let mut selected = Vec::new();
+        let mut remaining = count;
+
+        for currency in currencies {
+            if remaining == 0 {
+                break;
+            }
+            selected.push(currency);
+            remaining -= 1;
+        }
+
+        selected
     }
 
     fn ensure_claimable(
