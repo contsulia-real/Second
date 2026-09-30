@@ -81,12 +81,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args([
-            "serve-public-once",
-            "127.0.0.1:0",
-            "1",
-            server_base.to_str().unwrap(),
-        ])
+        .args(["node", "127.0.0.1:0", "1", server_base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -139,8 +134,8 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     assert!(!lower.contains("owner"));
     assert!(!lower.contains("balance"));
 
-    let status = server.wait().unwrap();
-    assert!(status.success());
+    server.kill().expect("node exited before test shutdown");
+    server.wait().unwrap();
 
     server_store.remove_files().unwrap();
     trust_store.remove_files().unwrap();
@@ -155,12 +150,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args([
-            "serve-public-once",
-            "127.0.0.1:0",
-            "1",
-            base.to_str().unwrap(),
-        ])
+        .args(["node", "127.0.0.1:0", "1", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -204,14 +194,14 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     assert!(!lower.contains("owner"));
     assert!(!lower.contains("balance"));
 
-    let status = server.wait().unwrap();
-    assert!(status.success());
+    server.kill().expect("node exited before test shutdown");
+    server.wait().unwrap();
 
     store.remove_files().unwrap();
 }
 
 #[test]
-fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
+fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     let base = temp_base("roundtrip");
     let store = StateStore::new(&base);
 
@@ -233,12 +223,7 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args([
-            "serve-public-once",
-            "127.0.0.1:0",
-            "1",
-            base.to_str().unwrap(),
-        ])
+        .args(["node", "127.0.0.1:0", "1", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -276,8 +261,25 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     assert!(!lower.contains("balance"));
     assert!(!client_stdout.contains("876543"));
 
-    let status = server.wait().unwrap();
-    assert!(status.success());
+    let ping = Command::new(executable)
+        .args([
+            "ping",
+            address.as_str(),
+            "3",
+            "42",
+            server_certificate.as_str(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        ping.status.success(),
+        "second connection failed: {}",
+        String::from_utf8_lossy(&ping.stderr)
+    );
+    assert!(String::from_utf8(ping.stdout).unwrap().contains("PONG "));
+
+    server.kill().expect("node exited before test shutdown");
+    server.wait().unwrap();
 
     store.remove_files().unwrap();
 }

@@ -823,7 +823,9 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 当前网络层以 QUIC 作为节点传输层，不依赖 JSON 作为节点间 framing。QUIC 连接完成 TLS 1.3 握手后，应用层先使用一个可靠双向 stream 完成 NodeId Hello；后续每个请求/响应使用独立的可靠双向 stream。当前协议不使用 QUIC DATAGRAM，也不使用 0-RTT。
 
-QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前测试/一次性 CLI 通过显式 pin 的独立 transport certificate 建立信任；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
+QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前 `second node` 每次启动生成独立 transport certificate，并将 certificate 输出给显式 pin 的客户端；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
+
+当前长期节点入口为 `second node <listen-address> <node-id> <snapshot-base>`。节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
 每个 stream 内仍使用统一的自定义二进制 frame：
 
@@ -1117,7 +1119,7 @@ ValidatorId + TaskId
 
 - 继续审核 TaskId first-request binding 的内部 request_digest 是否完全等价于“第一份 verified signed request”；
 - 继续审核 prepare / finality / commit 在所有失败路径上的 protocol/business 边界；
-- 完成更完整的长期节点运行与 peer 管理；
+- 在现有长期 node runtime 上继续完成 peer 管理与连接/同步资源预算；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；

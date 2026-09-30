@@ -60,13 +60,27 @@ impl QuicServer {
         self.endpoint.local_addr().map_err(transport_error)
     }
 
-    pub async fn accept(&self, local_node_id: NodeId) -> Result<QuicPeer, NetworkError> {
+    pub(crate) async fn accept_incoming(&self) -> Result<QuicIncoming, NetworkError> {
         let incoming = self
             .endpoint
             .accept()
             .await
             .ok_or_else(|| NetworkError::Transport("QUIC endpoint is closed".to_owned()))?;
-        let connection = incoming.await.map_err(transport_error)?;
+        Ok(QuicIncoming { incoming })
+    }
+
+    pub async fn accept(&self, local_node_id: NodeId) -> Result<QuicPeer, NetworkError> {
+        self.accept_incoming().await?.handshake(local_node_id).await
+    }
+}
+
+pub(crate) struct QuicIncoming {
+    incoming: quinn::Incoming,
+}
+
+impl QuicIncoming {
+    pub(crate) async fn handshake(self, local_node_id: NodeId) -> Result<QuicPeer, NetworkError> {
+        let connection = self.incoming.await.map_err(transport_error)?;
         server_handshake(connection, local_node_id).await
     }
 }

@@ -12,6 +12,7 @@ mod prepared;
 mod prepared_plan;
 mod public_checkpoint;
 mod public_state;
+mod runtime;
 mod state;
 mod task;
 mod transaction;
@@ -54,6 +55,7 @@ pub use public_checkpoint::{
     PublicCurrencyCheckpointProof,
 };
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
+pub use runtime::{NodeRuntime, NodeRuntimeError};
 pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
