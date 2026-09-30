@@ -11,6 +11,7 @@ use super::identity::{PeerAuthRole, QuicTransportIdentity};
 use super::{NetworkError, NetworkMessage, NodeId};
 
 const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_AUTH_EXPORTER_LABEL: &[u8] = b"SECOND_QUIC_PEER_AUTH_V1";
 
 pub const SECOND_QUIC_SERVER_NAME: &str = "second.local";
@@ -31,7 +32,7 @@ impl QuicServer {
         ));
         let mut config = quinn::ServerConfig::with_single_cert(vec![certificate], key)
             .map_err(transport_error)?;
-        config.transport_config(transport_config());
+        config.transport_config(transport_config(false));
 
         let endpoint = Endpoint::server(config, address).map_err(transport_error)?;
         Ok(Self {
@@ -97,7 +98,7 @@ impl QuicClient {
 
         let mut config = quinn::ClientConfig::with_root_certificates(Arc::new(roots))
             .map_err(transport_error)?;
-        config.transport_config(transport_config());
+        config.transport_config(transport_config(true));
 
         let mut endpoint = Endpoint::client(bind_address).map_err(transport_error)?;
         endpoint.set_default_client_config(config);
@@ -196,7 +197,7 @@ impl QuicRequestStream {
     }
 }
 
-fn transport_config() -> Arc<TransportConfig> {
+fn transport_config(outbound_keep_alive: bool) -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     config.max_concurrent_bidi_streams(1_u8.into());
     config.max_concurrent_uni_streams(0_u8.into());
@@ -205,6 +206,9 @@ fn transport_config() -> Arc<TransportConfig> {
             .try_into()
             .expect("five seconds is a valid QUIC idle timeout"),
     ));
+    if outbound_keep_alive {
+        config.keep_alive_interval(Some(QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL));
+    }
     Arc::new(config)
 }
 

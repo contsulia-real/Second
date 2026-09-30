@@ -878,7 +878,11 @@ transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应
 
 节点维护独立的本地 `PeerStore` sidecar `<snapshot-base>.peers`，当前最多保存 32 个最近成功完成 authenticated outbound dial 的 `PeerRecord`。第三方通过 gossip 返回的 record 在真正 dial 成功前只是未验证 candidate，不会因为被某个 peer 宣称就进入已验证集合；认证失败、自连接或 NodeId/certificate endpoint 不匹配都不会获得持久化资格。PeerStore 是可丢弃的本地连接缓存，不属于 Second state snapshot、ValidatorRegistry、finality 或任何共识 authority。
 
-`GetPeers { limit }` 当前上限为 32，节点只从自己已验证的 PeerStore 返回记录，并排除自己和当前请求方。`NodeRuntime::bootstrap` 先尝试本地持久 PeerStore，再把调用方提供的 bootstrap records 作为 fallback；连接任一 peer 成功后可继续请求更多 candidate，并逐个通过真实 QUIC/TLS + Hello authentication 后再提升和持久化。不同 endpoint/certificate 的同一 NodeId candidate 可以分别尝试，避免一个过期或恶意记录阻断后续正确 endpoint。当前没有 DHT、DNS seed、NAT traversal，也没有冻结长期自动重连/peer quality 策略。
+`GetPeers { limit }` 当前上限为 32，节点只从自己已验证的 PeerStore 返回记录，并排除自己和当前请求方。`NodeRuntime::bootstrap` 先尝试本地持久 PeerStore，再把调用方提供的 bootstrap records 作为 fallback；连接任一 peer 成功后可继续请求更多 candidate，并逐个通过真实 QUIC/TLS + Hello authentication 后再提升和持久化。不同 endpoint/certificate 的同一 NodeId candidate 可以分别尝试，避免一个过期或恶意记录阻断后续正确 endpoint。
+
+长期 `second node` 的初始 bootstrap 来源固定为可选 sidecar `<snapshot-base>.bootstrap.json`。文件不存在表示没有静态 bootstrap，不阻止仅依靠已有 PeerStore 或 inbound peer 启动；文件一旦存在则必须是严格 JSON 数组，每项只含 `node_id`（64 位小写 hex）、`address`（SocketAddr）和 `certificate_base64`，未知字段、非法 NodeId/address/certificate、超过 32 条记录都会在创建 transport identity 之前使节点启动失败。该 sidecar 是本地 deployment hint，不属于 snapshot、protocol state 或 authority。
+
+runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护目标；这是实现策略，不是协议常量。节点每 2 秒运行维护 tick，连接不足时从 PeerStore + 静态 bootstrap + 已连接 peer 返回的候选继续扩展；没有取得新连接时，dial retry 从 1 秒指数退避到最多 60 秒，取得进展后重置。主动 outbound QUIC client 使用 2 秒 keepalive，使长期连接不会被 5 秒 idle timeout 周期性拆掉；server 端仍保持原 5 秒 idle timeout，因此陌生 inbound peer 不会因为本节点的 keepalive 策略被无限维持。当前仍没有 DHT、DNS seed 或 NAT traversal。
 
 节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public network session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
 
@@ -1193,7 +1197,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 authenticated bootstrap + bounded peer discovery 基础上继续决定生产环境 bootstrap record 的配置/发布来源，以及长期 outbound maintenance、retry/backoff、地址更新和 target selection；当前不引入 DHT/DNS seed/NAT traversal，transport identity 仍只证明 key ownership，不等于 Validator authority；
+- 在现有静态 bootstrap sidecar + authenticated bounded peer discovery + 长期连接维护基础上继续决定地址变更/证书轮换后的 record 发布机制、peer quality/target selection，以及未来是否真的需要 DHT/DNS seed/NAT traversal；transport identity 仍只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；

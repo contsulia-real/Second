@@ -64,14 +64,6 @@ impl PeerManager {
             .and_then(|active| active.peer.clone())
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.inner
-            .connected
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
-    }
-
     fn register_entry(
         &self,
         node_id: NodeId,

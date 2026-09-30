@@ -311,9 +311,16 @@ pub fn peer_record(runtime: &NodeRuntime) -> PeerRecord {
 }
 
 pub fn spawn_node_runtime(runtime: &Arc<NodeRuntime>) -> tokio::task::JoinHandle<()> {
+    spawn_node_runtime_with_bootstrap(runtime, Vec::new())
+}
+
+pub fn spawn_node_runtime_with_bootstrap(
+    runtime: &Arc<NodeRuntime>,
+    bootstrap_records: Vec<PeerRecord>,
+) -> tokio::task::JoinHandle<()> {
     let runtime = Arc::clone(runtime);
     tokio::spawn(async move {
-        let _ = runtime.run().await;
+        let _ = runtime.run(&bootstrap_records).await;
     })
 }
 
@@ -321,6 +328,7 @@ pub fn cleanup_node_runtime(store: StateStore, base: PathBuf) {
     store.remove_files().unwrap();
     remove_transport_identity(&base);
     remove_optional_file(peer_store_path(&base), "peer store");
+    remove_optional_file(bootstrap_config_path(&base), "bootstrap config");
 }
 
 pub fn temp_base(prefix: &str) -> PathBuf {
@@ -346,6 +354,10 @@ pub fn transport_identity_path(base: &Path) -> PathBuf {
 
 pub fn peer_store_path(base: &Path) -> PathBuf {
     append_suffix(base, ".peers")
+}
+
+pub fn bootstrap_config_path(base: &Path) -> PathBuf {
+    append_suffix(base, ".bootstrap.json")
 }
 
 pub fn remove_transport_identity(base: &Path) {

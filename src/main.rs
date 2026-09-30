@@ -1,3 +1,5 @@
+mod bootstrap_config;
+
 use std::env;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -58,6 +60,7 @@ async fn run() -> Result<(), String> {
 }
 
 async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
+    let bootstrap_records = bootstrap_config::load(snapshot_base)?;
     let store = StateStore::new(snapshot_base);
     let runtime =
         NodeRuntime::load_and_bind(parse_socket_address(address)?, &store).map_err(|error| {
@@ -82,7 +85,7 @@ async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
         .map_err(|error| format!("failed to flush listening address: {error}"))?;
 
     runtime
-        .run()
+        .run(&bootstrap_records)
         .await
         .map_err(|error| format!("node runtime stopped: {error:?}"))
 }

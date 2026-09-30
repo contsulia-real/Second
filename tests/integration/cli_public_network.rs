@@ -1,5 +1,8 @@
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::support;
 use support::FinalizedExecute as _;
@@ -301,4 +304,106 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
 
     store.remove_files().unwrap();
     support::remove_transport_identity(&base);
+}
+
+#[test]
+fn node_uses_static_bootstrap_sidecar() {
+    let seed_base = temp_base("bootstrap-seed");
+    let client_base = temp_base("bootstrap-client");
+    let seed_store = StateStore::new(&seed_base);
+    let client_store = StateStore::new(&client_base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let set = validators();
+    seed_store.initialize(&state, &set).unwrap();
+    client_store.initialize(&state, &set).unwrap();
+
+    let executable = env!("CARGO_BIN_EXE_second");
+    let mut seed = Command::new(executable)
+        .args(["node", "127.0.0.1:0", seed_base.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let seed_stdout = seed.stdout.take().unwrap();
+    let mut seed_reader = BufReader::new(seed_stdout);
+    let mut seed_listening = String::new();
+    seed_reader.read_line(&mut seed_listening).unwrap();
+    let (seed_address, seed_node_id, seed_certificate) = parse_listening(&seed_listening);
+
+    let bootstrap = serde_json::json!([{
+        "node_id": seed_node_id,
+        "address": seed_address,
+        "certificate_base64": seed_certificate,
+    }]);
+    fs::write(
+        support::bootstrap_config_path(&client_base),
+        serde_json::to_vec_pretty(&bootstrap).unwrap(),
+    )
+    .unwrap();
+
+    let mut client = Command::new(executable)
+        .args(["node", "127.0.0.1:0", client_base.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let client_stdout = client.stdout.take().unwrap();
+    let mut client_reader = BufReader::new(client_stdout);
+    let mut client_listening = String::new();
+    client_reader.read_line(&mut client_listening).unwrap();
+    parse_listening(&client_listening);
+
+    let peer_store = support::peer_store_path(&client_base);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !peer_store.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        peer_store.exists(),
+        "node did not authenticate and persist the configured bootstrap peer"
+    );
+
+    client
+        .kill()
+        .expect("client node exited before test shutdown");
+    client.wait().unwrap();
+    seed.kill().expect("seed node exited before test shutdown");
+    seed.wait().unwrap();
+
+    support::cleanup_node_runtime(client_store, client_base);
+    support::cleanup_node_runtime(seed_store, seed_base);
+}
+
+#[test]
+fn node_rejects_invalid_bootstrap_sidecar_before_starting_transport() {
+    let base = temp_base("bootstrap-invalid");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    store.initialize(&state, &validators()).unwrap();
+
+    fs::write(
+        support::bootstrap_config_path(&base),
+        br#"{"unexpected":true}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_second"))
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid bootstrap file"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !support::transport_identity_path(&base).exists(),
+        "invalid bootstrap config must fail before transport identity creation"
+    );
+
+    support::cleanup_node_runtime(store, base);
 }

@@ -4,8 +4,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
+const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
+const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const PEER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NodeId, PeerDirection, PeerLease, PeerManager, PeerRecord,
@@ -93,6 +98,14 @@ impl NodeRuntime {
         self.peer_manager.peer(node_id)
     }
 
+    fn known_active_peer_count(&self) -> usize {
+        self.peer_store
+            .recent(MAX_PEER_RECORDS, &[self.node_id()])
+            .into_iter()
+            .filter(|record| self.peer_manager.peer(record.node_id()).is_some())
+            .count()
+    }
+
     fn public_network_context(&self) -> PublicNetworkContext {
         PublicNetworkContext {
             state: Arc::clone(&self.state),
@@ -123,23 +136,25 @@ impl NodeRuntime {
         );
 
         let mut attempted = HashSet::new();
-        while self.peer_manager.len() < target_connections {
+        while self.known_active_peer_count() < target_connections {
             let Some(record) = candidates.pop_front() else {
                 break;
             };
-            if !attempted.insert(record.clone())
-                || self.peer_manager.peer(record.node_id()).is_some()
-            {
+            if !attempted.insert(record.clone()) {
                 continue;
             }
 
-            let peer = match self.dial(&record).await {
-                Ok(peer) => peer,
-                Err(error @ NodeRuntimeError::Network(NetworkError::PeerStore(_))) => {
-                    return Err(error);
+            let peer = if let Some(peer) = self.peer_manager.peer(record.node_id()) {
+                peer
+            } else {
+                match self.dial(&record).await {
+                    Ok(peer) => peer,
+                    Err(error @ NodeRuntimeError::Network(NetworkError::PeerStore(_))) => {
+                        return Err(error);
+                    }
+                    Err(NodeRuntimeError::ConnectionCapacityReached { .. }) => break,
+                    Err(_) => continue,
                 }
-                Err(NodeRuntimeError::ConnectionCapacityReached { .. }) => break,
-                Err(_) => continue,
             };
 
             if let Ok(records) = client_peer_records(&peer, MAX_PEER_RECORDS).await {
@@ -151,7 +166,7 @@ impl NodeRuntime {
             }
         }
 
-        Ok(self.peer_manager.len())
+        Ok(self.known_active_peer_count())
     }
 
     pub async fn dial(&self, record: &PeerRecord) -> Result<QuicPeer, NodeRuntimeError> {
@@ -206,7 +221,14 @@ impl NodeRuntime {
         Ok(active_peer)
     }
 
-    pub async fn run(&self) -> Result<(), NodeRuntimeError> {
+    pub async fn run(&self, bootstrap_records: &[PeerRecord]) -> Result<(), NodeRuntimeError> {
+        tokio::select! {
+            result = self.run_listener() => result,
+            result = self.maintain_peers(bootstrap_records) => result,
+        }
+    }
+
+    async fn run_listener(&self) -> Result<(), NodeRuntimeError> {
         loop {
             let incoming = self.server.accept_incoming().await?;
             let Some(permit) = ActiveConnectionPermit::try_acquire(&self.active_connections) else {
@@ -235,6 +257,38 @@ impl NodeRuntime {
 
                 serve_managed_peer(peer, context, peer_lease, permit, None).await;
             });
+        }
+    }
+
+    async fn maintain_peers(
+        &self,
+        bootstrap_records: &[PeerRecord],
+    ) -> Result<(), NodeRuntimeError> {
+        let mut retry_delay = PEER_RETRY_INITIAL_DELAY;
+        let mut retry_at = tokio::time::Instant::now();
+
+        loop {
+            let active_before = self.known_active_peer_count();
+            if active_before >= DEFAULT_ACTIVE_PEER_TARGET {
+                retry_delay = PEER_RETRY_INITIAL_DELAY;
+                retry_at = tokio::time::Instant::now();
+            } else if tokio::time::Instant::now() >= retry_at {
+                let active_after = self
+                    .bootstrap(bootstrap_records, DEFAULT_ACTIVE_PEER_TARGET)
+                    .await?;
+                if active_after > active_before {
+                    retry_delay = PEER_RETRY_INITIAL_DELAY;
+                    retry_at = tokio::time::Instant::now() + retry_delay;
+                } else {
+                    retry_at = tokio::time::Instant::now() + retry_delay;
+                    retry_delay = retry_delay
+                        .checked_mul(2)
+                        .unwrap_or(PEER_RETRY_MAX_DELAY)
+                        .min(PEER_RETRY_MAX_DELAY);
+                }
+            }
+
+            tokio::time::sleep(PEER_MAINTENANCE_INTERVAL).await;
         }
     }
 }
