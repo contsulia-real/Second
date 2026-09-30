@@ -169,7 +169,6 @@ impl PreparedTaskBook {
         state: &mut SecondState,
         task_id: TaskId,
         certificate: &FinalityCertificate,
-        validator_set: &ValidatorSet,
     ) -> Result<ExecutionOutcome, PreparationError> {
         let prepared = self
             .tasks
@@ -177,8 +176,8 @@ impl PreparedTaskBook {
             .cloned()
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
 
-        let expected_statement =
-            self.prepared_finality_statement(task_id.clone(), validator_set)?;
+        let validator_set = self.store.validator_set_for_prepared_task(&task_id)?;
+        let expected_statement = self.prepared_finality_statement(task_id.clone())?;
         let actual_statement = certificate.statement();
 
         if actual_statement.subject_digest() != expected_statement.subject_digest() {
@@ -188,7 +187,7 @@ impl PreparedTaskBook {
             });
         }
 
-        certificate.verify(validator_set)?;
+        certificate.verify(&validator_set)?;
         self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Finalized)?;
 
         let mut candidate = state.clone();
@@ -199,13 +198,8 @@ impl PreparedTaskBook {
 
         match outcome {
             ExecutionOutcome::Succeeded => {
-                self.store.save_with_prepared(
-                    state,
-                    &candidate,
-                    validator_set,
-                    &self.tasks,
-                    &remaining,
-                )?;
+                self.store
+                    .commit_prepared_state(state, &candidate, &self.tasks, &remaining)?;
                 *state = candidate;
             }
             ExecutionOutcome::AlreadySucceeded => {
@@ -228,19 +222,12 @@ impl PreparedTaskBook {
     pub fn prepared_finality_statement(
         &self,
         task_id: TaskId,
-        validator_set: &ValidatorSet,
     ) -> Result<FinalityStatement, PreparationError> {
         let prepared = self
             .tasks
             .get(&task_id)
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
-
-        if prepared.validator_set_version != validator_set.version() {
-            return Err(PreparationError::ValidatorSetVersionChanged {
-                expected: prepared.validator_set_version,
-                actual: validator_set.version(),
-            });
-        }
+        self.store.validator_set_for_prepared_task(&task_id)?;
 
         Ok(FinalityStatement::new(
             CURRENT_PROTOCOL_VERSION,
@@ -254,14 +241,14 @@ impl PreparedTaskBook {
         task_id: TaskId,
         validator_id: ValidatorId,
         signing_key: &SigningKey,
-        validator_set: &ValidatorSet,
     ) -> Result<ValidatorVote, PreparationError> {
-        let statement = self.prepared_finality_statement(task_id.clone(), validator_set)?;
+        let validator_set = self.store.validator_set_for_prepared_task(&task_id)?;
+        let statement = self.prepared_finality_statement(task_id.clone())?;
         self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Voting)?;
 
         let signer = ValidatorSigner::new(validator_id, signing_key.clone(), self.store.clone());
         signer
-            .sign_prepared_task(task_id, &statement, validator_set)
+            .sign_prepared_task(task_id, &statement, &validator_set)
             .map_err(PreparationError::from)
     }
 

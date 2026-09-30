@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::prepared_plan::PreparedTask;
 use crate::validator_signer::FinalityScope;
 use crate::{
-    CertifiedPublicCurrencyCheckpoint, PersistenceError, PublicCurrencyCheckpointProof,
-    SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
+    CertifiedPublicCurrencyCheckpoint, CertifiedValidatorSetTransition, PersistenceError,
+    PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorId, ValidatorRegistry,
+    ValidatorSet, ValidatorTransitionError,
 };
 
 use super::codec::{SnapshotContents, encode_snapshot};
@@ -60,12 +61,14 @@ impl StateStore {
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
+        let retained_validator_sets = BTreeMap::new();
 
         self.write_next_unlocked(
             None,
             SnapshotContents {
                 state,
                 validator_set,
+                retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 validator_registry: &validator_registry,
@@ -91,12 +94,14 @@ impl StateStore {
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
+        let retained_validator_sets = BTreeMap::new();
 
         self.write_next_unlocked(
             None,
             SnapshotContents {
                 state,
                 validator_set,
+                retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 validator_registry,
@@ -104,6 +109,60 @@ impl StateStore {
                 validator_vote_locks: &validator_vote_locks,
             },
         )
+    }
+
+    pub fn activate_validator_set_transition(
+        &self,
+        certified_transition: &CertifiedValidatorSetTransition,
+        epoch: u64,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        certified_transition
+            .certificate()
+            .verify(&latest.validator_set)
+            .map_err(|error| {
+                PersistenceError::ValidatorTransition(ValidatorTransitionError::Finality(error))
+            })?;
+
+        let mut validator_registry = latest.validator_registry.clone();
+        let next_validator_set = certified_transition
+            .clone()
+            .activate(epoch, &mut validator_registry)
+            .map_err(PersistenceError::ValidatorTransition)?;
+        let retained_validator_sets =
+            retained_sets_for_prepared(Some(&latest), &next_validator_set, &latest.prepared_tasks)?;
+
+        self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state: &latest.state,
+                validator_set: &next_validator_set,
+                retained_validator_sets: &retained_validator_sets,
+                public_checkpoint_proof: None,
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_registry: &validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
+            },
+        )
+    }
+
+    pub(crate) fn validator_set_for_prepared_task(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<ValidatorSet, PersistenceError> {
+        let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
+        let prepared = snapshot
+            .prepared_tasks
+            .get(task_id)
+            .ok_or(PersistenceError::StalePreparedTasks)?;
+        resolve_validator_set(&snapshot, prepared.validator_set_version)
+            .cloned()
+            .ok_or(PersistenceError::InvalidSnapshot)
     }
 
     pub fn attach_checkpoint_proof(
@@ -120,6 +179,7 @@ impl StateStore {
             SnapshotContents {
                 state: &latest.state,
                 validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 validator_registry: &latest.validator_registry,
@@ -151,6 +211,7 @@ impl StateStore {
             SnapshotContents {
                 state: &latest.state,
                 validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: Some(&proof),
                 checkpoint_floor_epoch,
                 validator_registry: &latest.validator_registry,
@@ -182,6 +243,7 @@ impl StateStore {
             SnapshotContents {
                 state: &latest.state,
                 validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
                 validator_registry: &latest.validator_registry,
@@ -221,17 +283,61 @@ impl StateStore {
             .as_ref()
             .map(|snapshot| snapshot.validator_vote_locks.clone())
             .unwrap_or_default();
+        let retained_validator_sets =
+            retained_sets_for_prepared(latest.as_ref(), validator_set, prepared_tasks)?;
 
         self.write_next_unlocked(
             latest.as_ref().map(|snapshot| snapshot.generation),
             SnapshotContents {
                 state,
                 validator_set,
+                retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint.as_ref(),
                 checkpoint_floor_epoch,
                 validator_registry: &registry,
                 prepared_tasks,
                 validator_vote_locks: &vote_locks,
+            },
+        )
+    }
+
+    pub(crate) fn commit_prepared_state(
+        &self,
+        expected_state: &SecondState,
+        state: &SecondState,
+        expected_prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+        prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        if !latest.state.same_persisted_state(expected_state) {
+            return Err(PersistenceError::StaleState);
+        }
+        if &latest.prepared_tasks != expected_prepared_tasks {
+            return Err(PersistenceError::StalePreparedTasks);
+        }
+
+        let retained_validator_sets =
+            retained_sets_for_prepared(Some(&latest), &latest.validator_set, prepared_tasks)?;
+        let checkpoint = latest
+            .public_checkpoint_proof
+            .as_ref()
+            .filter(|proof| checkpoint_matches(proof, state, &latest.validator_set));
+
+        self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state,
+                validator_set: &latest.validator_set,
+                retained_validator_sets: &retained_validator_sets,
+                public_checkpoint_proof: checkpoint,
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
             },
         )
     }
@@ -249,12 +355,15 @@ impl StateStore {
         if &latest.prepared_tasks != expected_prepared_tasks {
             return Err(PersistenceError::StalePreparedTasks);
         }
+        let retained_validator_sets =
+            retained_sets_for_prepared(Some(&latest), &latest.validator_set, prepared_tasks)?;
 
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
                 state: &latest.state,
                 validator_set: &latest.validator_set,
+                retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 validator_registry: &latest.validator_registry,
@@ -302,10 +411,7 @@ impl StateStore {
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
 
-        latest
-            .validator_registry
-            .validate_current_set(validator_set)
-            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        validate_vote_validator_set(&latest, &scope, validator_set)?;
 
         match latest
             .validator_vote_locks
@@ -327,6 +433,7 @@ impl StateStore {
             SnapshotContents {
                 state: &latest.state,
                 validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 validator_registry: &latest.validator_registry,
@@ -382,6 +489,72 @@ impl StateStore {
         write_slots(&self.base_path, generation, &bytes)?;
         Ok(generation)
     }
+}
+
+fn retained_sets_for_prepared(
+    latest: Option<&PersistedNodeState>,
+    active_validator_set: &ValidatorSet,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+) -> Result<BTreeMap<u64, ValidatorSet>, PersistenceError> {
+    let referenced = prepared_tasks
+        .values()
+        .map(|prepared| prepared.validator_set_version)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut retained = BTreeMap::new();
+
+    for version in referenced {
+        if version == active_validator_set.version() {
+            continue;
+        }
+
+        let set = latest
+            .and_then(|snapshot| {
+                if snapshot.validator_set.version() == version {
+                    Some(snapshot.validator_set.clone())
+                } else {
+                    snapshot.retained_validator_sets.get(&version).cloned()
+                }
+            })
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        retained.insert(version, set);
+    }
+
+    Ok(retained)
+}
+
+fn resolve_validator_set(snapshot: &PersistedNodeState, version: u64) -> Option<&ValidatorSet> {
+    if snapshot.validator_set.version() == version {
+        Some(&snapshot.validator_set)
+    } else {
+        snapshot.retained_validator_sets.get(&version)
+    }
+}
+
+fn validate_vote_validator_set(
+    snapshot: &PersistedNodeState,
+    scope: &FinalityScope,
+    validator_set: &ValidatorSet,
+) -> Result<(), PersistenceError> {
+    match scope {
+        FinalityScope::PreparedTask(task_id) => {
+            let prepared = snapshot
+                .prepared_tasks
+                .get(task_id)
+                .ok_or(PersistenceError::StalePreparedTasks)?;
+            let expected = resolve_validator_set(snapshot, prepared.validator_set_version)
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+            if expected != validator_set {
+                return Err(PersistenceError::ValidatorRegistryMismatch);
+            }
+        }
+        FinalityScope::PublicCheckpoint(_) | FinalityScope::ValidatorSetTransition { .. } => {
+            snapshot
+                .validator_registry
+                .validate_current_set(validator_set)
+                .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        }
+    }
+    Ok(())
 }
 
 fn registry_for_write(

@@ -10,15 +10,18 @@ use crate::validator_signer::FinalityScope;
 use crate::{
     AccountAddress, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
     PaymentAddressStatus, PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof,
-    SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
 use super::local_codec::{decode_local_state, encode_local_state};
 use super::snapshot_validation::{
     validate_prepared_plans_against_state, validate_prepared_snapshot_links,
-    validate_vote_lock_registry,
+    validate_retained_validator_sets, validate_vote_lock_registry,
 };
-use super::validator_codec::{decode_validator_registry, encode_validator_registry};
+use super::validator_codec::{
+    decode_validator_registry, decode_validator_set, encode_validator_registry,
+    encode_validator_set,
+};
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
 const SNAPSHOT_VERSION: u32 = 1;
@@ -33,6 +36,7 @@ pub(super) const MAX_SNAPSHOT_FILE_SIZE: u64 =
 pub(super) struct SnapshotContents<'a> {
     pub(super) state: &'a SecondState,
     pub(super) validator_set: &'a ValidatorSet,
+    pub(super) retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
     pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
     pub(super) checkpoint_floor_epoch: u64,
     pub(super) validator_registry: &'a ValidatorRegistry,
@@ -43,6 +47,7 @@ pub(super) struct SnapshotContents<'a> {
 struct DecodedSnapshotPayload {
     state: SecondState,
     validator_set: ValidatorSet,
+    retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     checkpoint_floor_epoch: u64,
     validator_registry: ValidatorRegistry,
@@ -64,6 +69,12 @@ pub(super) fn encode_snapshot(
         .validator_registry
         .validate_current_set(contents.validator_set)
         .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    validate_retained_validator_sets(
+        contents.validator_set,
+        contents.retained_validator_sets,
+        contents.validator_registry,
+        contents.prepared_tasks,
+    )?;
     validate_vote_lock_registry(contents.validator_registry, contents.validator_vote_locks)?;
     validate_prepared_snapshot_links(
         &contents.state.protocol.task_bindings,
@@ -73,15 +84,7 @@ pub(super) fn encode_snapshot(
         contents.validator_vote_locks,
     )?;
     validate_prepared_plans_against_state(contents.state, contents.prepared_tasks)?;
-    let payload = encode_payload(
-        contents.state,
-        contents.validator_set,
-        contents.public_checkpoint_proof,
-        contents.checkpoint_floor_epoch,
-        contents.validator_registry,
-        contents.prepared_tasks,
-        contents.validator_vote_locks,
-    )?;
+    let payload = encode_payload(&contents)?;
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| PersistenceError::SnapshotTooLarge)?;
 
@@ -162,11 +165,18 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         .validator_registry
         .validate_current_set(&decoded.validator_set)
         .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    validate_retained_validator_sets(
+        &decoded.validator_set,
+        &decoded.retained_validator_sets,
+        &decoded.validator_registry,
+        &decoded.prepared_tasks,
+    )?;
 
     Ok(PersistedNodeState {
         state: decoded.state,
         validator_set: decoded.validator_set,
         validator_registry: decoded.validator_registry,
+        retained_validator_sets: decoded.retained_validator_sets,
         public_checkpoint_proof: decoded.public_checkpoint_proof,
         checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
         generation,
@@ -182,15 +192,15 @@ fn snapshot_checksum(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn encode_payload(
-    state: &SecondState,
-    validator_set: &ValidatorSet,
-    public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    checkpoint_floor_epoch: u64,
-    validator_registry: &ValidatorRegistry,
-    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
-    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
-) -> Result<Vec<u8>, PersistenceError> {
+fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, PersistenceError> {
+    let state = contents.state;
+    let validator_set = contents.validator_set;
+    let retained_validator_sets = contents.retained_validator_sets;
+    let public_checkpoint_proof = contents.public_checkpoint_proof;
+    let checkpoint_floor_epoch = contents.checkpoint_floor_epoch;
+    let validator_registry = contents.validator_registry;
+    let prepared_tasks = contents.prepared_tasks;
+    let validator_vote_locks = contents.validator_vote_locks;
     let mut out = Vec::new();
 
     if state
@@ -252,13 +262,10 @@ fn encode_payload(
         out.extend_from_slice(&execution.amount.to_be_bytes());
     }
 
-    out.extend_from_slice(&validator_set.version().to_be_bytes());
-    push_len(&mut out, validator_set.len())?;
-    for credential in validator_set.credentials() {
-        out.extend_from_slice(&credential.id().value().to_be_bytes());
-        out.extend_from_slice(&credential.identity_public_key());
-        out.extend_from_slice(&credential.consensus_public_key());
-        out.extend_from_slice(&credential.recovery_public_key());
+    encode_validator_set(&mut out, validator_set)?;
+    push_len(&mut out, retained_validator_sets.len())?;
+    for retained in retained_validator_sets.values() {
+        encode_validator_set(&mut out, retained)?;
     }
 
     encode_validator_registry(&mut out, validator_registry)?;
@@ -438,28 +445,21 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         }
     }
 
-    let validator_set_version = decoder.read_u64()?;
-    let validator_count = decoder.read_len()?;
-    const VALIDATOR_ENCODED_SIZE: usize = 8 + 32 * 3;
-    if validator_count > decoder.remaining() / VALIDATOR_ENCODED_SIZE {
+    let validator_set = decode_validator_set(&mut decoder)?;
+    let retained_count = decoder.read_len()?;
+    const MIN_VALIDATOR_SET_SIZE: usize = 8 + 8 + 8 + 32 * 3;
+    if retained_count > decoder.remaining() / MIN_VALIDATOR_SET_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
-    let mut validators = Vec::with_capacity(validator_count);
-
-    for _ in 0..validator_count {
-        let id = ValidatorId::new(decoder.read_u64()?);
-        let identity_public_key = decoder.read_array_32()?;
-        let consensus_public_key = decoder.read_array_32()?;
-        let recovery_public_key = decoder.read_array_32()?;
-        validators.push(
-            ValidatorCredential::new(
-                id,
-                identity_public_key,
-                consensus_public_key,
-                recovery_public_key,
-            )
-            .map_err(|_| PersistenceError::InvalidSnapshot)?,
-        );
+    let mut retained_validator_sets = BTreeMap::new();
+    for _ in 0..retained_count {
+        let retained = decode_validator_set(&mut decoder)?;
+        if retained_validator_sets
+            .insert(retained.version(), retained)
+            .is_some()
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
     }
 
     let validator_registry = decode_validator_registry(&mut decoder)?;
@@ -482,8 +482,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
 
     decoder.finish()?;
 
-    let validator_set = ValidatorSet::new(validator_set_version, validators)
-        .map_err(|_| PersistenceError::InvalidSnapshot)?;
     let state = SecondState {
         protocol: ProtocolState {
             next_currency_address,
@@ -509,6 +507,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     Ok(DecodedSnapshotPayload {
         state,
         validator_set,
+        retained_validator_sets,
         public_checkpoint_proof,
         checkpoint_floor_epoch,
         validator_registry,

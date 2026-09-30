@@ -23,6 +23,7 @@ pub struct PersistedNodeState {
     pub state: SecondState,
     pub validator_set: ValidatorSet,
     pub validator_registry: ValidatorRegistry,
+    pub retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     pub public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub checkpoint_floor_epoch: u64,
     pub generation: u64,

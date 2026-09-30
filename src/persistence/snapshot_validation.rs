@@ -6,8 +6,44 @@ use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
 use crate::{
     CurrencyClaimBook, OperationClaimId, PaymentAddress, PersistenceError, SecondState, TaskId,
-    ValidatorId, ValidatorRegistry,
+    ValidatorId, ValidatorRegistry, ValidatorSet,
 };
+
+pub(super) fn validate_retained_validator_sets(
+    active_validator_set: &ValidatorSet,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
+    validator_registry: &ValidatorRegistry,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+) -> Result<(), PersistenceError> {
+    let referenced_versions = prepared_tasks
+        .values()
+        .map(|prepared| prepared.validator_set_version)
+        .collect::<BTreeSet<_>>();
+
+    for (version, retained) in retained_validator_sets {
+        if *version != retained.version()
+            || *version >= active_validator_set.version()
+            || !referenced_versions.contains(version)
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        validator_registry
+            .validate_historical_set(retained)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    }
+
+    for version in referenced_versions {
+        if version == active_validator_set.version() {
+            continue;
+        }
+        if !retained_validator_sets.contains_key(&version) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    Ok(())
+}
 
 pub(super) fn validate_vote_lock_registry(
     validator_registry: &ValidatorRegistry,

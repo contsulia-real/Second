@@ -90,6 +90,7 @@ pub enum PersistenceError {
     StaleState,
     StalePreparedTasks,
     ValidatorRegistryMismatch,
+    ValidatorTransition(ValidatorTransitionError),
     GenerationOverflow,
     ConflictingSnapshotGeneration(u64),
     CheckpointDoesNotMatchState,

@@ -25,9 +25,7 @@ fn certify(
     task_id: TaskId,
     validator_set: &ValidatorSet,
 ) -> FinalityCertificate {
-    let statement = book
-        .prepared_finality_statement(task_id, validator_set)
-        .unwrap();
+    let statement = book.prepared_finality_statement(task_id).unwrap();
     let votes = [1_u64, 2, 3]
         .into_iter()
         .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8)));
@@ -293,12 +291,7 @@ fn valid_finality_apply_failure_keeps_prepared_plan_recoverable() {
     let certificate = certify(&prepared, task.task_id(), &validator_set);
 
     assert!(matches!(
-        prepared.commit(
-            &mut stale_state,
-            task.task_id(),
-            &certificate,
-            &validator_set,
-        ),
+        prepared.commit(&mut stale_state, task.task_id(), &certificate),
         Err(PreparationError::Execution(
             ExecutionError::TransferNotEstablished(_)
         ))
@@ -396,12 +389,9 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
     assert_ne!(old_digest, new_digest);
 
     assert_eq!(
-        prepared.book.commit(
-            &mut state,
-            task.task_id(),
-            &old_certificate,
-            &prepared.validators,
-        ),
+        prepared
+            .book
+            .commit(&mut state, task.task_id(), &old_certificate),
         Err(PreparationError::FinalitySubjectMismatch {
             expected: new_digest,
             actual: old_digest,
@@ -413,12 +403,7 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
     assert_eq!(
         prepared
             .book
-            .commit(
-                &mut state,
-                task.task_id(),
-                &current_certificate,
-                &prepared.validators,
-            )
+            .commit(&mut state, task.task_id(), &current_certificate)
             .unwrap(),
         ExecutionOutcome::Succeeded
     );
@@ -428,7 +413,7 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
 }
 
 #[test]
-fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
+fn prepared_plan_keeps_the_validator_set_version_that_created_it() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let mut prepared = FinalityHarness::new("validator-set-binding");
@@ -441,16 +426,14 @@ fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
     );
 
     prepared.prepare(&mut state, &task, 1).unwrap();
-    let next_set = validators_at(prepared.validators.version() + 1);
+    let statement = prepared
+        .book
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
 
     assert_eq!(
-        prepared
-            .book
-            .prepared_finality_statement(task.task_id(), &next_set),
-        Err(PreparationError::ValidatorSetVersionChanged {
-            expected: prepared.validators.version(),
-            actual: next_set.version(),
-        })
+        statement.validator_set_version(),
+        prepared.validators.version()
     );
 }
 
@@ -557,7 +540,7 @@ fn crash_after_prepare_restores_the_exact_plan_without_reallocating_addresses() 
 
     let certificate = certify(&recovered, task.task_id(), &validator_set);
     recovered
-        .commit(&mut state, task.task_id(), &certificate, &validator_set)
+        .commit(&mut state, task.task_id(), &certificate)
         .unwrap();
 
     assert_eq!(state.next_currency_address(), 3);
@@ -587,7 +570,7 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
         .unwrap();
     let certificate = certify(&prepared, task.task_id(), &validator_set);
     prepared
-        .commit(&mut state, task.task_id(), &certificate, &validator_set)
+        .commit(&mut state, task.task_id(), &certificate)
         .unwrap();
 
     let mut restored = store.load().unwrap().unwrap().state;
@@ -671,7 +654,7 @@ fn stale_book_cannot_cancel_task_after_another_book_begins_voting() {
     let mut stale = PreparedTaskBook::new(store.clone()).unwrap();
     let mut voting = PreparedTaskBook::new(store.clone()).unwrap();
     voting
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4))
         .unwrap();
 
     assert_eq!(
@@ -716,7 +699,7 @@ fn stale_preparer_cannot_overwrite_newer_finalized_state() {
     let certificate = certify(&first, first_task.task_id(), &set);
     assert_eq!(
         first
-            .commit(&mut first_state, first_task.task_id(), &certificate, &set)
+            .commit(&mut first_state, first_task.task_id(), &certificate)
             .unwrap(),
         ExecutionOutcome::Succeeded
     );

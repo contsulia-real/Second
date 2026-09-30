@@ -1,11 +1,16 @@
 use crate::support;
 
 use second::{
-    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
+    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ExecutionOutcome, Operation,
+    PersistenceError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState, StateStore,
     ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorTransitionError,
+    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
+    ValidatorSigningError, ValidatorTransitionError,
 };
-use support::{key, signed_vote, validator_credential as credential};
+use support::{
+    certificate_from_keys, key, signed_vote, temp_base, validator_credential as credential,
+    verified_task,
+};
 
 fn current_set() -> ValidatorSet {
     ValidatorSet::new(4, (1..=4).map(credential)).unwrap()
@@ -394,4 +399,135 @@ fn certified_transition_only_activates_at_its_declared_epoch() {
     let activated = certified.activate(10, &mut registry).unwrap();
     assert_eq!(activated.version(), 5);
     assert_eq!(activated.len(), 5);
+}
+
+#[test]
+fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation() {
+    let current = current_set();
+    let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        9,
+        &current,
+        &registry(&current),
+        next,
+        vec![admission(5)],
+        Vec::new(),
+    )
+    .unwrap();
+    let transition_statement = transition.finality_statement();
+    let transition_votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| {
+            signed_vote(
+                &transition_statement,
+                ValidatorId::new(id),
+                &key((id * 3 + 1) as u8),
+            )
+        })
+        .collect();
+    let certified =
+        CertifiedValidatorSetTransition::new(transition, transition_votes, &current).unwrap();
+
+    let alice = support::account(1);
+    let store = StateStore::new(temp_base("prepared-cross-validator-epoch"));
+    let mut state = SecondState::genesis([alice], 1);
+    let task = verified_task(
+        900,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    {
+        let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+        book.prepare(&mut state, &task, 1, &current).unwrap();
+    }
+
+    store
+        .activate_validator_set_transition(&certified, 10)
+        .unwrap();
+
+    let activated_v5 = store.load().unwrap().unwrap();
+    assert_eq!(activated_v5.validator_set.version(), 5);
+    assert_eq!(activated_v5.retained_validator_sets.get(&4), Some(&current));
+
+    let current_v5 = activated_v5.validator_set.clone();
+    let next_v6 = ValidatorSet::new(6, (1..=5).map(credential)).unwrap();
+    let transition_v6 = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        &current_v5,
+        &activated_v5.validator_registry,
+        next_v6,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let statement_v6 = transition_v6.finality_statement();
+    let votes_v6 = [1_u64, 2, 3, 4]
+        .into_iter()
+        .map(|id| {
+            signed_vote(
+                &statement_v6,
+                ValidatorId::new(id),
+                &key((id * 3 + 1) as u8),
+            )
+        })
+        .collect();
+    let certified_v6 =
+        CertifiedValidatorSetTransition::new(transition_v6, votes_v6, &current_v5).unwrap();
+    store
+        .activate_validator_set_transition(&certified_v6, 11)
+        .unwrap();
+
+    let activated = store.load().unwrap().unwrap();
+    assert_eq!(activated.validator_set.version(), 6);
+    assert_eq!(activated.retained_validator_sets.get(&4), Some(&current));
+    assert!(!activated.retained_validator_sets.contains_key(&5));
+
+    let stale_checkpoint = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        12,
+        activated.state.public_currency_summary(),
+    );
+    assert_eq!(
+        ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
+            .sign_public_checkpoint(&stale_checkpoint, &current),
+        Err(ValidatorSigningError::Persistence(
+            PersistenceError::ValidatorRegistryMismatch
+        ))
+    );
+
+    let mut state = activated.state;
+    let mut recovered = PreparedTaskBook::new(store.clone()).unwrap();
+    let statement = recovered
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
+    assert_eq!(statement.validator_set_version(), 4);
+
+    recovered
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4))
+        .unwrap();
+
+    let certificate = certificate_from_keys(
+        statement,
+        &current,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+    assert_eq!(
+        recovered
+            .commit(&mut state, task.task_id(), &certificate)
+            .unwrap(),
+        ExecutionOutcome::Succeeded
+    );
+
+    let committed = store.load().unwrap().unwrap();
+    assert_eq!(committed.validator_set.version(), 6);
+    assert!(committed.retained_validator_sets.is_empty());
+    assert_eq!(committed.state.current_supply(), 1);
+
+    store.remove_files().unwrap();
 }

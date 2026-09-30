@@ -194,15 +194,12 @@ impl FinalityHarness {
         state: &mut SecondState,
         task_id: TaskId,
     ) -> Result<ExecutionOutcome, PreparationError> {
-        let statement = self
-            .book
-            .prepared_finality_statement(task_id.clone(), &self.validators)?;
+        let statement = self.book.prepared_finality_statement(task_id.clone())?;
         let signers = [1_u64, 2, 3]
             .into_iter()
             .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8)));
         let certificate = certificate_from_keys(statement, &self.validators, signers);
-        self.book
-            .commit(state, task_id, &certificate, &self.validators)
+        self.book.commit(state, task_id, &certificate)
     }
 
     pub fn execute(

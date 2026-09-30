@@ -110,10 +110,10 @@ fn voting_task_cannot_be_cancelled_and_phase_survives_restart() {
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
     let first_vote = prepared
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1))
         .unwrap();
     let repeated_vote = prepared
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1))
         .unwrap();
 
     assert_eq!(first_vote, repeated_vote);
@@ -176,7 +176,7 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
         prepared.prepare(&mut state, &task, 2, &set).unwrap();
         first_digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
         first_vote = prepared
-            .sign_prepared_vote(task.task_id(), ValidatorId::new(4), &key(4), &set)
+            .sign_prepared_vote(task.task_id(), ValidatorId::new(4), &key(4))
             .unwrap();
     }
 
@@ -191,7 +191,7 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
     assert_eq!(prepared.claimed_currency_count(), 1);
 
     let repeated_vote = prepared
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(4), &key(4), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(4), &key(4))
         .unwrap();
     assert_eq!(repeated_vote, first_vote);
     assert_eq!(restored.state.next_currency_address(), 2);
@@ -217,7 +217,7 @@ fn vote_lock_is_durable_before_vote_is_returned() {
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
     prepared
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(2), &key(2), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(2), &key(2))
         .unwrap();
 
     assert_eq!(
@@ -264,7 +264,7 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
 
     prepared
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1), &set)
+        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1))
         .unwrap();
 
     assert_eq!(
@@ -501,7 +501,7 @@ fn wrong_consensus_key_does_not_create_a_vote_lock() {
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
 
     assert_eq!(
-        prepared.sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(2), &set),
+        prepared.sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(2)),
         Err(PreparationError::Signing(
             ValidatorSigningError::ConsensusSigningKeyMismatch(ValidatorId::new(1))
         ))

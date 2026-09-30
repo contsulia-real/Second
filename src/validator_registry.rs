@@ -95,6 +95,34 @@ impl ValidatorRegistry {
         Ok(())
     }
 
+    pub(crate) fn validate_historical_set(
+        &self,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), ValidatorRegistryError> {
+        for historical in validator_set.credentials() {
+            let Some(record) = self.records.get(&historical.id()) else {
+                return Err(ValidatorRegistryError::CurrentSetMembershipMismatch);
+            };
+
+            if historical.identity_public_key() != record.credential.identity_public_key() {
+                return Err(ValidatorRegistryError::IdentityKeyChanged(historical.id()));
+            }
+            if historical.recovery_public_key() != record.credential.recovery_public_key() {
+                return Err(ValidatorRegistryError::RecoveryKeyChanged(historical.id()));
+            }
+            if !record
+                .consensus_key_history
+                .contains(&historical.consensus_public_key())
+            {
+                return Err(ValidatorRegistryError::InvalidConsensusKeyHistory(
+                    historical.id(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn validate_transition(
         &self,
         current_validator_set: &ValidatorSet,

@@ -780,7 +780,9 @@ Validator admission 的治理来源固定为**当前 active ValidatorSet 的 fin
 
 因此，Validator membership 的授权链是：当前 ValidatorSet → 对 next ValidatorSet transition 的 QC → 下一 epoch 激活。Genesis 初始 ValidatorSet 是这条治理链的根；之后不引入持币量、算力、transport NodeId、单个管理员 key 或候选人的自签 admission 作为独立治理权。RecoverySet 的未来规则和现实世界“一人一 Validator”仍是独立未决问题，不改变当前协议内的 membership authorization source。
 
-`ValidatorRegistry::apply_next_set` 只是 Registry 内部状态转换 primitive，不是公开授权入口；公共 membership mutation 必须经 `CertifiedValidatorSetTransition` 验证当前 ValidatorSet 的 QC，并由其 `activate()` 在声明的 activation epoch 调用该 primitive。是否以及如何把这一激活原子持久化到节点 snapshot，仍受后文“旧 validator-set version 下 PreparedTask 如何处理”的未决边界约束。
+`ValidatorRegistry::apply_next_set` 只是 Registry 内部状态转换 primitive，不是公开授权入口；公共 membership mutation 必须经 `CertifiedValidatorSetTransition` 验证当前 ValidatorSet 的 QC。节点通过 `StateStore::activate_validator_set_transition` 在声明的 activation epoch 原子持久化 next ValidatorSet、更新后的 Registry 以及仍被 active PreparedTask 引用的历史 ValidatorSet。
+
+PreparedTask 永久绑定 prepare 时的 validator-set version。ValidatorSet 后续激活不要求清空旧 `Prepared` / `Voting` / `Finalized` task：节点只要仍有 active PreparedTask 引用某个旧 version，就必须在 snapshot 的 retained validator sets 中保留该 version 的完整 ValidatorSet，并用它完成该 task 的后续 vote / QC verify / commit。新 public checkpoint 和新的 ValidatorSet transition 始终只使用当前 active ValidatorSet。某个旧 validator-set version 不再被任何 active PreparedTask 引用时，下一次原子 snapshot 写入必须删除对应 retained set；历史 vote-lock 与 ValidatorRegistry 永久历史不因此删除。
 
 ---
 
@@ -1184,7 +1186,6 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 明确 ValidatorSet activation 与旧 validator-set version 下尚未结束的 PreparedTask 的关系。PreparedTask plan/finality subject 已绑定其 prepare 时的 validator-set version，而 snapshot 当前只保存 active ValidatorSet；在决定旧 set 的 `Prepared` / `Voting` / `Finalized` task 是必须先清空、允许跨 epoch 并保留历史 ValidatorSet，还是采用其他明确规则前，不能把 `CertifiedValidatorSetTransition` 直接接成 durable activation，避免把已经进入投票或 finality 的任务变成无法验证/commit 的孤儿；
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；

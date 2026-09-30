@@ -2,10 +2,56 @@ use std::collections::BTreeSet;
 
 use crate::validator_registry::ValidatorRegistryRecord;
 use crate::{
-    PersistenceError, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorStatus,
+    PersistenceError, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorStatus,
 };
 
 use super::codec::{Decoder, push_len};
+
+pub(super) fn encode_validator_set(
+    out: &mut Vec<u8>,
+    validator_set: &ValidatorSet,
+) -> Result<(), PersistenceError> {
+    out.extend_from_slice(&validator_set.version().to_be_bytes());
+    push_len(out, validator_set.len())?;
+    for credential in validator_set.credentials() {
+        out.extend_from_slice(&credential.id().value().to_be_bytes());
+        out.extend_from_slice(&credential.identity_public_key());
+        out.extend_from_slice(&credential.consensus_public_key());
+        out.extend_from_slice(&credential.recovery_public_key());
+    }
+    Ok(())
+}
+
+pub(super) fn decode_validator_set(
+    decoder: &mut Decoder<'_>,
+) -> Result<ValidatorSet, PersistenceError> {
+    let version = decoder.read_u64()?;
+    let validator_count = decoder.read_len()?;
+    const VALIDATOR_ENCODED_SIZE: usize = 8 + 32 * 3;
+    if validator_count > decoder.remaining() / VALIDATOR_ENCODED_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    let mut validators = Vec::with_capacity(validator_count);
+    for _ in 0..validator_count {
+        let id = ValidatorId::new(decoder.read_u64()?);
+        let identity_public_key = decoder.read_array_32()?;
+        let consensus_public_key = decoder.read_array_32()?;
+        let recovery_public_key = decoder.read_array_32()?;
+        validators.push(
+            ValidatorCredential::new(
+                id,
+                identity_public_key,
+                consensus_public_key,
+                recovery_public_key,
+            )
+            .map_err(|_| PersistenceError::InvalidSnapshot)?,
+        );
+    }
+
+    ValidatorSet::new(version, validators).map_err(|_| PersistenceError::InvalidSnapshot)
+}
 
 pub(super) fn encode_validator_registry(
     out: &mut Vec<u8>,

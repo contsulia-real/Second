@@ -59,9 +59,7 @@ fn execute_in_store(
         book.prepare(state, task, now, validator_set).unwrap(),
         second::PreparationOutcome::Prepared
     );
-    let statement = book
-        .prepared_finality_statement(task.task_id(), validator_set)
-        .unwrap();
+    let statement = book.prepared_finality_statement(task.task_id()).unwrap();
     let certificate = support::certificate_from_keys(
         statement,
         validator_set,
@@ -69,8 +67,7 @@ fn execute_in_store(
             .into_iter()
             .map(|id| (ValidatorId::new(id), key(id as u8))),
     );
-    book.commit(state, task.task_id(), &certificate, validator_set)
-        .unwrap();
+    book.commit(state, task.task_id(), &certificate).unwrap();
 }
 
 #[test]
