@@ -1,10 +1,12 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{ValidatorCredential, ValidatorId, ValidatorSet};
+use support::key;
 
 fn credential(id: u64) -> ValidatorCredential {
-    let consensus = SigningKey::from_bytes(&[id as u8; 32]);
-    let identity = SigningKey::from_bytes(&[(id as u8).wrapping_add(40); 32]);
-    let recovery = SigningKey::from_bytes(&[(id as u8).wrapping_add(80); 32]);
+    let consensus = key(id as u8);
+    let identity = key((id as u8).wrapping_add(40));
+    let recovery = key((id as u8).wrapping_add(80));
     ValidatorCredential::new(
         ValidatorId::new(id),
         identity.verifying_key().to_bytes(),

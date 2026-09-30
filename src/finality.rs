@@ -57,7 +57,7 @@ pub struct ValidatorVote {
 }
 
 impl ValidatorVote {
-    pub fn sign(
+    pub(crate) fn sign_unchecked(
         statement: &FinalityStatement,
         validator_id: ValidatorId,
         signing_key: &SigningKey,
@@ -70,7 +70,7 @@ impl ValidatorVote {
         }
     }
 
-    pub const fn from_parts(validator_id: ValidatorId, signature: [u8; 64]) -> Self {
+    pub const fn from_untrusted_parts(validator_id: ValidatorId, signature: [u8; 64]) -> Self {
         Self {
             validator_id,
             signature,

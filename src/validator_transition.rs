@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityStatement,
-    ValidatorConsensusKeyRotationRequest, ValidatorId, ValidatorSet, ValidatorTransitionError,
-    ValidatorVote, VerifiedValidatorAdmission,
+    ValidatorConsensusKeyRotationRequest, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorTransitionError, ValidatorVote, VerifiedValidatorAdmission,
 };
 
 const TRANSITION_DOMAIN: &[u8] = b"SECOND_VALIDATOR_SET_TRANSITION_V1\0";
@@ -27,6 +27,7 @@ impl ValidatorSetTransition {
         protocol_version: u32,
         current_epoch: u64,
         current_validator_set: &ValidatorSet,
+        validator_registry: &ValidatorRegistry,
         next_validator_set: ValidatorSet,
         admissions: Vec<VerifiedValidatorAdmission>,
         consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
@@ -53,16 +54,9 @@ impl ValidatorSetTransition {
             .checked_add(1)
             .ok_or(ValidatorTransitionError::EpochOverflow)?;
 
-        for current in current_validator_set.credentials() {
-            if let Some(next) = next_validator_set.credential(current.id()) {
-                if next.identity_public_key() != current.identity_public_key() {
-                    return Err(ValidatorTransitionError::IdentityKeyChanged(current.id()));
-                }
-                if next.recovery_public_key() != current.recovery_public_key() {
-                    return Err(ValidatorTransitionError::RecoveryKeyChanged(current.id()));
-                }
-            }
-        }
+        validator_registry
+            .validate_transition(current_validator_set, &next_validator_set)
+            .map_err(map_registry_error)?;
 
         validate_admissions(current_validator_set, &next_validator_set, &admissions)?;
         validate_consensus_key_rotations(
@@ -178,7 +172,11 @@ impl CertifiedValidatorSetTransition {
         &self.certificate
     }
 
-    pub fn activate(self, epoch: u64) -> Result<ValidatorSet, ValidatorTransitionError> {
+    pub fn activate(
+        self,
+        epoch: u64,
+        validator_registry: &mut ValidatorRegistry,
+    ) -> Result<ValidatorSet, ValidatorTransitionError> {
         if epoch != self.transition.activation_epoch() {
             return Err(ValidatorTransitionError::WrongActivationEpoch {
                 expected: self.transition.activation_epoch(),
@@ -186,7 +184,23 @@ impl CertifiedValidatorSetTransition {
             });
         }
 
+        validator_registry
+            .apply_next_set(&self.transition.next_validator_set)
+            .map_err(ValidatorTransitionError::Registry)?;
+
         Ok(self.transition.next_validator_set)
+    }
+}
+
+fn map_registry_error(error: crate::ValidatorRegistryError) -> ValidatorTransitionError {
+    match error {
+        crate::ValidatorRegistryError::IdentityKeyChanged(validator_id) => {
+            ValidatorTransitionError::IdentityKeyChanged(validator_id)
+        }
+        crate::ValidatorRegistryError::RecoveryKeyChanged(validator_id) => {
+            ValidatorTransitionError::RecoveryKeyChanged(validator_id)
+        }
+        other => ValidatorTransitionError::Registry(other),
     }
 }
 

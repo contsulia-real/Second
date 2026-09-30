@@ -1,15 +1,13 @@
 use std::fs;
 use std::process::Command;
 
-use ed25519_dalek::SigningKey;
-use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
-    Operation, SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId, ValidatorSet,
-};
+mod support;
 
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
+use second::{
+    AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation, SecondState,
+    StateStore, ValidatorCredential, ValidatorId, ValidatorSet,
+};
+use support::{key, temp_base};
 
 fn validators() -> ValidatorSet {
     ValidatorSet::new(
@@ -27,20 +25,8 @@ fn validators() -> ValidatorSet {
     .unwrap()
 }
 
-fn temp_base(name: &str) -> std::path::PathBuf {
-    let unique = format!(
-        "second-cli-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    std::env::temp_dir().join(unique)
-}
-
 fn state_with_issue() -> SecondState {
-    let alice = AccountAddress::new(123456);
+    let alice = support::account(123456);
     let signing = key(9);
     let authorizers = AuthorizerSet::new(
         CURRENT_PROTOCOL_VERSION,
@@ -49,9 +35,9 @@ fn state_with_issue() -> SecondState {
     .unwrap();
     let task = LegalTask::sign(
         LegalTaskPayload::new(
-            TaskId::new(1),
+            support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            None,
+            u64::MAX,
             vec![Operation::Issue {
                 account: alice,
                 count: 2,

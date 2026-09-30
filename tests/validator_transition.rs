@@ -1,27 +1,18 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
-    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId,
+    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
     ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorTransitionError,
-    ValidatorVote,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn credential(id: u64) -> ValidatorCredential {
-    ValidatorCredential::new(
-        ValidatorId::new(id),
-        key((id * 3) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 1) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 2) as u8).verifying_key().to_bytes(),
-    )
-    .unwrap()
-}
+use support::{key, signed_vote, validator_credential as credential};
 
 fn current_set() -> ValidatorSet {
     ValidatorSet::new(4, (1..=4).map(credential)).unwrap()
+}
+
+fn registry(current: &ValidatorSet) -> ValidatorRegistry {
+    ValidatorRegistry::from_validator_set(current).unwrap()
 }
 
 fn admission(id: u64) -> second::VerifiedValidatorAdmission {
@@ -74,6 +65,7 @@ fn current_quorum_can_certify_complete_next_validator_set() {
         CURRENT_PROTOCOL_VERSION,
         9,
         &current,
+        &registry(&current),
         next,
         vec![admission(5)],
         Vec::new(),
@@ -83,7 +75,7 @@ fn current_quorum_can_certify_complete_next_validator_set() {
 
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
         .collect();
 
     let certified = CertifiedValidatorSetTransition::new(transition, votes, &current).unwrap();
@@ -101,6 +93,7 @@ fn joining_validator_cannot_contribute_a_vote_before_activation() {
         CURRENT_PROTOCOL_VERSION,
         9,
         &current,
+        &registry(&current),
         next,
         vec![admission(5)],
         Vec::new(),
@@ -109,9 +102,9 @@ fn joining_validator_cannot_contribute_a_vote_before_activation() {
     let statement = transition.finality_statement();
 
     let votes = vec![
-        ValidatorVote::sign(&statement, ValidatorId::new(1), &key(4)),
-        ValidatorVote::sign(&statement, ValidatorId::new(2), &key(7)),
-        ValidatorVote::sign(&statement, ValidatorId::new(5), &key(16)),
+        signed_vote(&statement, ValidatorId::new(1), &key(4)),
+        signed_vote(&statement, ValidatorId::new(2), &key(7)),
+        signed_vote(&statement, ValidatorId::new(5), &key(16)),
     ];
 
     assert_eq!(
@@ -142,6 +135,7 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             Vec::new(),
             Vec::new(),
@@ -171,6 +165,7 @@ fn retained_validator_recovery_key_cannot_be_rewritten() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             Vec::new(),
             Vec::new(),
@@ -200,6 +195,7 @@ fn retained_validator_consensus_key_requires_rotation_request() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             Vec::new(),
             Vec::new(),
@@ -239,6 +235,7 @@ fn identity_authorized_consensus_key_rotation_is_accepted() {
         CURRENT_PROTOCOL_VERSION,
         9,
         &current,
+        &registry(&current),
         next,
         Vec::new(),
         vec![rotation],
@@ -285,6 +282,7 @@ fn consensus_key_rotation_is_bound_to_activation_epoch() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             Vec::new(),
             vec![rotation],
@@ -309,6 +307,7 @@ fn newly_added_validator_without_admission_proof_is_rejected() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             Vec::new(),
             Vec::new(),
@@ -329,6 +328,7 @@ fn admission_for_validator_not_added_to_next_set_is_rejected() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             vec![admission(6)],
             Vec::new(),
@@ -350,6 +350,7 @@ fn duplicate_admission_proof_is_rejected() {
             CURRENT_PROTOCOL_VERSION,
             9,
             &current,
+            &registry(&current),
             next,
             vec![proof.clone(), proof],
             Vec::new(),
@@ -368,6 +369,7 @@ fn certified_transition_only_activates_at_its_declared_epoch() {
         CURRENT_PROTOCOL_VERSION,
         9,
         &current,
+        &registry(&current),
         next,
         vec![admission(5)],
         Vec::new(),
@@ -376,19 +378,20 @@ fn certified_transition_only_activates_at_its_declared_epoch() {
     let statement = transition.finality_statement();
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
         .collect();
     let certified = CertifiedValidatorSetTransition::new(transition, votes, &current).unwrap();
+    let mut registry = registry(&current);
 
     assert_eq!(
-        certified.clone().activate(9),
+        certified.clone().activate(9, &mut registry),
         Err(ValidatorTransitionError::WrongActivationEpoch {
             expected: 10,
             actual: 9,
         })
     );
 
-    let activated = certified.activate(10).unwrap();
+    let activated = certified.activate(10, &mut registry).unwrap();
     assert_eq!(activated.version(), 5);
     assert_eq!(activated.len(), 5);
 }

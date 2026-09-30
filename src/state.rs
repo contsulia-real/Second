@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::currency::Currency;
+use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError,
-    PublicCurrencyPage, PublicCurrencyState, TaskId, ValidatorId, VerifiedLegalTask,
+    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, MAX_CURRENCY_SEQUENCE,
+    NetworkError, OperationClaimId, PaymentAddress, PublicCurrencyPage, PublicCurrencyState,
+    TaskId, VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,7 +16,7 @@ pub enum ExecutionOutcome {
 
 #[derive(Clone, Debug)]
 pub(crate) struct TaskBinding {
-    pub(crate) request_digest: [u8; 32],
+    pub(crate) legality_proof: [u8; 64],
     pub(crate) succeeded: bool,
 }
 
@@ -22,18 +24,24 @@ pub(crate) struct TaskBinding {
 pub(crate) struct ProtocolState {
     pub(crate) next_currency_address: u64,
     pub(crate) task_bindings: BTreeMap<TaskId, TaskBinding>,
-    pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, TaskId), [u8; 32]>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PrerequisiteState {
+    pub(crate) payment_executions: BTreeMap<OperationClaimId, PaymentExecution>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct BusinessState {
     pub(crate) accounts: BTreeSet<AccountAddress>,
+    pub(crate) payment_addresses: BTreeMap<PaymentAddress, PaymentAddressRecord>,
     pub(crate) currencies: BTreeMap<CurrencyAddress, Currency>,
 }
 
 #[derive(Clone)]
 pub struct SecondState {
     pub(crate) protocol: ProtocolState,
+    pub(crate) prerequisite: PrerequisiteState,
     pub(crate) business: BusinessState,
 }
 
@@ -46,10 +54,11 @@ impl SecondState {
             protocol: ProtocolState {
                 next_currency_address: first_currency_address,
                 task_bindings: BTreeMap::new(),
-                validator_vote_locks: BTreeMap::new(),
             },
+            prerequisite: PrerequisiteState::default(),
             business: BusinessState {
                 accounts: accounts.into_iter().collect(),
+                payment_addresses: BTreeMap::new(),
                 currencies: BTreeMap::new(),
             },
         }
@@ -136,16 +145,24 @@ impl SecondState {
     }
 
     pub(crate) fn bind_task(&mut self, task: &VerifiedLegalTask) -> Result<bool, ExecutionError> {
-        match self.protocol.task_bindings.get(&task.task_id()) {
-            Some(binding) if binding.request_digest != task.request_digest() => {
+        self.bind_task_legality_proof(task.task_id(), task.legality_proof())
+    }
+
+    pub(crate) fn bind_task_legality_proof(
+        &mut self,
+        task_id: TaskId,
+        legality_proof: [u8; 64],
+    ) -> Result<bool, ExecutionError> {
+        match self.protocol.task_bindings.get(&task_id) {
+            Some(binding) if binding.legality_proof != legality_proof => {
                 Err(ExecutionError::TaskIdAlreadyBound)
             }
             Some(binding) => Ok(binding.succeeded),
             None => {
                 self.protocol.task_bindings.insert(
-                    task.task_id(),
+                    task_id,
                     TaskBinding {
-                        request_digest: task.request_digest(),
+                        legality_proof,
                         succeeded: false,
                     },
                 );
@@ -160,33 +177,11 @@ impl SecondState {
         }
     }
 
-    pub fn validator_vote_lock(
-        &self,
-        validator_id: ValidatorId,
-        task_id: TaskId,
-    ) -> Option<[u8; 32]> {
-        self.protocol
-            .validator_vote_locks
-            .get(&(validator_id, task_id))
-            .copied()
-    }
-
-    pub(crate) fn set_validator_vote_lock(
-        &mut self,
-        validator_id: ValidatorId,
-        task_id: TaskId,
-        plan_digest: [u8; 32],
-    ) {
-        self.protocol
-            .validator_vote_locks
-            .insert((validator_id, task_id), plan_digest);
-    }
-
-    pub fn bound_request_digest(&self, task_id: TaskId) -> Option<[u8; 32]> {
+    pub fn bound_legality_proof(&self, task_id: TaskId) -> Option<[u8; 64]> {
         self.protocol
             .task_bindings
             .get(&task_id)
-            .map(|binding| binding.request_digest)
+            .map(|binding| binding.legality_proof)
     }
 
     pub(crate) fn allocate_currency_range(
@@ -198,9 +193,17 @@ impl SecondState {
         }
 
         let start = self.protocol.next_currency_address;
+        let exhausted_sentinel = MAX_CURRENCY_SEQUENCE + 1;
+        if start > MAX_CURRENCY_SEQUENCE {
+            return Err(ExecutionError::CurrencySequenceSpaceExhausted);
+        }
+
         let end_exclusive = start
             .checked_add(count)
-            .ok_or(ExecutionError::IdentitySpaceExhausted)?;
+            .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
+        if end_exclusive > exhausted_sentinel {
+            return Err(ExecutionError::CurrencySequenceSpaceExhausted);
+        }
 
         self.protocol.next_currency_address = end_exclusive;
 

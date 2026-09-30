@@ -1,12 +1,10 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
     CURRENT_PROTOCOL_VERSION, FinalityCertificate, FinalityError, FinalityStatement,
-    ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote,
+    ValidatorCredential, ValidatorId, ValidatorSet,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
+use support::{key, signed_vote};
 
 fn validator(id: u64, key_byte: u8) -> ValidatorCredential {
     ValidatorCredential::new(
@@ -40,9 +38,9 @@ fn three_of_four_equal_weight_validators_finalize_a_statement() {
     let set = set4();
     let statement = statement();
     let votes = vec![
-        ValidatorVote::sign(&statement, ValidatorId::new(1), &key(1)),
-        ValidatorVote::sign(&statement, ValidatorId::new(2), &key(2)),
-        ValidatorVote::sign(&statement, ValidatorId::new(3), &key(3)),
+        signed_vote(&statement, ValidatorId::new(1), &key(1)),
+        signed_vote(&statement, ValidatorId::new(2), &key(2)),
+        signed_vote(&statement, ValidatorId::new(3), &key(3)),
     ];
 
     let certificate = FinalityCertificate::new(statement, votes, &set).unwrap();
@@ -56,8 +54,8 @@ fn two_of_four_votes_are_not_enough() {
     let set = set4();
     let statement = statement();
     let votes = vec![
-        ValidatorVote::sign(&statement, ValidatorId::new(1), &key(1)),
-        ValidatorVote::sign(&statement, ValidatorId::new(2), &key(2)),
+        signed_vote(&statement, ValidatorId::new(1), &key(1)),
+        signed_vote(&statement, ValidatorId::new(2), &key(2)),
     ];
 
     assert_eq!(
@@ -73,7 +71,7 @@ fn two_of_four_votes_are_not_enough() {
 fn duplicate_validator_votes_are_rejected_not_double_counted() {
     let set = set4();
     let statement = statement();
-    let vote = ValidatorVote::sign(&statement, ValidatorId::new(1), &key(1));
+    let vote = signed_vote(&statement, ValidatorId::new(1), &key(1));
 
     assert_eq!(
         FinalityCertificate::new(
@@ -81,7 +79,7 @@ fn duplicate_validator_votes_are_rejected_not_double_counted() {
             vec![
                 vote.clone(),
                 vote,
-                ValidatorVote::sign(&statement, ValidatorId::new(2), &key(2)),
+                signed_vote(&statement, ValidatorId::new(2), &key(2)),
             ],
             &set,
         ),
@@ -94,9 +92,9 @@ fn signature_from_the_wrong_consensus_key_is_rejected() {
     let set = set4();
     let statement = statement();
     let votes = vec![
-        ValidatorVote::sign(&statement, ValidatorId::new(1), &key(99)),
-        ValidatorVote::sign(&statement, ValidatorId::new(2), &key(2)),
-        ValidatorVote::sign(&statement, ValidatorId::new(3), &key(3)),
+        signed_vote(&statement, ValidatorId::new(1), &key(99)),
+        signed_vote(&statement, ValidatorId::new(2), &key(2)),
+        signed_vote(&statement, ValidatorId::new(3), &key(3)),
     ];
 
     assert_eq!(

@@ -3,31 +3,18 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, FinalityError, NetworkError,
-    NetworkMessage, NodeId, PublicCheckpointError, PublicCurrencyCheckpoint,
-    PublicCurrencyCheckpointProof, SecondState, ValidatorCredential, ValidatorId, ValidatorSet,
-    ValidatorVote, client_sync_certified_public_currency_view, read_network_message,
-    serve_public_currency_connection_with_checkpoint, write_network_message,
+    CURRENT_PROTOCOL_VERSION, FinalityError, NetworkError, NetworkMessage, NodeId,
+    PublicCheckpointError, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState,
+    ValidatorId, ValidatorSet, ValidatorVote, client_sync_certified_public_currency_view,
+    read_network_message, serve_public_currency_connection_with_checkpoint, write_network_message,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn credential(id: u64) -> ValidatorCredential {
-    ValidatorCredential::new(
-        ValidatorId::new(id),
-        key((id * 3) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 1) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 2) as u8).verifying_key().to_bytes(),
-    )
-    .unwrap()
-}
+use support::{key, signed_vote, validator_set};
 
 fn validators() -> ValidatorSet {
-    ValidatorSet::new(4, (1..=4).map(credential)).unwrap()
+    validator_set(4, 1..=4)
 }
 
 fn checkpoint_proof(
@@ -43,7 +30,7 @@ fn checkpoint_proof(
     let statement = checkpoint.finality_statement(validators.version());
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
         .collect();
 
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
@@ -56,8 +43,8 @@ fn checkpoint_proof_round_trips_as_unverified_network_data() {
         PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 7, state.public_currency_summary()),
         4,
         vec![
-            ValidatorVote::from_parts(ValidatorId::new(1), [11; 64]),
-            ValidatorVote::from_parts(ValidatorId::new(2), [22; 64]),
+            ValidatorVote::from_untrusted_parts(ValidatorId::new(1), [11; 64]),
+            ValidatorVote::from_untrusted_parts(ValidatorId::new(2), [22; 64]),
         ],
     );
     let message = NetworkMessage::PublicCurrencyCheckpointProof {
@@ -113,9 +100,13 @@ fn real_tcp_sync_returns_certified_view_only_after_local_quorum_verification() {
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
 
-    let synced =
-        client_sync_certified_public_currency_view(&mut client, NodeId::from_u64(2), &validators)
-            .unwrap();
+    let synced = client_sync_certified_public_currency_view(
+        &mut client,
+        NodeId::from_u64(2),
+        &validators,
+        0,
+    )
+    .unwrap();
 
     assert_eq!(synced.remote_node_id, NodeId::from_u64(1));
     assert_eq!(synced.view.states.len(), 300);
@@ -131,6 +122,45 @@ fn real_tcp_sync_returns_certified_view_only_after_local_quorum_verification() {
 }
 
 #[test]
+fn stale_but_valid_checkpoint_is_rejected_before_state_sync() {
+    let validators = validators();
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let proof = checkpoint_proof(&state, &validators, 7);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        serve_public_currency_connection_with_checkpoint(
+            &mut stream,
+            NodeId::from_u64(1),
+            &state,
+            Some(&proof),
+        )
+        .unwrap()
+    });
+
+    let mut client = TcpStream::connect(address).unwrap();
+
+    assert_eq!(
+        client_sync_certified_public_currency_view(
+            &mut client,
+            NodeId::from_u64(2),
+            &validators,
+            8,
+        ),
+        Err(NetworkError::StalePublicCurrencyCheckpoint {
+            minimum_epoch: 8,
+            actual_epoch: 7,
+        })
+    );
+
+    drop(client);
+    let _ = server.join().unwrap();
+}
+
+#[test]
 fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
     let validators = validators();
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
@@ -141,9 +171,9 @@ fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
         checkpoint,
         validators.version(),
         vec![
-            ValidatorVote::sign(&statement, ValidatorId::new(1), &key(99)),
-            ValidatorVote::sign(&statement, ValidatorId::new(2), &key(7)),
-            ValidatorVote::sign(&statement, ValidatorId::new(3), &key(10)),
+            signed_vote(&statement, ValidatorId::new(1), &key(99)),
+            signed_vote(&statement, ValidatorId::new(2), &key(7)),
+            signed_vote(&statement, ValidatorId::new(3), &key(10)),
         ],
     );
 
@@ -164,7 +194,12 @@ fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
     let mut client = TcpStream::connect(address).unwrap();
 
     assert_eq!(
-        client_sync_certified_public_currency_view(&mut client, NodeId::from_u64(2), &validators),
+        client_sync_certified_public_currency_view(
+            &mut client,
+            NodeId::from_u64(2),
+            &validators,
+            0
+        ),
         Err(NetworkError::PublicCheckpoint(
             PublicCheckpointError::Finality(FinalityError::InvalidSignature(ValidatorId::new(1)))
         ))
@@ -191,23 +226,4 @@ fn server_refuses_to_attach_checkpoint_for_a_different_public_state() {
         ),
         Err(NetworkError::CheckpointDoesNotMatchServedState)
     );
-}
-
-#[test]
-fn certified_type_is_not_required_for_network_transport() {
-    fn assert_unverified(_: &PublicCurrencyCheckpointProof) {}
-    fn assert_certified(_: &CertifiedPublicCurrencyCheckpoint) {}
-
-    let validators = validators();
-    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
-    let proof = checkpoint_proof(&state, &validators, 1);
-    assert_unverified(&proof);
-
-    let view = second::PublicCurrencyView::new(
-        state.public_currency_summary(),
-        state.public_currency_states(),
-    )
-    .unwrap();
-    let certified = proof.verify(&view, &validators).unwrap();
-    assert_certified(&certified);
 }

@@ -176,6 +176,8 @@ fn sync_public_certified(
         .map_err(|error| format!("failed to load trust snapshot: {error:?}"))?
         .ok_or_else(|| format!("no trust snapshot found at {trust_snapshot_base}"))?;
 
+    let minimum_checkpoint_epoch = trusted.checkpoint_floor_epoch;
+
     let mut stream = TcpStream::connect(address)
         .map_err(|error| format!("failed to connect {address}: {error}"))?;
     configure_stream(&stream)?;
@@ -184,6 +186,7 @@ fn sync_public_certified(
         &mut stream,
         NodeId::from_u64(node_id),
         &trusted.validator_set,
+        minimum_checkpoint_epoch,
     )
     .map_err(|error| format!("certified public currency sync failed: {error:?}"))?;
 
@@ -248,9 +251,8 @@ fn query_public(address: &str, node_id: u64, start: u64, limit: u16) -> Result<(
         };
 
         println!(
-            "CURRENCY address={} exists={} occupied={} role={}",
+            "CURRENCY address={} occupied={} role={}",
             state.address.value(),
-            state.exists,
             state.occupied,
             role
         );

@@ -1,35 +1,15 @@
 use std::fs;
 
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
-    Operation, PersistedNodeState, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
-    SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote,
+    CURRENT_PROTOCOL_VERSION, Operation, PersistedNodeState, PublicCurrencyCheckpoint,
+    PublicCurrencyCheckpointProof, SecondState, StateStore, ValidatorCredential, ValidatorId,
+    ValidatorSet, ValidatorVote,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn verified_task(task_id: u128, operations: Vec<Operation>) -> second::VerifiedLegalTask {
-    let signing = key(9);
-    let authorizers = AuthorizerSet::new(
-        CURRENT_PROTOCOL_VERSION,
-        [signing.verifying_key().to_bytes()],
-    )
-    .unwrap();
-    let payload = LegalTaskPayload::new(
-        TaskId::new(task_id),
-        CURRENT_PROTOCOL_VERSION,
-        None,
-        operations,
-    );
-
-    LegalTask::sign(payload, &signing)
-        .unwrap()
-        .verify(&authorizers)
-        .unwrap()
-}
+use support::{
+    key, payment_address, register_payment_addresses, signed_vote, temp_base, verified_task,
+};
 
 fn validators() -> ValidatorSet {
     ValidatorSet::new(
@@ -47,18 +27,6 @@ fn validators() -> ValidatorSet {
     .unwrap()
 }
 
-fn temp_base(name: &str) -> std::path::PathBuf {
-    let unique = format!(
-        "second-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    std::env::temp_dir().join(unique)
-}
-
 fn checkpoint_proof(
     state: &SecondState,
     validators: &ValidatorSet,
@@ -72,7 +40,7 @@ fn checkpoint_proof(
     let statement = checkpoint.finality_statement(validators.version());
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key(id as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
         .collect();
 
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
@@ -88,13 +56,14 @@ fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_
 
     assert_eq!(
         store
-            .save_with_checkpoint(&state, &set, Some(&proof))
+            .save_with_checkpoint_proof(&state, &set, Some(&proof))
             .unwrap(),
         1
     );
 
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.public_checkpoint_proof, Some(proof.clone()));
+    assert_eq!(restored.checkpoint_floor_epoch, 0);
 
     let view = second::PublicCurrencyView::new(
         restored.state.public_currency_summary(),
@@ -123,7 +92,7 @@ fn snapshot_refuses_checkpoint_proof_for_a_different_public_state() {
     let proof = checkpoint_proof(&other_state, &set, 1);
 
     assert_eq!(
-        store.save_with_checkpoint(&state, &set, Some(&proof)),
+        store.save_with_checkpoint_proof(&state, &set, Some(&proof)),
         Err(second::PersistenceError::CheckpointDoesNotMatchState)
     );
     assert!(store.load().unwrap().is_none());
@@ -143,7 +112,7 @@ fn snapshot_refuses_checkpoint_proof_for_a_different_validator_set_version() {
     );
 
     assert_eq!(
-        store.save_with_checkpoint(&state, &set, Some(&proof)),
+        store.save_with_checkpoint_proof(&state, &set, Some(&proof)),
         Err(second::PersistenceError::CheckpointValidatorSetMismatch {
             expected: set.version(),
             actual: set.version() + 1,
@@ -164,14 +133,14 @@ fn snapshot_checksum_does_not_turn_an_invalid_signature_into_a_certified_checkpo
         checkpoint,
         set.version(),
         vec![
-            ValidatorVote::from_parts(ValidatorId::new(1), [0; 64]),
-            ValidatorVote::from_parts(ValidatorId::new(2), [0; 64]),
-            ValidatorVote::from_parts(ValidatorId::new(3), [0; 64]),
+            ValidatorVote::from_untrusted_parts(ValidatorId::new(1), [0; 64]),
+            ValidatorVote::from_untrusted_parts(ValidatorId::new(2), [0; 64]),
+            ValidatorVote::from_untrusted_parts(ValidatorId::new(3), [0; 64]),
         ],
     );
 
     store
-        .save_with_checkpoint(&state, &set, Some(&proof))
+        .save_with_checkpoint_proof(&state, &set, Some(&proof))
         .unwrap();
 
     let restored = store.load().unwrap().unwrap();
@@ -195,15 +164,87 @@ fn snapshot_checksum_does_not_turn_an_invalid_signature_into_a_certified_checkpo
 }
 
 #[test]
+fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoint() {
+    let base = temp_base("checkpoint-floor");
+    let store = StateStore::new(&base);
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], 1);
+    let set = validators();
+
+    let checkpoint = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        42,
+        state.public_currency_summary(),
+    );
+    let statement = checkpoint.finality_statement(set.version());
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+    let certified =
+        second::CertifiedPublicCurrencyCheckpoint::new(checkpoint, votes, &set).unwrap();
+
+    store
+        .save_with_certified_checkpoint(&state, &set, &certified)
+        .unwrap();
+
+    let restored = store.load().unwrap().unwrap();
+    assert_eq!(restored.checkpoint_floor_epoch, 42);
+    assert!(restored.public_checkpoint_proof.is_some());
+
+    state
+        .execute(
+            &verified_task(
+                1,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+    store.save(&state, &set).unwrap();
+
+    let advanced = store.load().unwrap().unwrap();
+    assert_eq!(advanced.checkpoint_floor_epoch, 42);
+    assert!(advanced.public_checkpoint_proof.is_none());
+
+    let stale_checkpoint = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        41,
+        state.public_currency_summary(),
+    );
+    let stale_statement = stale_checkpoint.finality_statement(set.version());
+    let stale_votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| signed_vote(&stale_statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+    let stale = second::CertifiedPublicCurrencyCheckpoint::new(stale_checkpoint, stale_votes, &set)
+        .unwrap();
+
+    assert_eq!(
+        store.save_with_certified_checkpoint(&state, &set, &stale),
+        Err(second::PersistenceError::StaleCheckpointEpoch {
+            minimum: 42,
+            actual: 41,
+        })
+    );
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     let base = temp_base("restore");
     let store = StateStore::new(&base);
 
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 100)
         .with_reserve(2)
         .unwrap();
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let issue = verified_task(
         1,
@@ -212,14 +253,14 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
             count: 3,
         }],
     );
-    let issue_digest = issue.request_digest();
+    let issue_legality_proof = issue.legality_proof();
     state.execute(&issue, 1).unwrap();
 
     let transfer = verified_task(
         2,
         vec![Operation::Transfer {
-            source: alice,
-            destination: bob,
+            source: payment_address(alice),
+            destination: payment_address(bob),
             amount: 1,
         }],
     );
@@ -233,6 +274,7 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
         validator_set,
         public_checkpoint_proof,
         generation,
+        ..
     } = store.load().unwrap().unwrap();
 
     assert_eq!(generation, 1);
@@ -243,8 +285,8 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     assert_eq!(restored.reserve_count(), 2);
     assert_eq!(restored.next_currency_address(), 105);
     assert_eq!(
-        restored.bound_request_digest(TaskId::new(1)),
-        Some(issue_digest)
+        restored.bound_legality_proof(support::task_id(1)),
+        Some(issue_legality_proof)
     );
     assert_eq!(validator_set.version(), 7);
     assert_eq!(validator_set.len(), 4);
@@ -258,7 +300,7 @@ fn newer_snapshot_wins_and_generation_increments() {
     let base = temp_base("generation");
     let store = StateStore::new(&base);
 
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let set = validators();
 
@@ -287,7 +329,7 @@ fn corrupted_newest_slot_falls_back_to_previous_valid_snapshot() {
     let base = temp_base("fallback");
     let store = StateStore::new(&base);
 
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let set = validators();
 
@@ -326,7 +368,7 @@ fn two_corrupted_slots_are_reported_and_save_refuses_to_reset_state() {
     let base = temp_base("double-corruption");
     let store = StateStore::new(&base);
 
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let set = validators();
 

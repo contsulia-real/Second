@@ -203,7 +203,7 @@ impl PublicCurrencyCheckpointProof {
                 .try_into()
                 .map_err(|_| CheckpointProofCodecError::InvalidLength)?;
             offset += 64;
-            votes.push(ValidatorVote::from_parts(validator_id, signature));
+            votes.push(ValidatorVote::from_untrusted_parts(validator_id, signature));
         }
 
         Ok(Self::new(
@@ -277,6 +277,14 @@ impl CertifiedPublicCurrencyCheckpoint {
 
     pub fn certificate(&self) -> &FinalityCertificate {
         &self.certificate
+    }
+
+    pub fn to_unverified_proof(&self) -> PublicCurrencyCheckpointProof {
+        PublicCurrencyCheckpointProof::new(
+            self.checkpoint.clone(),
+            self.certificate.statement().validator_set_version(),
+            self.certificate.votes().to_vec(),
+        )
     }
 
     pub fn verify_view(

@@ -1,46 +1,84 @@
-use ed25519_dalek::SigningKey;
-use second::{
-    AccountAddress, AuthorizationError, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask,
-    LegalTaskPayload, Operation, TaskId,
-};
+mod support;
 
-fn signing_key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
+use second::{
+    AuthorizationError, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
+    Operation,
+};
+use support::key as signing_key;
 
 fn payload(amount: u64) -> LegalTaskPayload {
     LegalTaskPayload::new(
-        TaskId::new(42),
+        support::task_id(42),
         CURRENT_PROTOCOL_VERSION,
-        Some(100),
+        100,
         vec![Operation::Transfer {
-            source: AccountAddress::new(1),
-            destination: AccountAddress::new(2),
+            source: support::payment(1),
+            destination: support::payment(2),
             amount,
         }],
     )
 }
 
 #[test]
-fn valid_authorizer_signature_verifies_and_produces_stable_request_digest() {
+fn canonical_signing_bytes_match_the_deterministic_cbor_protocol_vector() {
+    let payload = LegalTaskPayload::new(
+        second::TaskId::parse("a").unwrap(),
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        Vec::new(),
+    );
+
+    let mut expected = b"Second/LegalTask/v1\0".to_vec();
+    expected.extend_from_slice(&[0x82, 0x61, b'a', 0x83, 0x01, 0x0a, 0x80]);
+
+    assert_eq!(payload.canonical_signing_bytes().unwrap(), expected);
+}
+
+#[test]
+fn signature_text_is_strict_canonical_base64url_without_padding() {
+    let key = signing_key(7);
+    let authorizers =
+        AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
+    let signed = LegalTask::sign(payload(3), &key).unwrap();
+    let encoded = signed.signature_base64url();
+
+    assert_eq!(encoded.len(), 86);
+    assert!(!encoded.contains(['=', '+', '/']));
+
+    let reparsed =
+        LegalTask::from_signature_base64url(payload(3), signed.authorizer_public_key(), &encoded)
+            .unwrap();
+    assert_eq!(reparsed.signature_bytes(), signed.signature_bytes());
+    reparsed.verify(&authorizers).unwrap();
+
+    assert_eq!(
+        LegalTask::from_signature_base64url(
+            payload(3),
+            signed.authorizer_public_key(),
+            &(encoded.clone() + "="),
+        ),
+        Err(second::SignatureParseError::WrongEncodedLength)
+    );
+
+    let mut invalid = encoded;
+    invalid.replace_range(0..1, "+");
+    assert_eq!(
+        LegalTask::from_signature_base64url(payload(3), signed.authorizer_public_key(), &invalid,),
+        Err(second::SignatureParseError::InvalidBase64Url)
+    );
+}
+
+#[test]
+fn verified_task_preserves_the_exact_legality_proof() {
     let key = signing_key(7);
     let authorizers =
         AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
 
-    let first = LegalTask::sign(payload(3), &key).unwrap();
-    let second = LegalTask::sign(payload(3), &key).unwrap();
+    let signed = LegalTask::sign(payload(3), &key).unwrap();
+    let verified = signed.verify(&authorizers).unwrap();
 
-    let first_verified = first.verify(&authorizers).unwrap();
-    let second_verified = second.verify(&authorizers).unwrap();
-
-    assert_eq!(
-        first_verified.request_digest(),
-        second_verified.request_digest()
-    );
-    assert_eq!(
-        first.canonical_signing_bytes().unwrap(),
-        second.canonical_signing_bytes().unwrap()
-    );
+    assert_eq!(verified.legality_proof(), signed.signature_bytes());
+    assert_eq!(verified.signed_task(), &signed);
 }
 
 #[test]
@@ -87,11 +125,11 @@ fn protocol_version_is_part_of_authorization_policy_and_signature_payload() {
         AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
 
     let payload = LegalTaskPayload::new(
-        TaskId::new(42),
+        support::task_id(42),
         CURRENT_PROTOCOL_VERSION + 1,
-        None,
+        u64::MAX,
         vec![Operation::Issue {
-            account: AccountAddress::new(1),
+            account: support::account(1),
             count: 1,
         }],
     );
@@ -107,22 +145,84 @@ fn protocol_version_is_part_of_authorization_policy_and_signature_payload() {
 }
 
 #[test]
+fn structurally_invalid_operations_never_become_verified_tasks() {
+    let key = signing_key(7);
+    let authorizers =
+        AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
+
+    let cases = [
+        (
+            Operation::Transfer {
+                source: support::payment(1),
+                destination: support::payment(2),
+                amount: 0,
+            },
+            second::TaskValidationError::TransferAmountZero,
+        ),
+        (
+            Operation::Issue {
+                account: support::account(1),
+                count: 0,
+            },
+            second::TaskValidationError::IssueAmountZero,
+        ),
+        (
+            Operation::Destroy {
+                currencies: Vec::new(),
+            },
+            second::TaskValidationError::EmptyDestroy,
+        ),
+        (
+            Operation::LeakRepair { leaked: Vec::new() },
+            second::TaskValidationError::EmptyLeakRepair,
+        ),
+        (
+            Operation::Destroy {
+                currencies: vec![
+                    second::CurrencyAddress::new(1),
+                    second::CurrencyAddress::new(1),
+                ],
+            },
+            second::TaskValidationError::DuplicateCurrency(second::CurrencyAddress::new(1)),
+        ),
+    ];
+
+    for (index, (operation, expected)) in cases.into_iter().enumerate() {
+        let task = LegalTask::sign(
+            LegalTaskPayload::new(
+                support::task_id(100 + index as u128),
+                CURRENT_PROTOCOL_VERSION,
+                100,
+                vec![operation],
+            ),
+            &key,
+        )
+        .unwrap();
+
+        assert_eq!(
+            task.verify(&authorizers),
+            Err(AuthorizationError::InvalidPayload(expected))
+        );
+    }
+}
+
+#[test]
 fn operation_order_changes_the_canonical_signed_message() {
     let key = signing_key(7);
 
     let first = LegalTask::sign(
         LegalTaskPayload::new(
-            TaskId::new(1),
+            support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            None,
+            u64::MAX,
             vec![
                 Operation::Issue {
-                    account: AccountAddress::new(1),
+                    account: support::account(1),
                     count: 1,
                 },
                 Operation::Transfer {
-                    source: AccountAddress::new(1),
-                    destination: AccountAddress::new(2),
+                    source: support::payment(1),
+                    destination: support::payment(2),
                     amount: 1,
                 },
             ],
@@ -133,17 +233,17 @@ fn operation_order_changes_the_canonical_signed_message() {
 
     let second = LegalTask::sign(
         LegalTaskPayload::new(
-            TaskId::new(1),
+            support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            None,
+            u64::MAX,
             vec![
                 Operation::Transfer {
-                    source: AccountAddress::new(1),
-                    destination: AccountAddress::new(2),
+                    source: support::payment(1),
+                    destination: support::payment(2),
                     amount: 1,
                 },
                 Operation::Issue {
-                    account: AccountAddress::new(1),
+                    account: support::account(1),
                     count: 1,
                 },
             ],

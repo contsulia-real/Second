@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
+use crate::{
+    AuthorizationError, LegalTaskPayload, Operation, SignatureParseError, TaskEncodingError, TaskId,
+};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use sha2::{Digest, Sha256};
-
-use crate::{AuthorizationError, LegalTaskPayload, Operation, TaskEncodingError, TaskId};
-
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"SECOND_SIGNED_LEGAL_TASK_V1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegalTask {
@@ -41,6 +41,19 @@ impl LegalTask {
         }
     }
 
+    pub fn from_signature_base64url(
+        payload: LegalTaskPayload,
+        authorizer_public_key: [u8; 32],
+        signature: &str,
+    ) -> Result<Self, SignatureParseError> {
+        let signature = parse_signature_base64url(signature)?;
+        Ok(Self::from_parts(payload, authorizer_public_key, signature))
+    }
+
+    pub fn signature_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.signature)
+    }
+
     pub fn payload(&self) -> &LegalTaskPayload {
         &self.payload
     }
@@ -61,6 +74,10 @@ impl LegalTask {
         &self,
         authorizers: &AuthorizerSet,
     ) -> Result<VerifiedLegalTask, AuthorizationError> {
+        self.payload
+            .validate()
+            .map_err(AuthorizationError::InvalidPayload)?;
+
         if self.payload.protocol_version() != authorizers.protocol_version() {
             return Err(AuthorizationError::UnsupportedProtocolVersion {
                 expected: authorizers.protocol_version(),
@@ -85,35 +102,29 @@ impl LegalTask {
             .verify_strict(&message, &signature)
             .map_err(|_| AuthorizationError::InvalidSignature)?;
 
-        let request_digest = request_digest(&message, &self.authorizer_public_key, &self.signature);
-
-        Ok(VerifiedLegalTask {
-            task: self.clone(),
-            request_digest,
-        })
+        Ok(VerifiedLegalTask { task: self.clone() })
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedLegalTask {
     task: LegalTask,
-    request_digest: [u8; 32],
 }
 
 impl VerifiedLegalTask {
-    pub const fn request_digest(&self) -> [u8; 32] {
-        self.request_digest
+    pub const fn legality_proof(&self) -> [u8; 64] {
+        self.task.signature_bytes()
     }
 
     pub fn payload(&self) -> &LegalTaskPayload {
         self.task.payload()
     }
 
-    pub const fn task_id(&self) -> TaskId {
+    pub fn task_id(&self) -> TaskId {
         self.task.payload.task_id()
     }
 
-    pub const fn expires_at(&self) -> Option<u64> {
+    pub const fn expires_at(&self) -> u64 {
         self.task.payload.expires_at()
     }
 
@@ -164,11 +175,21 @@ impl AuthorizerSet {
     }
 }
 
-fn request_digest(message: &[u8], public_key: &[u8; 32], signature: &[u8; 64]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(REQUEST_DIGEST_DOMAIN);
-    hasher.update(public_key);
-    hasher.update(signature);
-    hasher.update(message);
-    hasher.finalize().into()
+fn parse_signature_base64url(value: &str) -> Result<[u8; 64], SignatureParseError> {
+    if value.len() != 86 {
+        return Err(SignatureParseError::WrongEncodedLength);
+    }
+
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| SignatureParseError::InvalidBase64Url)?;
+    let signature: [u8; 64] = decoded
+        .try_into()
+        .map_err(|_| SignatureParseError::WrongDecodedLength)?;
+
+    if URL_SAFE_NO_PAD.encode(signature) != value {
+        return Err(SignatureParseError::NonCanonical);
+    }
+
+    Ok(signature)
 }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::state::BusinessState;
 use crate::{AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, SecondState, TaskId};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationClaimId {
     task_id: TaskId,
     operation_index: u64,
@@ -17,11 +17,11 @@ impl OperationClaimId {
         }
     }
 
-    pub const fn task_id(self) -> TaskId {
-        self.task_id
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
     }
 
-    pub const fn operation_index(self) -> u64 {
+    pub const fn operation_index(&self) -> u64 {
         self.operation_index
     }
 }
@@ -62,6 +62,7 @@ pub enum ClaimError {
     ExplicitCurrencyContention {
         currency: CurrencyAddress,
     },
+    ClaimReferenceOverflow(CurrencyAddress),
     ReserveUnavailable {
         required: u64,
         available: u64,
@@ -98,7 +99,7 @@ struct ClaimRecord {
     selected_currencies: Vec<CurrencyAddress>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct CurrencyClaimOwner {
     task_id: TaskId,
     references: u32,
@@ -133,7 +134,7 @@ impl CurrencyClaimBook {
         amount: u64,
     ) -> Result<Vec<CurrencyAddress>, ClaimError> {
         let requested_kind = ClaimKind::Transfer { source, amount };
-        if let Some(existing) = self.existing_selection(claim_id, &requested_kind)? {
+        if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
         }
 
@@ -173,7 +174,7 @@ impl CurrencyClaimBook {
             .into_iter()
             .take(amount as usize)
             .collect::<Vec<_>>();
-        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone());
+        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
 
         Ok(selected)
     }
@@ -194,12 +195,12 @@ impl CurrencyClaimBook {
         count: u64,
     ) -> Result<Vec<CurrencyAddress>, ClaimError> {
         let requested_kind = ClaimKind::Reserve { count };
-        if let Some(existing) = self.existing_selection(claim_id, &requested_kind)? {
+        if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
         }
 
         let selected = self.select_reserve(business, claim_id.task_id(), count)?;
-        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone());
+        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
         Ok(selected)
     }
 
@@ -211,14 +212,14 @@ impl CurrencyClaimBook {
         let requested_kind = ClaimKind::Explicit {
             currencies: currencies.to_vec(),
         };
-        if let Some(existing) = self.existing_selection(claim_id, &requested_kind)? {
+        if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
         }
 
-        self.ensure_unique_explicit(currencies, claim_id)?;
+        self.ensure_unique_explicit(currencies, &claim_id)?;
         self.ensure_claimable(currencies, claim_id.task_id())?;
         let selected = currencies.to_vec();
-        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone());
+        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
         Ok(selected)
     }
 
@@ -232,18 +233,18 @@ impl CurrencyClaimBook {
             leaked: leaked.to_vec(),
             reserve_count: leaked.len() as u64,
         };
-        if let Some(existing) = self.existing_selection(claim_id, &requested_kind)? {
+        if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
         }
 
-        self.ensure_unique_explicit(leaked, claim_id)?;
+        self.ensure_unique_explicit(leaked, &claim_id)?;
         self.ensure_claimable(leaked, claim_id.task_id())?;
 
         let reserve = self.select_reserve(business, claim_id.task_id(), leaked.len() as u64)?;
         let mut claimed = leaked.to_vec();
         claimed.extend_from_slice(&reserve);
 
-        self.insert_claim(claim_id, requested_kind, claimed, reserve.clone());
+        self.insert_claim(claim_id, requested_kind, claimed, reserve.clone())?;
         Ok(reserve)
     }
 
@@ -254,7 +255,7 @@ impl CurrencyClaimBook {
 
         for address in record.claimed_currencies {
             let should_remove = if let Some(owner) = self.claimed_by_currency.get_mut(&address) {
-                if owner.task_id != claim_id.task_id() {
+                if &owner.task_id != claim_id.task_id() {
                     false
                 } else if owner.references > 1 {
                     owner.references -= 1;
@@ -276,8 +277,8 @@ impl CurrencyClaimBook {
         let claims = self
             .records
             .keys()
-            .copied()
-            .filter(|claim_id| claim_id.task_id() == task_id)
+            .filter(|claim_id| claim_id.task_id() == &task_id)
+            .cloned()
             .collect::<Vec<_>>();
 
         for claim_id in claims {
@@ -289,26 +290,83 @@ impl CurrencyClaimBook {
         self.claimed_by_currency.len()
     }
 
+    pub(crate) fn restore_transfer(
+        &mut self,
+        claim_id: OperationClaimId,
+        source: AccountAddress,
+        currencies: &[CurrencyAddress],
+    ) -> Result<(), ClaimError> {
+        self.ensure_unique_explicit(currencies, &claim_id)?;
+        self.ensure_claimable(currencies, claim_id.task_id())?;
+        self.insert_claim(
+            claim_id,
+            ClaimKind::Transfer {
+                source,
+                amount: currencies.len() as u64,
+            },
+            currencies.to_vec(),
+            currencies.to_vec(),
+        )
+    }
+
+    pub(crate) fn restore_explicit(
+        &mut self,
+        claim_id: OperationClaimId,
+        currencies: &[CurrencyAddress],
+    ) -> Result<(), ClaimError> {
+        self.ensure_unique_explicit(currencies, &claim_id)?;
+        self.ensure_claimable(currencies, claim_id.task_id())?;
+        self.insert_claim(
+            claim_id,
+            ClaimKind::Explicit {
+                currencies: currencies.to_vec(),
+            },
+            currencies.to_vec(),
+            currencies.to_vec(),
+        )
+    }
+
+    pub(crate) fn restore_leak_repair(
+        &mut self,
+        claim_id: OperationClaimId,
+        leaked: &[CurrencyAddress],
+        reserve: &[CurrencyAddress],
+    ) -> Result<(), ClaimError> {
+        let mut claimed = leaked.to_vec();
+        claimed.extend_from_slice(reserve);
+        self.ensure_unique_explicit(&claimed, &claim_id)?;
+        self.ensure_claimable(&claimed, claim_id.task_id())?;
+        self.insert_claim(
+            claim_id,
+            ClaimKind::LeakRepair {
+                leaked: leaked.to_vec(),
+                reserve_count: reserve.len() as u64,
+            },
+            claimed,
+            reserve.to_vec(),
+        )
+    }
+
     fn existing_selection(
         &self,
-        claim_id: OperationClaimId,
+        claim_id: &OperationClaimId,
         requested_kind: &ClaimKind,
     ) -> Result<Option<Vec<CurrencyAddress>>, ClaimError> {
-        let Some(existing) = self.records.get(&claim_id) else {
+        let Some(existing) = self.records.get(claim_id) else {
             return Ok(None);
         };
 
         if &existing.kind == requested_kind {
             Ok(Some(existing.selected_currencies.clone()))
         } else {
-            Err(ClaimError::ClaimIdentityConflict(claim_id))
+            Err(ClaimError::ClaimIdentityConflict(claim_id.clone()))
         }
     }
 
     fn select_reserve(
         &self,
         business: &BusinessState,
-        task_id: TaskId,
+        task_id: &TaskId,
         count: u64,
     ) -> Result<Vec<CurrencyAddress>, ClaimError> {
         let mut total_reserve = 0_u64;
@@ -350,7 +408,7 @@ impl CurrencyClaimBook {
     fn ensure_claimable(
         &self,
         currencies: &[CurrencyAddress],
-        task_id: TaskId,
+        task_id: &TaskId,
     ) -> Result<(), ClaimError> {
         for address in currencies {
             if !self.claimable_by_task(*address, task_id) {
@@ -363,21 +421,21 @@ impl CurrencyClaimBook {
     fn ensure_unique_explicit(
         &self,
         currencies: &[CurrencyAddress],
-        claim_id: OperationClaimId,
+        claim_id: &OperationClaimId,
     ) -> Result<(), ClaimError> {
         let mut seen = BTreeSet::new();
         for address in currencies {
             if !seen.insert(*address) {
-                return Err(ClaimError::ClaimIdentityConflict(claim_id));
+                return Err(ClaimError::ClaimIdentityConflict(claim_id.clone()));
             }
         }
         Ok(())
     }
 
-    fn claimable_by_task(&self, address: CurrencyAddress, task_id: TaskId) -> bool {
+    fn claimable_by_task(&self, address: CurrencyAddress, task_id: &TaskId) -> bool {
         self.claimed_by_currency
             .get(&address)
-            .is_none_or(|owner| owner.task_id == task_id)
+            .is_none_or(|owner| &owner.task_id == task_id)
     }
 
     fn insert_claim(
@@ -386,20 +444,23 @@ impl CurrencyClaimBook {
         kind: ClaimKind,
         claimed_currencies: Vec<CurrencyAddress>,
         selected_currencies: Vec<CurrencyAddress>,
-    ) {
+    ) -> Result<(), ClaimError> {
         for address in &claimed_currencies {
             match self.claimed_by_currency.get_mut(address) {
-                Some(owner) if owner.task_id == claim_id.task_id() => {
-                    owner.references = owner.references.saturating_add(1);
+                Some(owner) if &owner.task_id == claim_id.task_id() => {
+                    owner.references = owner
+                        .references
+                        .checked_add(1)
+                        .ok_or(ClaimError::ClaimReferenceOverflow(*address))?;
                 }
                 Some(_) => {
-                    unreachable!("different task claim must be excluded before insertion");
+                    return Err(ClaimError::ExplicitCurrencyContention { currency: *address });
                 }
                 None => {
                     self.claimed_by_currency.insert(
                         *address,
                         CurrencyClaimOwner {
-                            task_id: claim_id.task_id(),
+                            task_id: claim_id.task_id().clone(),
                             references: 1,
                         },
                     );
@@ -415,5 +476,6 @@ impl CurrencyClaimBook {
                 selected_currencies,
             },
         );
+        Ok(())
     }
 }

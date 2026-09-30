@@ -1,22 +1,23 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError,
-    ExecutionOutcome, LegalTask, LegalTaskPayload, Operation, SecondState, TaskId,
-    VerifiedLegalTask,
+    AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError, ExecutionOutcome,
+    LegalTask, LegalTaskPayload, Operation, SecondState, VerifiedLegalTask,
 };
+use support::{key as test_key, payment_address, register_payment_addresses};
 
 fn verified_task(
     task_id: u128,
     expires_at: Option<u64>,
     operations: Vec<Operation>,
 ) -> VerifiedLegalTask {
-    let key = SigningKey::from_bytes(&[7; 32]);
+    let key = test_key(7);
     let authorizers =
         AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
     let payload = LegalTaskPayload::new(
-        TaskId::new(task_id),
+        support::task_id(task_id),
         CURRENT_PROTOCOL_VERSION,
-        expires_at,
+        expires_at.unwrap_or(u64::MAX),
         operations,
     );
 
@@ -28,7 +29,7 @@ fn verified_task(
 
 #[test]
 fn issue_creates_distinct_currency_and_balance_is_derived() {
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1000);
 
     let task = verified_task(
@@ -51,9 +52,10 @@ fn issue_creates_distinct_currency_and_balance_is_derived() {
 
 #[test]
 fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let issue = verified_task(
         1,
@@ -67,10 +69,10 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
 
     let transfer = verified_task(
         2,
-        None,
+        Some(u64::MAX),
         vec![Operation::Transfer {
-            source: alice,
-            destination: bob,
+            source: payment_address(alice),
+            destination: payment_address(bob),
             amount: 2,
         }],
     );
@@ -83,7 +85,7 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
 
 #[test]
 fn public_currency_state_exposes_occupancy_but_not_owner() {
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 10);
 
     let task = verified_task(
@@ -97,7 +99,6 @@ fn public_currency_state_exposes_occupancy_but_not_owner() {
     state.execute(&task, 1).unwrap();
 
     let public = state.public_currency_state(10.into()).unwrap();
-    assert!(public.exists);
     assert!(public.occupied);
     assert_eq!(public.role, CurrencyRole::Circulation);
 
@@ -107,26 +108,27 @@ fn public_currency_state_exposes_occupancy_but_not_owner() {
 
 #[test]
 fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 500);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let task = verified_task(
         77,
-        None,
+        Some(u64::MAX),
         vec![
             Operation::Issue {
                 account: alice,
                 count: 2,
             },
             Operation::Transfer {
-                source: bob,
-                destination: alice,
+                source: payment_address(bob),
+                destination: payment_address(alice),
                 amount: 1,
             },
         ],
     );
-    let request_digest = task.request_digest();
+    let legality_proof = task.legality_proof();
 
     assert!(matches!(
         state.execute(&task, 10),
@@ -137,23 +139,24 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
     assert_eq!(state.current_supply(), 0);
     assert_eq!(state.next_currency_address(), 502);
     assert_eq!(
-        state.bound_request_digest(TaskId::new(77)),
-        Some(request_digest)
+        state.bound_legality_proof(support::task_id(77)),
+        Some(legality_proof)
     );
 }
 
 #[test]
 fn task_id_binding_survives_failure_and_rejects_different_request() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let first = verified_task(
         9,
-        None,
+        Some(u64::MAX),
         vec![Operation::Transfer {
-            source: alice,
-            destination: bob,
+            source: payment_address(alice),
+            destination: payment_address(bob),
             amount: 1,
         }],
     );
@@ -176,7 +179,7 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
 
 #[test]
 fn successful_task_replay_is_idempotent_even_after_expiry() {
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
 
     let task = verified_task(
@@ -202,7 +205,7 @@ fn successful_task_replay_is_idempotent_even_after_expiry() {
 
 #[test]
 fn leak_repair_preserves_balance_supply_and_reserve_count() {
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(2).unwrap();
 
     let issue = verified_task(
@@ -232,4 +235,37 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
     assert_eq!(state.current_supply(), before_supply);
     assert_eq!(state.reserve_count(), before_reserve);
     assert!(!state.currency_exists(leaked));
+}
+
+#[test]
+fn currency_sequence_allocator_stops_at_postgresql_bigint_boundary() {
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], second::MAX_CURRENCY_SEQUENCE);
+
+    let last = verified_task(
+        900,
+        None,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        state.execute(&last, 1).unwrap(),
+        ExecutionOutcome::Succeeded
+    );
+    assert!(state.currency_exists(second::CurrencyAddress::new(second::MAX_CURRENCY_SEQUENCE)));
+
+    let exhausted = verified_task(
+        901,
+        None,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        state.execute(&exhausted, 2),
+        Err(ExecutionError::CurrencySequenceSpaceExhausted)
+    );
 }

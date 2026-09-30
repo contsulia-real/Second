@@ -91,10 +91,20 @@ pub fn client_sync_certified_public_currency_view<S: Read + Write>(
     stream: &mut S,
     local_node_id: NodeId,
     validator_set: &ValidatorSet,
+    minimum_checkpoint_epoch: u64,
 ) -> Result<RemoteCertifiedPublicCurrencyView, NetworkError> {
     let remote_node_id = client_handshake(stream, local_node_id)?;
     let proof = request_public_currency_checkpoint_proof(stream)?
         .ok_or(NetworkError::MissingPublicCurrencyCheckpoint)?;
+
+    let actual_epoch = proof.checkpoint().epoch();
+    if actual_epoch < minimum_checkpoint_epoch {
+        return Err(NetworkError::StalePublicCurrencyCheckpoint {
+            minimum_epoch: minimum_checkpoint_epoch,
+            actual_epoch,
+        });
+    }
+
     let summary = proof.checkpoint().summary().clone();
     let view = sync_public_currency_view_for_summary(stream, summary)?;
     let checkpoint = proof

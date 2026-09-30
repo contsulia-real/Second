@@ -1,8 +1,25 @@
-use crate::{AccountAddress, CurrencyAddress, ValidatorId};
+use crate::{AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, ValidatorId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskEncodingError {
     LengthOverflow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SignatureParseError {
+    WrongEncodedLength,
+    InvalidBase64Url,
+    WrongDecodedLength,
+    NonCanonical,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskValidationError {
+    TransferAmountZero,
+    IssueAmountZero,
+    EmptyDestroy,
+    EmptyLeakRepair,
+    DuplicateCurrency(CurrencyAddress),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,6 +30,7 @@ pub enum AuthorizationError {
     UntrustedAuthorizer,
     InvalidPublicKey,
     InvalidSignature,
+    InvalidPayload(TaskValidationError),
     Encoding(TaskEncodingError),
 }
 
@@ -20,7 +38,15 @@ pub enum AuthorizationError {
 pub enum ExecutionError {
     TaskIdAlreadyBound,
     TaskExpired,
+    OperationIndexOverflow,
     AccountNotFound(AccountAddress),
+    PaymentAddressAlreadyExists(PaymentAddress),
+    PaymentAddressUnavailable(PaymentAddress),
+    InvalidPaymentAddressTransition(PaymentAddress),
+    PaymentAddressUsageExhausted(PaymentAddress),
+    InFlightTransferMismatch(OperationClaimId),
+    TransferNotEstablished(OperationClaimId),
+    PaymentAddressUsageOverflow(PaymentAddress),
     InsufficientBalance {
         account: AccountAddress,
         required: u64,
@@ -35,7 +61,7 @@ pub enum ExecutionError {
         required: u64,
         available: u64,
     },
-    IdentitySpaceExhausted,
+    CurrencySequenceSpaceExhausted,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,9 +83,13 @@ pub enum PersistenceError {
     ChecksumMismatch,
     InvalidSnapshot,
     NoValidSnapshot,
+    MissingSnapshot,
+    StoreLockPoisoned,
+    ValidatorRegistryMismatch,
     GenerationOverflow,
     CheckpointDoesNotMatchState,
     CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
+    StaleCheckpointEpoch { minimum: u64, actual: u64 },
 }
 
 impl PersistenceError {
@@ -102,6 +132,20 @@ pub enum ValidatorRotationError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatorRegistryError {
+    CurrentSetVersionMismatch { expected: u64, actual: u64 },
+    CurrentSetMembershipMismatch,
+    CurrentSetCredentialMismatch(ValidatorId),
+    WrongNextValidatorSetVersion { expected: u64, actual: u64 },
+    ValidatorSetVersionOverflow,
+    ValidatorIdAlreadyUsed(ValidatorId),
+    ValidatorKeyAlreadyUsed(ValidatorId),
+    IdentityKeyChanged(ValidatorId),
+    RecoveryKeyChanged(ValidatorId),
+    InvalidConsensusKeyHistory(ValidatorId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValidatorTransitionError {
     UnsupportedProtocolVersion {
         expected: u32,
@@ -119,6 +163,7 @@ pub enum ValidatorTransitionError {
     EpochOverflow,
     IdentityKeyChanged(ValidatorId),
     RecoveryKeyChanged(ValidatorId),
+    Registry(ValidatorRegistryError),
     MissingConsensusKeyRotation(ValidatorId),
     UnexpectedConsensusKeyRotation(ValidatorId),
     DuplicateConsensusKeyRotation(ValidatorId),

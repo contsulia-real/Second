@@ -1,26 +1,14 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, FinalityError,
-    PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState, ValidatorCredential,
-    ValidatorId, ValidatorSet, ValidatorVote,
+    PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState, ValidatorId,
+    ValidatorSet, ValidatorVote,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn credential(id: u64) -> ValidatorCredential {
-    ValidatorCredential::new(
-        ValidatorId::new(id),
-        key((id * 3) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 1) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 2) as u8).verifying_key().to_bytes(),
-    )
-    .unwrap()
-}
+use support::{key, signed_vote, validator_credential as credential, validator_set};
 
 fn validators() -> ValidatorSet {
-    ValidatorSet::new(4, (1..=4).map(credential)).unwrap()
+    validator_set(4, 1..=4)
 }
 
 fn votes(
@@ -30,7 +18,7 @@ fn votes(
 ) -> Vec<ValidatorVote> {
     let statement = checkpoint.finality_statement(validators.version());
     ids.iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(*id), &key((*id * 3 + 1) as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(*id), &key((*id * 3 + 1) as u8)))
         .collect()
 }
 

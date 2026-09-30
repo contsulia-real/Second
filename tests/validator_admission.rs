@@ -1,22 +1,9 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    CURRENT_PROTOCOL_VERSION, ValidatorAdmissionError, ValidatorAdmissionRequest,
-    ValidatorCredential, ValidatorId,
+    CURRENT_PROTOCOL_VERSION, ValidatorAdmissionError, ValidatorAdmissionRequest, ValidatorId,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn credential(id: u64) -> ValidatorCredential {
-    ValidatorCredential::new(
-        ValidatorId::new(id),
-        key((id * 3) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 1) as u8).verifying_key().to_bytes(),
-        key((id * 3 + 2) as u8).verifying_key().to_bytes(),
-    )
-    .unwrap()
-}
+use support::{key, validator_credential as credential};
 
 #[test]
 fn candidate_must_prove_possession_of_all_three_private_keys() {

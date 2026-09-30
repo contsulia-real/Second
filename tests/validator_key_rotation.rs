@@ -1,26 +1,14 @@
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    CURRENT_PROTOCOL_VERSION, ValidatorConsensusKeyRotationRequest, ValidatorCredential,
-    ValidatorId, ValidatorRotationAuthority, ValidatorRotationError,
+    CURRENT_PROTOCOL_VERSION, ValidatorConsensusKeyRotationRequest, ValidatorId,
+    ValidatorRotationAuthority, ValidatorRotationError,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn credential() -> ValidatorCredential {
-    ValidatorCredential::new(
-        ValidatorId::new(7),
-        key(21).verifying_key().to_bytes(),
-        key(22).verifying_key().to_bytes(),
-        key(23).verifying_key().to_bytes(),
-    )
-    .unwrap()
-}
+use support::{key, validator_credential};
 
 #[test]
 fn identity_key_can_authorize_consensus_key_rotation() {
-    let current = credential();
+    let current = validator_credential(7);
     let request = ValidatorConsensusKeyRotationRequest::sign(
         CURRENT_PROTOCOL_VERSION,
         ValidatorRotationAuthority::Identity,
@@ -37,7 +25,7 @@ fn identity_key_can_authorize_consensus_key_rotation() {
 
 #[test]
 fn recovery_key_can_authorize_consensus_key_rotation() {
-    let current = credential();
+    let current = validator_credential(7);
     let request = ValidatorConsensusKeyRotationRequest::sign(
         CURRENT_PROTOCOL_VERSION,
         ValidatorRotationAuthority::Recovery,
@@ -54,7 +42,7 @@ fn recovery_key_can_authorize_consensus_key_rotation() {
 
 #[test]
 fn consensus_key_cannot_authorize_its_own_rotation() {
-    let current = credential();
+    let current = validator_credential(7);
     let request = ValidatorConsensusKeyRotationRequest::sign(
         CURRENT_PROTOCOL_VERSION,
         ValidatorRotationAuthority::Identity,
@@ -76,7 +64,7 @@ fn consensus_key_cannot_authorize_its_own_rotation() {
 
 #[test]
 fn rotation_request_is_bound_to_validator_set_and_activation_epoch() {
-    let current = credential();
+    let current = validator_credential(7);
     let request = ValidatorConsensusKeyRotationRequest::sign(
         CURRENT_PROTOCOL_VERSION,
         ValidatorRotationAuthority::Identity,

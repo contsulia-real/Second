@@ -12,7 +12,7 @@ use super::{
 
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
 const FRAME_HEADER_SIZE: usize = 12;
-const PUBLIC_CURRENCY_ENCODED_SIZE: usize = 11;
+const PUBLIC_CURRENCY_ENCODED_SIZE: usize = 10;
 
 pub fn write_network_message<W: Write>(
     writer: &mut W,
@@ -149,7 +149,6 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
 
             for state in states {
                 payload.extend_from_slice(&state.address.value().to_be_bytes());
-                payload.push(u8::from(state.exists));
                 payload.push(u8::from(state.occupied));
                 payload.push(match state.role {
                     CurrencyRole::Circulation => 1,
@@ -410,8 +409,6 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
         ));
         offset += 8;
 
-        let exists = decode_bool(payload[offset])?;
-        offset += 1;
         let occupied = decode_bool(payload[offset])?;
         offset += 1;
         let role = match payload[offset] {
@@ -423,7 +420,6 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
 
         states.push(PublicCurrencyState {
             address,
-            exists,
             occupied,
             role,
         });

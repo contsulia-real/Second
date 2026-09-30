@@ -6,7 +6,6 @@ const PUBLIC_CURRENCY_STATE_DOMAIN: &[u8] = b"SECOND_PUBLIC_CURRENCY_STATE_V1\0"
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicStateError {
-    StateMarkedMissing(CurrencyAddress),
     StateAtOrBeyondFrontier {
         address: CurrencyAddress,
         frontier: u64,
@@ -92,10 +91,6 @@ fn validate_public_states(
     let mut previous = None;
 
     for state in states {
-        if !state.exists {
-            return Err(PublicStateError::StateMarkedMissing(state.address));
-        }
-
         if state.address.value() >= next_currency_address {
             return Err(PublicStateError::StateAtOrBeyondFrontier {
                 address: state.address,
@@ -170,7 +165,6 @@ fn summary_hasher(
 
 fn hash_public_state(hasher: &mut Sha256, state: &PublicCurrencyState) {
     hasher.update(state.address.value().to_be_bytes());
-    hasher.update([1]);
     hasher.update([u8::from(state.occupied)]);
     hasher.update([match state.role {
         CurrencyRole::Circulation => 1,

@@ -155,6 +155,10 @@ pub enum NetworkError {
     PublicState(PublicStateError),
     PublicCheckpoint(PublicCheckpointError),
     MissingPublicCurrencyCheckpoint,
+    StalePublicCurrencyCheckpoint {
+        minimum_epoch: u64,
+        actual_epoch: u64,
+    },
     CheckpointDoesNotMatchServedState,
     UnexpectedMessage,
     NonceMismatch {

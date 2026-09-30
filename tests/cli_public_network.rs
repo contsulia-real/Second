@@ -1,16 +1,13 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
-use ed25519_dalek::SigningKey;
-use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
-    Operation, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState, StateStore,
-    TaskId, ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote,
-};
+mod support;
 
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
+use second::{
+    CURRENT_PROTOCOL_VERSION, Operation, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
+    SecondState, StateStore, ValidatorCredential, ValidatorId, ValidatorSet,
+};
+use support::{key, signed_vote, temp_base, verified_task};
 
 fn validators() -> ValidatorSet {
     ValidatorSet::new(
@@ -28,28 +25,6 @@ fn validators() -> ValidatorSet {
     .unwrap()
 }
 
-fn verified_task(task_id: u128, operations: Vec<Operation>) -> second::VerifiedLegalTask {
-    let signing = key(9);
-    let authorizers = AuthorizerSet::new(
-        CURRENT_PROTOCOL_VERSION,
-        [signing.verifying_key().to_bytes()],
-    )
-    .unwrap();
-
-    LegalTask::sign(
-        LegalTaskPayload::new(
-            TaskId::new(task_id),
-            CURRENT_PROTOCOL_VERSION,
-            None,
-            operations,
-        ),
-        &signing,
-    )
-    .unwrap()
-    .verify(&authorizers)
-    .unwrap()
-}
-
 fn checkpoint_proof(
     state: &SecondState,
     validators: &ValidatorSet,
@@ -63,22 +38,10 @@ fn checkpoint_proof(
     let statement = checkpoint.finality_statement(validators.version());
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| ValidatorVote::sign(&statement, ValidatorId::new(id), &key(id as u8)))
+        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
         .collect();
 
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
-}
-
-fn temp_base(name: &str) -> std::path::PathBuf {
-    let unique = format!(
-        "second-cli-public-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    std::env::temp_dir().join(unique)
 }
 
 #[test]
@@ -93,7 +56,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let proof = checkpoint_proof(&state, &set, 77);
 
     server_store
-        .save_with_checkpoint(&state, &set, Some(&proof))
+        .save_with_checkpoint_proof(&state, &set, Some(&proof))
         .unwrap();
 
     let unrelated_trust_state = SecondState::genesis([], 999);
@@ -226,7 +189,7 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     let base = temp_base("roundtrip");
     let store = StateStore::new(&base);
 
-    let alice = AccountAddress::new(876543);
+    let alice = support::account(876543);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
     state
         .execute(
@@ -272,9 +235,9 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("PUBLIC "));
     assert!(client_stdout.contains("count=3"));
-    assert!(client_stdout.contains("address=1 exists=true occupied=false role=reserve"));
-    assert!(client_stdout.contains("address=2 exists=true occupied=true role=circulation"));
-    assert!(client_stdout.contains("address=3 exists=true occupied=true role=circulation"));
+    assert!(client_stdout.contains("address=1 occupied=false role=reserve"));
+    assert!(client_stdout.contains("address=2 occupied=true role=circulation"));
+    assert!(client_stdout.contains("address=3 occupied=true role=circulation"));
 
     let lower = client_stdout.to_ascii_lowercase();
     assert!(!lower.contains("owner"));

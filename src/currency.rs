@@ -9,7 +9,6 @@ pub enum CurrencyRole {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicCurrencyState {
     pub address: CurrencyAddress,
-    pub exists: bool,
     pub occupied: bool,
     pub role: CurrencyRole,
 }
@@ -25,7 +24,6 @@ impl Currency {
     pub(crate) fn public_state(&self) -> PublicCurrencyState {
         PublicCurrencyState {
             address: self.address,
-            exists: true,
             occupied: self.owner.is_some(),
             role: self.role,
         }

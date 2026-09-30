@@ -1,39 +1,12 @@
-use ed25519_dalek::SigningKey;
-use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
-    Operation, SecondState, TaskId,
-};
+mod support;
 
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn verified_task(task_id: u128, operations: Vec<Operation>) -> second::VerifiedLegalTask {
-    let signing = key(9);
-    let authorizers = AuthorizerSet::new(
-        CURRENT_PROTOCOL_VERSION,
-        [signing.verifying_key().to_bytes()],
-    )
-    .unwrap();
-
-    LegalTask::sign(
-        LegalTaskPayload::new(
-            TaskId::new(task_id),
-            CURRENT_PROTOCOL_VERSION,
-            None,
-            operations,
-        ),
-        &signing,
-    )
-    .unwrap()
-    .verify(&authorizers)
-    .unwrap()
-}
+use second::{Operation, SecondState};
+use support::{payment_address, register_payment_addresses, verified_task};
 
 #[test]
 fn public_summary_is_identical_when_only_hidden_owner_differs() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
 
     let mut left = SecondState::genesis([alice, bob], 1);
     left.execute(
@@ -75,9 +48,10 @@ fn public_summary_is_identical_when_only_hidden_owner_differs() {
 
 #[test]
 fn transfer_between_owners_does_not_change_public_currency_digest() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     state
         .execute(
@@ -99,8 +73,8 @@ fn transfer_between_owners_does_not_change_public_currency_digest() {
             &verified_task(
                 2,
                 vec![Operation::Transfer {
-                    source: alice,
-                    destination: bob,
+                    source: payment_address(alice),
+                    destination: payment_address(bob),
                     amount: 1,
                 }],
             ),
@@ -115,7 +89,7 @@ fn transfer_between_owners_does_not_change_public_currency_digest() {
 
 #[test]
 fn public_summary_changes_when_occupancy_or_role_changes() {
-    let alice = AccountAddress::new(1);
+    let alice = support::account(1);
 
     let reserve_only = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
 

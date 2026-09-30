@@ -2,41 +2,17 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
+mod support;
+
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyAddress, CurrencyRole,
-    LegalTask, LegalTaskPayload, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,
-    SecondState, TaskId, client_public_currency_page, serve_public_currency_session,
+    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,
+    SecondState, client_public_currency_page, serve_public_currency_session,
 };
-
-fn key(byte: u8) -> SigningKey {
-    SigningKey::from_bytes(&[byte; 32])
-}
-
-fn verified_task(task_id: u128, operations: Vec<Operation>) -> second::VerifiedLegalTask {
-    let signing = key(9);
-    let authorizers = AuthorizerSet::new(
-        CURRENT_PROTOCOL_VERSION,
-        [signing.verifying_key().to_bytes()],
-    )
-    .unwrap();
-    LegalTask::sign(
-        LegalTaskPayload::new(
-            TaskId::new(task_id),
-            CURRENT_PROTOCOL_VERSION,
-            None,
-            operations,
-        ),
-        &signing,
-    )
-    .unwrap()
-    .verify(&authorizers)
-    .unwrap()
-}
+use support::{payment_address, register_payment_addresses, verified_task};
 
 #[test]
 fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
-    let alice = AccountAddress::new(987654);
+    let alice = support::account(987654);
     let mut state = SecondState::genesis([alice], 1).with_reserve(2).unwrap();
     let issue = verified_task(
         1,
@@ -91,9 +67,10 @@ fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
 
 #[test]
 fn address_gaps_are_skipped_without_empty_pages() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let failing = verified_task(
         1,
@@ -103,8 +80,8 @@ fn address_gaps_are_skipped_without_empty_pages() {
                 count: 2,
             },
             Operation::Transfer {
-                source: bob,
-                destination: alice,
+                source: payment_address(bob),
+                destination: payment_address(alice),
                 amount: 1,
             },
         ],
@@ -130,9 +107,10 @@ fn address_gaps_are_skipped_without_empty_pages() {
 
 #[test]
 fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
-    let alice = AccountAddress::new(1);
-    let bob = AccountAddress::new(2);
+    let alice = support::account(1);
+    let bob = support::account(2);
     let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
 
     let failing = verified_task(
         10,
@@ -142,8 +120,8 @@ fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
                 count: 10_000,
             },
             Operation::Transfer {
-                source: bob,
-                destination: alice,
+                source: payment_address(bob),
+                destination: payment_address(alice),
                 amount: 1,
             },
         ],

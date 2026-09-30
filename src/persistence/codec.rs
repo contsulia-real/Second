@@ -3,20 +3,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use sha2::{Digest, Sha256};
 
 use crate::currency::Currency;
-use crate::state::{BusinessState, ProtocolState, TaskBinding};
+use crate::payment::{PaymentAddressRecord, PaymentExecution};
+use crate::prepared_plan::PreparedTask;
+use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
+use crate::validator_signer::FinalityScope;
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, PersistedNodeState, PersistenceError,
+    AccountAddress, CurrencyAddress, CurrencyRole, MAX_CURRENCY_SEQUENCE, OperationClaimId,
+    PaymentAddress, PaymentAddressStatus, PersistedNodeState, PersistenceError,
     PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorCredential, ValidatorId,
-    ValidatorSet,
+    ValidatorRegistry, ValidatorSet,
 };
 
+use super::local_codec::{decode_local_state, encode_local_state};
+use super::validator_codec::{decode_validator_registry, encode_validator_registry};
+
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 4;
-const LEGACY_SNAPSHOT_VERSION_V3: u32 = 3;
-const LEGACY_SNAPSHOT_VERSION_V2: u32 = 2;
-const SNAPSHOT_DOMAIN_V4: &[u8] = b"SECOND_STATE_SNAPSHOT_V4\0";
-const SNAPSHOT_DOMAIN_V3: &[u8] = b"SECOND_STATE_SNAPSHOT_V3\0";
-const SNAPSHOT_DOMAIN_V2: &[u8] = b"SECOND_STATE_SNAPSHOT_V2\0";
+const SNAPSHOT_VERSION: u32 = 5;
+const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V5\0";
 const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
@@ -24,14 +27,48 @@ const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_SNAPSHOT_FILE_SIZE: u64 =
     MAX_SNAPSHOT_PAYLOAD_SIZE + (HEADER_SIZE + CHECKSUM_SIZE) as u64;
 
+pub(super) struct SnapshotContents<'a> {
+    pub(super) state: &'a SecondState,
+    pub(super) validator_set: &'a ValidatorSet,
+    pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
+    pub(super) checkpoint_floor_epoch: u64,
+    pub(super) validator_registry: &'a ValidatorRegistry,
+    pub(super) prepared_tasks: &'a BTreeMap<TaskId, PreparedTask>,
+    pub(super) validator_vote_locks: &'a BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+}
+
+struct DecodedSnapshotPayload {
+    state: SecondState,
+    validator_set: ValidatorSet,
+    public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+    checkpoint_floor_epoch: u64,
+    validator_registry: ValidatorRegistry,
+    prepared_tasks: BTreeMap<TaskId, PreparedTask>,
+    validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+}
+
 pub(super) fn encode_snapshot(
     generation: u64,
-    state: &SecondState,
-    validator_set: &ValidatorSet,
-    public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    contents: SnapshotContents<'_>,
 ) -> Result<Vec<u8>, PersistenceError> {
-    validate_checkpoint_attachment(state, validator_set, public_checkpoint_proof)?;
-    let payload = encode_payload(state, validator_set, public_checkpoint_proof)?;
+    validate_checkpoint_attachment(
+        contents.state,
+        contents.validator_set,
+        contents.public_checkpoint_proof,
+    )?;
+    contents
+        .validator_registry
+        .validate_current_set(contents.validator_set)
+        .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    let payload = encode_payload(
+        contents.state,
+        contents.validator_set,
+        contents.public_checkpoint_proof,
+        contents.checkpoint_floor_epoch,
+        contents.validator_registry,
+        contents.prepared_tasks,
+        contents.validator_vote_locks,
+    )?;
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| PersistenceError::SnapshotTooLarge)?;
 
@@ -46,7 +83,7 @@ pub(super) fn encode_snapshot(
     bytes.extend_from_slice(&payload_len.to_be_bytes());
     bytes.extend_from_slice(&payload);
 
-    let checksum = snapshot_checksum(SNAPSHOT_VERSION, &bytes)?;
+    let checksum = snapshot_checksum(&bytes);
     bytes.extend_from_slice(&checksum);
     Ok(bytes)
 }
@@ -65,10 +102,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)?,
     );
-    if version != SNAPSHOT_VERSION
-        && version != LEGACY_SNAPSHOT_VERSION_V3
-        && version != LEGACY_SNAPSHOT_VERSION_V2
-    {
+    if version != SNAPSHOT_VERSION {
         return Err(PersistenceError::UnsupportedSnapshotVersion(version));
     }
 
@@ -99,49 +133,81 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
     }
 
     let checksum_offset = HEADER_SIZE + payload_len;
-    let expected_checksum = snapshot_checksum(version, &bytes[..checksum_offset])?;
+    let expected_checksum = snapshot_checksum(&bytes[..checksum_offset]);
     if bytes[checksum_offset..] != expected_checksum {
         return Err(PersistenceError::ChecksumMismatch);
     }
 
-    let (state, validator_set, public_checkpoint_proof) =
-        decode_payload(&bytes[HEADER_SIZE..checksum_offset], version)?;
-    validate_checkpoint_attachment(&state, &validator_set, public_checkpoint_proof.as_ref())?;
+    let decoded = decode_payload(&bytes[HEADER_SIZE..checksum_offset])?;
+    validate_checkpoint_attachment(
+        &decoded.state,
+        &decoded.validator_set,
+        decoded.public_checkpoint_proof.as_ref(),
+    )?;
+    decoded
+        .validator_registry
+        .validate_current_set(&decoded.validator_set)
+        .map_err(|_| PersistenceError::InvalidSnapshot)?;
 
     Ok(PersistedNodeState {
-        state,
-        validator_set,
-        public_checkpoint_proof,
+        state: decoded.state,
+        validator_set: decoded.validator_set,
+        validator_registry: decoded.validator_registry,
+        public_checkpoint_proof: decoded.public_checkpoint_proof,
+        checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
         generation,
+        prepared_tasks: decoded.prepared_tasks,
+        validator_vote_locks: decoded.validator_vote_locks,
     })
 }
 
-fn snapshot_checksum(version: u32, bytes: &[u8]) -> Result<[u8; 32], PersistenceError> {
-    let domain = match version {
-        SNAPSHOT_VERSION => SNAPSHOT_DOMAIN_V4,
-        LEGACY_SNAPSHOT_VERSION_V3 => SNAPSHOT_DOMAIN_V3,
-        LEGACY_SNAPSHOT_VERSION_V2 => SNAPSHOT_DOMAIN_V2,
-        other => return Err(PersistenceError::UnsupportedSnapshotVersion(other)),
-    };
-
+fn snapshot_checksum(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(domain);
+    hasher.update(SNAPSHOT_DOMAIN);
     hasher.update(bytes);
-    Ok(hasher.finalize().into())
+    hasher.finalize().into()
 }
 
 fn encode_payload(
     state: &SecondState,
     validator_set: &ValidatorSet,
     public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    checkpoint_floor_epoch: u64,
+    validator_registry: &ValidatorRegistry,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
 ) -> Result<Vec<u8>, PersistenceError> {
     let mut out = Vec::new();
+
+    let exhausted_sentinel = MAX_CURRENCY_SEQUENCE + 1;
+    if state.protocol.next_currency_address > exhausted_sentinel
+        || state.business.currencies.values().any(|currency| {
+            currency.address.value() > MAX_CURRENCY_SEQUENCE
+                || currency.address.value() >= state.protocol.next_currency_address
+        })
+    {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
 
     out.extend_from_slice(&state.protocol.next_currency_address.to_be_bytes());
 
     push_len(&mut out, state.business.accounts.len())?;
     for account in &state.business.accounts {
-        out.extend_from_slice(&account.value().to_be_bytes());
+        out.extend_from_slice(&account.bytes());
+    }
+
+    push_len(&mut out, state.business.payment_addresses.len())?;
+    for (address, record) in &state.business.payment_addresses {
+        out.extend_from_slice(&address.bytes());
+        out.extend_from_slice(&record.account.bytes());
+        out.push(match record.status {
+            PaymentAddressStatus::Active => 1,
+            PaymentAddressStatus::Retiring => 2,
+            PaymentAddressStatus::Retired => 3,
+        });
+        out.extend_from_slice(&record.usage_count.to_be_bytes());
+        out.extend_from_slice(&record.expires_at.to_be_bytes());
+        out.extend_from_slice(&record.max_usage.to_be_bytes());
     }
 
     push_len(&mut out, state.business.currencies.len())?;
@@ -154,7 +220,7 @@ fn encode_payload(
         match currency.owner {
             Some(owner) => {
                 out.push(1);
-                out.extend_from_slice(&owner.value().to_be_bytes());
+                out.extend_from_slice(&owner.bytes());
             }
             None => out.push(0),
         }
@@ -162,9 +228,19 @@ fn encode_payload(
 
     push_len(&mut out, state.protocol.task_bindings.len())?;
     for (task_id, binding) in &state.protocol.task_bindings {
-        out.extend_from_slice(&task_id.value().to_be_bytes());
-        out.extend_from_slice(&binding.request_digest);
+        push_task_id(&mut out, task_id);
+        out.extend_from_slice(&binding.legality_proof);
         out.push(u8::from(binding.succeeded));
+    }
+
+    push_len(&mut out, state.prerequisite.payment_executions.len())?;
+    for (claim_id, execution) in &state.prerequisite.payment_executions {
+        push_task_id(&mut out, claim_id.task_id());
+        out.extend_from_slice(&claim_id.operation_index().to_be_bytes());
+        out.extend_from_slice(&execution.source.bytes());
+        out.extend_from_slice(&execution.destination.bytes());
+        out.extend_from_slice(&execution.amount.to_be_bytes());
+        out.extend_from_slice(&execution.expires_at.to_be_bytes());
     }
 
     out.extend_from_slice(&validator_set.version().to_be_bytes());
@@ -175,6 +251,9 @@ fn encode_payload(
         out.extend_from_slice(&credential.consensus_public_key());
         out.extend_from_slice(&credential.recovery_public_key());
     }
+
+    encode_validator_registry(&mut out, validator_registry)?;
+    out.extend_from_slice(&checkpoint_floor_epoch.to_be_bytes());
 
     match public_checkpoint_proof {
         Some(proof) => {
@@ -188,36 +267,68 @@ fn encode_payload(
         None => out.push(0),
     }
 
-    push_len(&mut out, state.protocol.validator_vote_locks.len())?;
-    for ((validator_id, task_id), plan_digest) in &state.protocol.validator_vote_locks {
-        out.extend_from_slice(&validator_id.value().to_be_bytes());
-        out.extend_from_slice(&task_id.value().to_be_bytes());
-        out.extend_from_slice(plan_digest);
-    }
+    encode_local_state(&mut out, prepared_tasks, validator_vote_locks)?;
 
     Ok(out)
 }
 
-fn decode_payload(
-    payload: &[u8],
-    snapshot_version: u32,
-) -> Result<
-    (
-        SecondState,
-        ValidatorSet,
-        Option<PublicCurrencyCheckpointProof>,
-    ),
-    PersistenceError,
-> {
+fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceError> {
     let mut decoder = Decoder::new(payload);
 
     let next_currency_address = decoder.read_u64()?;
+    if next_currency_address > MAX_CURRENCY_SEQUENCE + 1 {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
 
     let account_count = decoder.read_len()?;
+    if account_count > decoder.remaining() / 32 {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
     let mut accounts = BTreeSet::new();
     for _ in 0..account_count {
-        let account = AccountAddress::new(decoder.read_u64()?);
+        let account = AccountAddress::from_bytes(decoder.read_array_32()?);
         if !accounts.insert(account) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    let payment_address_count = decoder.read_len()?;
+    const PAYMENT_ADDRESS_ENCODED_SIZE: usize = 32 + 32 + 1 + 8 + 8 + 8;
+    if payment_address_count > decoder.remaining() / PAYMENT_ADDRESS_ENCODED_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    let mut payment_addresses = BTreeMap::new();
+    for _ in 0..payment_address_count {
+        let address = PaymentAddress::from_bytes(decoder.read_array_32()?);
+        let account = AccountAddress::from_bytes(decoder.read_array_32()?);
+        if !accounts.contains(&account) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        let status = match decoder.read_u8()? {
+            1 => PaymentAddressStatus::Active,
+            2 => PaymentAddressStatus::Retiring,
+            3 => PaymentAddressStatus::Retired,
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
+        let usage_count = decoder.read_u64()?;
+        let expires_at = decoder.read_u64()?;
+        let max_usage = decoder.read_u64()?;
+        if usage_count > max_usage {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        if payment_addresses
+            .insert(
+                address,
+                PaymentAddressRecord {
+                    account,
+                    status,
+                    usage_count,
+                    expires_at,
+                    max_usage,
+                },
+            )
+            .is_some()
+        {
             return Err(PersistenceError::InvalidSnapshot);
         }
     }
@@ -226,7 +337,7 @@ fn decode_payload(
     let mut currencies = BTreeMap::new();
     for _ in 0..currency_count {
         let address = CurrencyAddress::new(decoder.read_u64()?);
-        if address.value() >= next_currency_address {
+        if address.value() > MAX_CURRENCY_SEQUENCE || address.value() >= next_currency_address {
             return Err(PersistenceError::InvalidSnapshot);
         }
 
@@ -239,7 +350,7 @@ fn decode_payload(
         let owner = match decoder.read_u8()? {
             0 => None,
             1 => {
-                let owner = AccountAddress::new(decoder.read_u64()?);
+                let owner = AccountAddress::from_bytes(decoder.read_array_32()?);
                 if !accounts.contains(&owner) {
                     return Err(PersistenceError::InvalidSnapshot);
                 }
@@ -268,10 +379,14 @@ fn decode_payload(
     }
 
     let task_count = decoder.read_len()?;
+    const MIN_TASK_BINDING_SIZE: usize = 1 + 1 + 64 + 1;
+    if task_count > decoder.remaining() / MIN_TASK_BINDING_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
     let mut task_bindings = BTreeMap::new();
     for _ in 0..task_count {
-        let task_id = TaskId::new(decoder.read_u128()?);
-        let request_digest = decoder.read_array_32()?;
+        let task_id = decoder.read_task_id()?;
+        let legality_proof = decoder.read_array_64()?;
         let succeeded = match decoder.read_u8()? {
             0 => false,
             1 => true,
@@ -282,7 +397,7 @@ fn decode_payload(
             .insert(
                 task_id,
                 TaskBinding {
-                    request_digest,
+                    legality_proof,
                     succeeded,
                 },
             )
@@ -292,8 +407,82 @@ fn decode_payload(
         }
     }
 
+    let payment_execution_count = decoder.read_len()?;
+    const MIN_PAYMENT_EXECUTION_ENCODED_SIZE: usize = 1 + 1 + 8 + 32 + 32 + 8 + 8;
+    if payment_execution_count > decoder.remaining() / MIN_PAYMENT_EXECUTION_ENCODED_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    let mut payment_executions = BTreeMap::new();
+    for _ in 0..payment_execution_count {
+        let task_id = decoder.read_task_id()?;
+        let operation_index = decoder.read_u64()?;
+        let source = PaymentAddress::from_bytes(decoder.read_array_32()?);
+        let destination = PaymentAddress::from_bytes(decoder.read_array_32()?);
+        let amount = decoder.read_u64()?;
+        let expires_at = decoder.read_u64()?;
+
+        if !payment_addresses.contains_key(&source) || !payment_addresses.contains_key(&destination)
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        if payment_executions
+            .insert(
+                OperationClaimId::new(task_id, operation_index),
+                PaymentExecution {
+                    source,
+                    destination,
+                    amount,
+                    expires_at,
+                },
+            )
+            .is_some()
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    let mut in_flight_by_address = BTreeMap::<PaymentAddress, u64>::new();
+    for (claim_id, execution) in &payment_executions {
+        let binding = task_bindings
+            .get(claim_id.task_id())
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        if binding.succeeded {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let source_count = in_flight_by_address.entry(execution.source).or_default();
+        *source_count = source_count
+            .checked_add(1)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+
+        if execution.destination != execution.source {
+            let destination_count = in_flight_by_address
+                .entry(execution.destination)
+                .or_default();
+            *destination_count = destination_count
+                .checked_add(1)
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+        }
+    }
+
+    for (address, record) in &payment_addresses {
+        let in_flight = in_flight_by_address.get(address).copied().unwrap_or(0);
+        let reserved = record
+            .usage_count
+            .checked_add(in_flight)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        if reserved > record.max_usage {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
     let validator_set_version = decoder.read_u64()?;
     let validator_count = decoder.read_len()?;
+    const VALIDATOR_ENCODED_SIZE: usize = 8 + 32 * 3;
+    if validator_count > decoder.remaining() / VALIDATOR_ENCODED_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
     let mut validators = Vec::with_capacity(validator_count);
 
     for _ in 0..validator_count {
@@ -312,62 +501,49 @@ fn decode_payload(
         );
     }
 
-    let public_checkpoint_proof = if snapshot_version == LEGACY_SNAPSHOT_VERSION_V2 {
-        None
-    } else {
-        match decoder.read_u8()? {
-            0 => None,
-            1 => {
-                let proof_len = decoder.read_len()?;
-                let proof_bytes = decoder.read_exact(proof_len)?;
-                Some(
-                    PublicCurrencyCheckpointProof::decode_bytes(proof_bytes)
-                        .map_err(|_| PersistenceError::InvalidSnapshot)?,
-                )
-            }
-            _ => return Err(PersistenceError::InvalidSnapshot),
+    let validator_registry = decode_validator_registry(&mut decoder)?;
+    let checkpoint_floor_epoch = decoder.read_u64()?;
+
+    let public_checkpoint_proof = match decoder.read_u8()? {
+        0 => None,
+        1 => {
+            let proof_len = decoder.read_len()?;
+            let proof_bytes = decoder.read_exact(proof_len)?;
+            Some(
+                PublicCurrencyCheckpointProof::decode_bytes(proof_bytes)
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?,
+            )
         }
+        _ => return Err(PersistenceError::InvalidSnapshot),
     };
 
-    let validator_vote_locks = if snapshot_version == SNAPSHOT_VERSION {
-        let lock_count = decoder.read_len()?;
-        let mut locks = BTreeMap::new();
-
-        for _ in 0..lock_count {
-            let validator_id = ValidatorId::new(decoder.read_u64()?);
-            let task_id = TaskId::new(decoder.read_u128()?);
-            let plan_digest = decoder.read_array_32()?;
-
-            if locks.insert((validator_id, task_id), plan_digest).is_some() {
-                return Err(PersistenceError::InvalidSnapshot);
-            }
-        }
-
-        locks
-    } else {
-        BTreeMap::new()
-    };
+    let (prepared_tasks, validator_vote_locks) = decode_local_state(&mut decoder)?;
 
     decoder.finish()?;
 
     let validator_set = ValidatorSet::new(validator_set_version, validators)
         .map_err(|_| PersistenceError::InvalidSnapshot)?;
 
-    Ok((
-        SecondState {
+    Ok(DecodedSnapshotPayload {
+        state: SecondState {
             protocol: ProtocolState {
                 next_currency_address,
                 task_bindings,
-                validator_vote_locks,
             },
+            prerequisite: PrerequisiteState { payment_executions },
             business: BusinessState {
                 accounts,
+                payment_addresses,
                 currencies,
             },
         },
         validator_set,
         public_checkpoint_proof,
-    ))
+        checkpoint_floor_epoch,
+        validator_registry,
+        prepared_tasks,
+        validator_vote_locks,
+    })
 }
 
 fn validate_checkpoint_attachment(
@@ -393,13 +569,18 @@ fn validate_checkpoint_attachment(
     Ok(())
 }
 
-fn push_len(out: &mut Vec<u8>, len: usize) -> Result<(), PersistenceError> {
+pub(super) fn push_len(out: &mut Vec<u8>, len: usize) -> Result<(), PersistenceError> {
     let len = u64::try_from(len).map_err(|_| PersistenceError::SnapshotTooLarge)?;
     out.extend_from_slice(&len.to_be_bytes());
     Ok(())
 }
 
-struct Decoder<'a> {
+pub(super) fn push_task_id(out: &mut Vec<u8>, task_id: &TaskId) {
+    out.push(task_id.len() as u8);
+    out.extend_from_slice(task_id.as_bytes());
+}
+
+pub(super) struct Decoder<'a> {
     bytes: &'a [u8],
     offset: usize,
 }
@@ -409,11 +590,11 @@ impl<'a> Decoder<'a> {
         Self { bytes, offset: 0 }
     }
 
-    fn read_u8(&mut self) -> Result<u8, PersistenceError> {
+    pub(super) fn read_u8(&mut self) -> Result<u8, PersistenceError> {
         Ok(self.read_exact(1)?[0])
     }
 
-    fn read_u64(&mut self) -> Result<u64, PersistenceError> {
+    pub(super) fn read_u64(&mut self) -> Result<u64, PersistenceError> {
         Ok(u64::from_be_bytes(
             self.read_exact(8)?
                 .try_into()
@@ -421,25 +602,36 @@ impl<'a> Decoder<'a> {
         ))
     }
 
-    fn read_u128(&mut self) -> Result<u128, PersistenceError> {
-        Ok(u128::from_be_bytes(
-            self.read_exact(16)?
-                .try_into()
-                .map_err(|_| PersistenceError::InvalidSnapshot)?,
-        ))
+    pub(super) fn read_task_id(&mut self) -> Result<TaskId, PersistenceError> {
+        let len = usize::from(self.read_u8()?);
+        if !(1..=128).contains(&len) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        TaskId::from_ascii_bytes(self.read_exact(len)?)
+            .map_err(|_| PersistenceError::InvalidSnapshot)
     }
 
-    fn read_array_32(&mut self) -> Result<[u8; 32], PersistenceError> {
+    pub(super) fn read_array_32(&mut self) -> Result<[u8; 32], PersistenceError> {
         self.read_exact(32)?
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)
     }
 
-    fn read_len(&mut self) -> Result<usize, PersistenceError> {
+    pub(super) fn read_array_64(&mut self) -> Result<[u8; 64], PersistenceError> {
+        self.read_exact(64)?
+            .try_into()
+            .map_err(|_| PersistenceError::InvalidSnapshot)
+    }
+
+    pub(super) fn read_len(&mut self) -> Result<usize, PersistenceError> {
         usize::try_from(self.read_u64()?).map_err(|_| PersistenceError::InvalidSnapshot)
     }
 
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], PersistenceError> {
+    pub(super) fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+
+    pub(super) fn read_exact(&mut self, len: usize) -> Result<&'a [u8], PersistenceError> {
         let end = self
             .offset
             .checked_add(len)
