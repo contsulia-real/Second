@@ -152,7 +152,6 @@ impl PreparedTaskBook {
         &mut self,
         state: &mut SecondState,
         task_id: TaskId,
-        now: u64,
         certificate: &FinalityCertificate,
         validator_set: &ValidatorSet,
     ) -> Result<ExecutionOutcome, PreparationError> {
@@ -161,11 +160,6 @@ impl PreparedTaskBook {
             .get(&task_id)
             .cloned()
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
-
-        if now > prepared.expires_at {
-            self.remove_prepared_durably(task_id)?;
-            return Err(ExecutionError::TaskExpired.into());
-        }
 
         let expected_statement =
             self.prepared_finality_statement(task_id.clone(), validator_set)?;
@@ -242,20 +236,10 @@ impl PreparedTaskBook {
     pub fn sign_prepared_vote(
         &self,
         task_id: TaskId,
-        now: u64,
         validator_id: ValidatorId,
         signing_key: &SigningKey,
         validator_set: &ValidatorSet,
     ) -> Result<ValidatorVote, PreparationError> {
-        let prepared = self
-            .tasks
-            .get(&task_id)
-            .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
-
-        if now > prepared.expires_at {
-            return Err(ExecutionError::TaskExpired.into());
-        }
-
         let statement = self.prepared_finality_statement(task_id.clone(), validator_set)?;
         let signer = ValidatorSigner::new(validator_id, signing_key.clone(), self.store.clone());
         signer

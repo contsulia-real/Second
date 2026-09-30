@@ -59,11 +59,10 @@ impl Harness {
         &mut self,
         state: &mut SecondState,
         task_id: TaskId,
-        now: u64,
     ) -> Result<ExecutionOutcome, PreparationError> {
         let certificate = certify(&self.book, task_id.clone(), &self.validators);
         self.book
-            .commit(state, task_id, now, &certificate, &self.validators)
+            .commit(state, task_id, &certificate, &self.validators)
     }
 
     fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
@@ -151,7 +150,7 @@ fn prepared_issue_reserves_addresses_without_exposing_currency_before_commit() {
     assert!(!state.currency_exists(CurrencyAddress::new(2)));
 
     assert_eq!(
-        prepared.commit(&mut state, task.task_id(), 1).unwrap(),
+        prepared.commit(&mut state, task.task_id()).unwrap(),
         ExecutionOutcome::Succeeded
     );
 
@@ -336,7 +335,7 @@ fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
 
     prepared.prepare(&mut state, &task, 2).unwrap();
     assert_eq!(state.next_currency_address(), 3);
-    prepared.commit(&mut state, task.task_id(), 2).unwrap();
+    prepared.commit(&mut state, task.task_id()).unwrap();
 
     assert!(!state.currency_exists(CurrencyAddress::new(1)));
     assert!(state.currency_exists(CurrencyAddress::new(2)));
@@ -369,7 +368,6 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
         prepared.book.commit(
             &mut state,
             task.task_id(),
-            2,
             &old_certificate,
             &prepared.validators,
         ),
@@ -387,7 +385,6 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
             .commit(
                 &mut state,
                 task.task_id(),
-                2,
                 &current_certificate,
                 &prepared.validators,
             )
@@ -427,10 +424,10 @@ fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
 }
 
 #[test]
-fn task_expiring_while_prepared_is_cancelled_without_reusing_reserved_addresses() {
+fn prepared_before_expiry_can_commit_after_expiry() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = Harness::new("prepared-crosses-expiry");
     let task = expiring_task(
         10,
         5,
@@ -444,12 +441,13 @@ fn task_expiring_while_prepared_is_cancelled_without_reusing_reserved_addresses(
     assert_eq!(state.next_currency_address(), 2);
 
     assert_eq!(
-        prepared.commit(&mut state, task.task_id(), 6),
-        Err(PreparationError::Execution(ExecutionError::TaskExpired))
+        prepared.commit(&mut state, task.task_id()).unwrap(),
+        ExecutionOutcome::Succeeded
     );
 
-    assert_eq!(state.current_supply(), 0);
+    assert_eq!(state.current_supply(), 1);
     assert_eq!(state.next_currency_address(), 2);
+    assert!(state.currency_exists(CurrencyAddress::new(1)));
     assert_eq!(prepared.prepared_count(), 0);
 }
 
@@ -528,7 +526,7 @@ fn crash_after_prepare_restores_the_exact_plan_without_reallocating_addresses() 
 
     let certificate = certify(&recovered, task.task_id(), &validator_set);
     recovered
-        .commit(&mut state, task.task_id(), 2, &certificate, &validator_set)
+        .commit(&mut state, task.task_id(), &certificate, &validator_set)
         .unwrap();
 
     assert_eq!(state.next_currency_address(), 3);
@@ -558,7 +556,7 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
         .unwrap();
     let certificate = certify(&prepared, task.task_id(), &validator_set);
     prepared
-        .commit(&mut state, task.task_id(), 1, &certificate, &validator_set)
+        .commit(&mut state, task.task_id(), &certificate, &validator_set)
         .unwrap();
 
     let mut restored = store.load().unwrap().unwrap().state;
