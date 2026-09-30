@@ -88,23 +88,6 @@ impl SecondState {
         self.prerequisite.payment_executions.len()
     }
 
-    pub fn reap_expired_payment_executions(&mut self, now: u64, max_count: usize) -> usize {
-        let mut expired = self
-            .prerequisite
-            .payment_executions
-            .iter()
-            .filter(|(_, execution)| execution.expires_at <= now)
-            .map(|(claim_id, execution)| (execution.expires_at, claim_id.clone()))
-            .collect::<Vec<_>>();
-        expired.sort_unstable();
-
-        let removed = expired.len().min(max_count);
-        for (_, claim_id) in expired.into_iter().take(max_count) {
-            self.prerequisite.payment_executions.remove(&claim_id);
-        }
-        removed
-    }
-
     pub fn retire_payment_address(
         &mut self,
         address: PaymentAddress,
