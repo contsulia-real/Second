@@ -2,10 +2,11 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation,
-    PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState, StateStore,
-    ValidatorAdmissionRequest, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
-    ValidatorSetTransition, ValidatorSigner, ValidatorSigningError,
+    AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, LegalTask,
+    LegalTaskPayload, Operation, PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint,
+    SecondState, StateStore, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId,
+    ValidatorRegistry, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
+    ValidatorSigningError,
 };
 use support::{key, payment_address, register_payment_addresses, temp_base, verified_task};
 
@@ -21,6 +22,31 @@ fn validator_credential(id: u64) -> ValidatorCredential {
 
 fn validators() -> ValidatorSet {
     ValidatorSet::new(7, (1..=4).map(validator_credential)).unwrap()
+}
+
+fn registry_with_retired_five(current: &ValidatorSet) -> ValidatorRegistry {
+    let previous = ValidatorSet::new(6, (1..=5).map(validator_credential)).unwrap();
+    let mut registry = ValidatorRegistry::from_validator_set(&previous).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        19,
+        &previous,
+        &registry,
+        current.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let statement = transition.finality_statement();
+    let votes = [1_u64, 2, 3, 4]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+    CertifiedValidatorSetTransition::new(transition, votes, &previous)
+        .unwrap()
+        .activate(20, &mut registry)
+        .unwrap();
+    registry
 }
 
 fn transition_with_candidate(
@@ -252,6 +278,40 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
 }
 
 #[test]
+fn public_checkpoint_signer_rejects_summary_that_is_not_the_persisted_state() {
+    let store = StateStore::new(temp_base("checkpoint-vote-state"));
+    let set = validators();
+    let validator_id = ValidatorId::new(1);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    let other_state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    store.initialize(&state, &set).unwrap();
+
+    let invalid = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        other_state.public_currency_summary(),
+    );
+    assert_eq!(
+        ValidatorSigner::new(validator_id, key(1), store.clone())
+            .sign_public_checkpoint(&invalid, &set),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::CheckpointDoesNotMatchState
+        ))
+    );
+
+    let valid = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        state.public_currency_summary(),
+    );
+    ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_public_checkpoint(&valid, &set)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() {
     let store = StateStore::new(temp_base("checkpoint-vote-lock"));
     let set = validators();
@@ -287,6 +347,34 @@ fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() 
 }
 
 #[test]
+fn validator_transition_signer_uses_persisted_registry_history() {
+    let store = StateStore::new(temp_base("validator-transition-registry-history"));
+    let set = validators();
+    let registry = registry_with_retired_five(&set);
+    let forgotten = ValidatorRegistry::from_validator_set(&set).unwrap();
+    let state = SecondState::genesis([], 1);
+    store
+        .initialize_with_validator_registry(&state, &set, &registry)
+        .unwrap();
+
+    let invalid = transition_with_candidate(&set, &forgotten, 5, 100);
+    assert_eq!(
+        ValidatorSigner::new(ValidatorId::new(1), key(1), store.clone())
+            .sign_validator_set_transition(&invalid, &set),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::ValidatorRegistryMismatch
+        ))
+    );
+
+    let valid = transition_with_candidate(&set, &registry, 6, 110);
+    ValidatorSigner::new(ValidatorId::new(1), key(1), store.clone())
+        .sign_validator_set_transition(&valid, &set)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_next_set() {
     let store = StateStore::new(temp_base("validator-transition-vote-lock"));
     let set = validators();
@@ -316,6 +404,36 @@ fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_ne
             ..
         }) if locked_validator == validator_id
     ));
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn signer_rejects_same_version_validator_set_that_is_not_the_persisted_active_set() {
+    let store = StateStore::new(temp_base("vote-lock-wrong-set"));
+    let set = validators();
+    let forged = ValidatorSet::new(
+        set.version(),
+        (1..=3)
+            .map(validator_credential)
+            .chain(std::iter::once(validator_credential(5))),
+    )
+    .unwrap();
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    store.initialize(&state, &set).unwrap();
+    let checkpoint = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        state.public_currency_summary(),
+    );
+
+    assert_eq!(
+        ValidatorSigner::new(ValidatorId::new(1), key(1), store.clone())
+            .sign_public_checkpoint(&checkpoint, &forged),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::ValidatorRegistryMismatch
+        ))
+    );
 
     store.remove_files().unwrap();
 }

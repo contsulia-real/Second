@@ -286,16 +286,26 @@ impl StateStore {
         }))
     }
 
-    pub(crate) fn lock_finality_vote(
+    pub(crate) fn lock_finality_vote<F>(
         &self,
         validator_id: ValidatorId,
         scope: FinalityScope,
         digest: [u8; 32],
-    ) -> Result<VoteLockStatus, PersistenceError> {
+        validator_set: &ValidatorSet,
+        validate_latest: F,
+    ) -> Result<VoteLockStatus, PersistenceError>
+    where
+        F: FnOnce(&PersistedNodeState) -> Result<(), PersistenceError>,
+    {
         let _guard = self.lock()?;
         let mut latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
+
+        latest
+            .validator_registry
+            .validate_current_set(validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
 
         match latest
             .validator_vote_locks
@@ -305,6 +315,8 @@ impl StateStore {
             Some(existing) => return Ok(VoteLockStatus::Conflict(*existing)),
             None => {}
         }
+
+        validate_latest(&latest)?;
 
         latest
             .validator_vote_locks

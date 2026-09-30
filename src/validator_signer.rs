@@ -71,6 +71,12 @@ impl ValidatorSigner {
             &statement,
             validator_set,
             FinalityScope::PublicCheckpoint(checkpoint.epoch()),
+            |latest| {
+                if checkpoint.summary() != &latest.state.public_currency_summary() {
+                    return Err(PersistenceError::CheckpointDoesNotMatchState);
+                }
+                Ok(())
+            },
         )
     }
 
@@ -85,6 +91,12 @@ impl ValidatorSigner {
             FinalityScope::ValidatorSetTransition {
                 current_validator_set_version: transition.current_validator_set_version(),
                 activation_epoch: transition.activation_epoch(),
+            },
+            |latest| {
+                latest
+                    .validator_registry
+                    .validate_transition(&latest.validator_set, transition.next_validator_set())
+                    .map_err(|_| PersistenceError::ValidatorRegistryMismatch)
             },
         )
     }
@@ -107,15 +119,20 @@ impl ValidatorSigner {
             statement,
             validator_set,
             FinalityScope::PreparedTask(task_id),
+            |_| Ok(()),
         )
     }
 
-    fn sign_locked(
+    fn sign_locked<F>(
         &self,
         statement: &FinalityStatement,
         validator_set: &ValidatorSet,
         scope: FinalityScope,
-    ) -> Result<ValidatorVote, ValidatorSigningError> {
+        validate_latest: F,
+    ) -> Result<ValidatorVote, ValidatorSigningError>
+    where
+        F: FnOnce(&crate::PersistedNodeState) -> Result<(), PersistenceError>,
+    {
         if statement.protocol_version() != CURRENT_PROTOCOL_VERSION {
             return Err(FinalityError::WrongProtocolVersion {
                 expected: CURRENT_PROTOCOL_VERSION,
@@ -143,10 +160,13 @@ impl ValidatorSigner {
         }
 
         let attempted_digest = statement.subject_digest();
-        match self
-            .store
-            .lock_finality_vote(self.validator_id, scope, attempted_digest)?
-        {
+        match self.store.lock_finality_vote(
+            self.validator_id,
+            scope,
+            attempted_digest,
+            validator_set,
+            validate_latest,
+        )? {
             VoteLockStatus::Inserted | VoteLockStatus::AlreadyLocked => {}
             VoteLockStatus::Conflict(locked_digest) => {
                 return Err(ValidatorSigningError::VoteLocked {
