@@ -71,8 +71,8 @@ mod tests {
 
     #[test]
     fn active_peer_identity_is_unique_and_released_with_lease() {
-        let local = NodeId::from_u64(1);
-        let remote = NodeId::from_u64(2);
+        let local = NodeId::from_bytes([1; 32]);
+        let remote = NodeId::from_bytes([2; 32]);
         let manager = PeerManager::new(local);
 
         assert_eq!(

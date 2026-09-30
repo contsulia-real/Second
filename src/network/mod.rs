@@ -34,12 +34,6 @@ impl NodeId {
         Self(bytes)
     }
 
-    pub fn from_u64(value: u64) -> Self {
-        let mut bytes = [0_u8; 32];
-        bytes[24..].copy_from_slice(&value.to_be_bytes());
-        Self(bytes)
-    }
-
     pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }

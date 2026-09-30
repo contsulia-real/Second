@@ -851,7 +851,9 @@ checkpoint epoch 是公开同步证明的单调 freshness 序号，不是全局 
 
 QUIC 的 transport identity 与 Validator identity / consensus / recovery key 是不同职责，四者不得复用。transport identity 使用独立 Ed25519 key；`NodeId` 直接等于该 transport public key 的 32-byte 编码，因此 NodeId 不再是调用方可以任意声明的数字或标签。
 
-同一 transport Ed25519 key 同时用于生成节点的 TLS self-signed certificate，并用于 Hello peer-auth signature。Hello signature 的签名输入绑定当前 network protocol version、client/server role 与 Quinn TLS exporter 派生的 per-connection channel binding；因此旧连接上的 Hello 不能在另一条 QUIC connection 上重放，client proof 也不能直接反射成 server proof。只有签名验证成功后，Hello 中的 NodeId 才能成为 `QuicPeer::remote_node_id()`。
+NodeId 的认证权威是 Hello peer-auth Ed25519 key：Hello signature 的签名输入绑定当前 network protocol version、client/server role 与 Quinn TLS exporter 派生的 per-connection channel binding，因此该 NodeId 的 key ownership 被绑定到当前 TLS 会话；旧连接上的 Hello 不能在另一条 QUIC connection 上重放，client proof 也不能直接反射成 server proof。只有签名验证成功后，Hello 中的 NodeId 才能成为 `QuicPeer::remote_node_id()`。
+
+长期 server 当前用同一 transport Ed25519 key 生成 self-signed TLS certificate 和 Hello proof，使 certificate pin 与 NodeId 都能随同一持久 identity 稳定重建；但协议不把这描述成 mTLS。`QuicClient` 不向 server 提交 TLS client certificate，server 对 client NodeId 的认证来自 channel-bound Hello proof。对 server，显式 certificate pin 认证 TLS endpoint，Hello proof 再认证该会话上的 NodeId；当前接收端不额外解析 certificate SPKI 去重复证明“certificate key == Hello key”。
 
 当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
 

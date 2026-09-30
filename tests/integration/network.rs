@@ -9,7 +9,7 @@ use second::{
 fn network_frames_round_trip_without_json_or_platform_dependent_layout() {
     let messages = [
         NetworkMessage::Hello {
-            node_id: NodeId::from_u64(7),
+            node_id: NodeId::from_bytes([7; 32]),
             signature: [9; 64],
         },
         NetworkMessage::Ping { nonce: 42 },
