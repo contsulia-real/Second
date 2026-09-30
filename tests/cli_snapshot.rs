@@ -91,7 +91,8 @@ fn snapshot_status_refuses_corrupted_state_instead_of_starting_fresh() {
     let store = StateStore::new(&base);
     store.save(&state_with_issue(), &validators()).unwrap();
 
-    fs::write(store.slot_path_for_generation(1), b"broken").unwrap();
+    fs::write(store.slot_path_for_generation(1), b"broken-a").unwrap();
+    fs::write(store.slot_path_for_generation(2), b"broken-b").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_second"))
         .arg("snapshot-status")

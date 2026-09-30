@@ -325,7 +325,7 @@ fn newer_snapshot_wins_and_generation_increments() {
 }
 
 #[test]
-fn corrupted_newest_slot_falls_back_to_previous_valid_snapshot() {
+fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
     let base = temp_base("fallback");
     let store = StateStore::new(&base);
 
@@ -349,8 +349,8 @@ fn corrupted_newest_slot_falls_back_to_previous_valid_snapshot() {
     fs::write(&newest, b"corrupted").unwrap();
 
     let restored = store.load().unwrap().unwrap();
-    assert_eq!(restored.generation, 1);
-    assert_eq!(restored.state.balance(alice), 0);
+    assert_eq!(restored.generation, 2);
+    assert_eq!(restored.state.balance(alice), 1);
 
     store.remove_files().unwrap();
 }

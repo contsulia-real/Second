@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::prepared_plan::PreparedTask;
 use crate::validator_signer::FinalityScope;
@@ -10,8 +11,21 @@ use crate::{
 };
 
 use super::codec::{SnapshotContents, encode_snapshot};
-use super::slot::{load_latest, remove_slots, shared_path_lock, slot_path, write_slot};
+use super::slot::{
+    load_latest, lock_store_file, remove_slots, shared_path_lock, slot_path, write_slots,
+};
 use super::{PersistedNodeState, VoteLockStatus};
+
+struct StateStoreGuard<'a> {
+    _process_guard: MutexGuard<'a, ()>,
+    file: File,
+}
+
+impl Drop for StateStoreGuard<'_> {
+    fn drop(&mut self) {
+        let _ = File::unlock(&self.file);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct StateStore {
@@ -336,10 +350,16 @@ impl StateStore {
         remove_slots(&self.base_path)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, PersistenceError> {
-        self.write_lock
+    fn lock(&self) -> Result<StateStoreGuard<'_>, PersistenceError> {
+        let process_guard = self
+            .write_lock
             .lock()
-            .map_err(|_| PersistenceError::StoreLockPoisoned)
+            .map_err(|_| PersistenceError::StoreLockPoisoned)?;
+        let file = lock_store_file(&self.base_path)?;
+        Ok(StateStoreGuard {
+            _process_guard: process_guard,
+            file,
+        })
     }
 
     fn load_unlocked(&self) -> Result<Option<PersistedNodeState>, PersistenceError> {
@@ -357,7 +377,7 @@ impl StateStore {
             .ok_or(PersistenceError::GenerationOverflow)?;
         let bytes = encode_snapshot(generation, contents)?;
 
-        write_slot(&self.base_path, generation, &bytes)?;
+        write_slots(&self.base_path, generation, &bytes)?;
         Ok(generation)
     }
 }
