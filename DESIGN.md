@@ -835,6 +835,10 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 当前 checkpoint/summary 是**同步与证明机制**，不是“账户余额账本”或“全局区块链状态”。
 
+当前 public checkpoint 形态确定保留：`epoch + PublicCurrencySummary + validator-set finality proof`。其中 summary 已包含 public state frontier、supply/reserve/occupied 计数与确定性 `state_digest`；checkpoint digest 同时绑定 protocol version、epoch 和完整 summary，FinalityStatement 再绑定 validator-set version。网络收到的 `PublicCurrencyCheckpointProof` 只是未认证传输形态，只有用本地可信 ValidatorSet 验证 QC，并确认同步得到的 `PublicCurrencyView` 与 checkpoint summary 完全一致后，才得到 `CertifiedPublicCurrencyCheckpoint`。
+
+checkpoint epoch 是公开同步证明的单调 freshness 序号，不是全局 transaction/block height。节点持久化 `checkpoint_floor_epoch` 作为防回退下界；即使业务状态前进导致旧 checkpoint proof 不再匹配当前 state，floor 仍保留并跨重启恢复。当前机制只认证公开 Currency state，不加入 owner commitment，也不声称证明私有 ownership。
+
 ---
 
 ## 16. 网络设计
@@ -1150,7 +1154,6 @@ ValidatorId + TaskId
 后续重点：
 
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 peer trust/discovery/admission；如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
-- 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
