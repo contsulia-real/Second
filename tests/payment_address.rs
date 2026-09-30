@@ -54,6 +54,14 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
         state.payment_address_status(alice_pay),
         Some(PaymentAddressStatus::Retiring)
     );
+    assert_eq!(
+        state.finalize_payment_address_retirement(alice_pay),
+        Err(ExecutionError::InvalidPaymentAddressTransition(alice_pay))
+    );
+    assert_eq!(
+        state.finalize_payment_address_retirement(bob_pay),
+        Err(ExecutionError::InvalidPaymentAddressTransition(bob_pay))
+    );
 
     let new_transfer = verified_task_with_expiry(
         12,
@@ -74,6 +82,19 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.balance(bob), 1);
     assert_eq!(state.payment_execution_count(), 0);
+
+    state
+        .finalize_payment_address_retirement(alice_pay)
+        .unwrap();
+    state.finalize_payment_address_retirement(bob_pay).unwrap();
+    assert_eq!(
+        state.payment_address_status(alice_pay),
+        Some(PaymentAddressStatus::Retired)
+    );
+    assert_eq!(
+        state.payment_address_status(bob_pay),
+        Some(PaymentAddressStatus::Retired)
+    );
 }
 
 #[test]

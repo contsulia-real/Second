@@ -133,21 +133,32 @@ impl SecondState {
         &mut self,
         address: PaymentAddress,
     ) -> Result<(), ExecutionError> {
-        let record = self
+        let status = self
             .business
             .payment_addresses
-            .get_mut(&address)
+            .get(&address)
+            .map(|record| record.status)
             .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;
 
-        match record.status {
-            PaymentAddressStatus::Retiring => {
-                record.status = PaymentAddressStatus::Retired;
-                Ok(())
-            }
-            PaymentAddressStatus::Active | PaymentAddressStatus::Retired => {
-                Err(ExecutionError::InvalidPaymentAddressTransition(address))
-            }
+        if status != PaymentAddressStatus::Retiring {
+            return Err(ExecutionError::InvalidPaymentAddressTransition(address));
         }
+
+        if self
+            .prerequisite
+            .payment_executions
+            .values()
+            .any(|execution| execution.source == address || execution.destination == address)
+        {
+            return Err(ExecutionError::InvalidPaymentAddressTransition(address));
+        }
+
+        self.business
+            .payment_addresses
+            .get_mut(&address)
+            .ok_or(ExecutionError::PaymentAddressUnavailable(address))?
+            .status = PaymentAddressStatus::Retired;
+        Ok(())
     }
 
     pub(crate) fn establish_task_transfers(

@@ -237,62 +237,6 @@ fn cancelling_prepared_leak_repair_burns_replacement_reserve_addresses() {
 }
 
 #[test]
-fn retrying_established_transfer_cannot_prepare_after_address_is_retired() {
-    let alice = support::account(1);
-    let bob = support::account(2);
-    let alice_pay = payment_address(alice);
-    let mut state = SecondState::genesis([alice, bob], 1);
-    register_payment_addresses(&mut state, [alice, bob]);
-
-    state
-        .execute(
-            &verified_task(
-                900,
-                vec![Operation::Issue {
-                    account: alice,
-                    count: 1,
-                }],
-            ),
-            1,
-        )
-        .unwrap();
-
-    let transfer = verified_task(
-        901,
-        vec![Operation::Transfer {
-            source: alice_pay,
-            destination: payment_address(bob),
-            amount: 2,
-        }],
-    );
-    let mut harness = Harness::new("prepared-transfer-retired-address");
-
-    assert!(matches!(
-        harness.prepare(&mut state, &transfer, 2),
-        Err(PreparationError::Claim(ClaimError::InsufficientBalance {
-            account,
-            required: 2,
-            available: 1,
-        })) if account == alice
-    ));
-    assert_eq!(state.payment_execution_count(), 1);
-
-    state.retire_payment_address(alice_pay).unwrap();
-    state
-        .finalize_payment_address_retirement(alice_pay)
-        .unwrap();
-
-    assert_eq!(
-        harness.prepare(&mut state, &transfer, 3),
-        Err(PreparationError::Execution(
-            ExecutionError::PaymentAddressUnavailable(alice_pay)
-        ))
-    );
-    assert_eq!(harness.book.prepared_count(), 0);
-    assert_eq!(state.payment_execution_count(), 1);
-}
-
-#[test]
 fn prepared_transfer_holds_claim_until_cancel_or_commit() {
     let alice = support::account(1);
     let bob = support::account(2);

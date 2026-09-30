@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -113,13 +114,16 @@ pub fn certificate_from_keys(
 }
 
 pub fn temp_base(prefix: &str) -> PathBuf {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
     let unique = format!(
-        "second-{prefix}-{}-{}",
+        "second-{prefix}-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock must be after unix epoch")
-            .as_nanos()
+            .as_nanos(),
+        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed),
     );
     std::env::temp_dir().join(unique)
 }
