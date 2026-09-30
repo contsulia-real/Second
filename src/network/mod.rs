@@ -1,4 +1,5 @@
 mod codec;
+mod identity;
 mod quic;
 mod session;
 
@@ -11,10 +12,8 @@ use crate::{
 };
 
 pub use codec::{decode_network_message, encode_network_message};
-pub use quic::{
-    QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
-    SECOND_QUIC_SERVER_NAME,
-};
+pub use identity::QuicTransportIdentity;
+pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
 pub use session::{
     client_ping, client_public_currency_checkpoint_proof, client_public_currency_page,
     client_public_currency_summary, client_sync_certified_public_currency_view,
@@ -89,6 +88,7 @@ pub struct RemotePublicCurrencySummary {
 pub enum NetworkMessage {
     Hello {
         node_id: NodeId,
+        signature: [u8; 64],
     },
     Ping {
         nonce: u64,
@@ -118,6 +118,9 @@ pub enum NetworkMessage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkError {
     Transport(String),
+    TransportIdentity(String),
+    InvalidTransportIdentity,
+    PeerAuthenticationFailed(NodeId),
     InvalidMagic,
     UnsupportedProtocolVersion {
         expected: u32,

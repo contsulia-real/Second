@@ -42,6 +42,10 @@ impl StateStore {
         }
     }
 
+    pub(crate) fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
     pub fn save(
         &self,
         state: &SecondState,

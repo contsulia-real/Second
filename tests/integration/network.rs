@@ -10,6 +10,7 @@ fn network_frames_round_trip_without_json_or_platform_dependent_layout() {
     let messages = [
         NetworkMessage::Hello {
             node_id: NodeId::from_u64(7),
+            signature: [9; 64],
         },
         NetworkMessage::Ping { nonce: 42 },
         NetworkMessage::Pong { nonce: 42 },
@@ -59,18 +60,20 @@ fn protocol_version_mismatch_is_rejected_during_frame_read() {
 async fn two_real_quic_nodes_complete_handshake_and_ping() {
     let (server, certificate) = support::quic_server();
     let address = server.local_addr().unwrap();
+    let server_node_id = server.node_id();
 
     let server_task = tokio::spawn(async move {
-        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        let peer = server.accept().await.unwrap();
         serve_ping_session(&peer).await.unwrap()
     });
 
     let client = support::quic_client(&certificate);
-    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
+    let client_node_id = client.node_id();
+    let peer = client.connect(address).await.unwrap();
 
     let remote = client_ping(&peer, 99).await.unwrap();
-    assert_eq!(remote, NodeId::from_u64(1));
+    assert_eq!(remote, server_node_id);
 
     peer.close();
-    assert_eq!(server_task.await.unwrap(), NodeId::from_u64(2));
+    assert_eq!(server_task.await.unwrap(), client_node_id);
 }

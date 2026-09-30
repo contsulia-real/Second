@@ -3,42 +3,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
-use rcgen::CertifiedKey;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use super::codec::{MAX_NETWORK_MESSAGE_SIZE, decode_network_message, encode_network_message};
+use super::identity::{PeerAuthRole, QuicTransportIdentity};
 use super::{NetworkError, NetworkMessage, NodeId};
+
 const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const PEER_AUTH_EXPORTER_LABEL: &[u8] = b"SECOND_QUIC_PEER_AUTH_V1";
 
 pub const SECOND_QUIC_SERVER_NAME: &str = "second.local";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuicTransportIdentity {
-    certificate_der: Vec<u8>,
-    private_key_der: Vec<u8>,
-}
-
-impl QuicTransportIdentity {
-    pub fn generate() -> Result<Self, NetworkError> {
-        let CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec![SECOND_QUIC_SERVER_NAME.to_owned()])
-                .map_err(transport_error)?;
-
-        Ok(Self {
-            certificate_der: cert.der().to_vec(),
-            private_key_der: signing_key.serialize_der(),
-        })
-    }
-
-    pub fn certificate_der(&self) -> &[u8] {
-        &self.certificate_der
-    }
-}
-
-#[derive(Debug)]
 pub struct QuicServer {
     endpoint: Endpoint,
+    identity: Arc<QuicTransportIdentity>,
 }
 
 impl QuicServer {
@@ -46,18 +25,27 @@ impl QuicServer {
         address: SocketAddr,
         identity: &QuicTransportIdentity,
     ) -> Result<Self, NetworkError> {
-        let certificate = CertificateDer::from(identity.certificate_der.clone());
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.private_key_der.clone()));
+        let certificate = CertificateDer::from(identity.certificate_der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            identity.private_key_der().to_vec(),
+        ));
         let mut config = quinn::ServerConfig::with_single_cert(vec![certificate], key)
             .map_err(transport_error)?;
         config.transport_config(transport_config());
 
         let endpoint = Endpoint::server(config, address).map_err(transport_error)?;
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            identity: Arc::new(identity.clone()),
+        })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, NetworkError> {
         self.endpoint.local_addr().map_err(transport_error)
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.identity.node_id()
     }
 
     pub(crate) async fn accept_incoming(&self) -> Result<QuicIncoming, NetworkError> {
@@ -66,34 +54,39 @@ impl QuicServer {
             .accept()
             .await
             .ok_or_else(|| NetworkError::Transport("QUIC endpoint is closed".to_owned()))?;
-        Ok(QuicIncoming { incoming })
+        Ok(QuicIncoming {
+            incoming,
+            identity: Arc::clone(&self.identity),
+        })
     }
 
-    pub async fn accept(&self, local_node_id: NodeId) -> Result<QuicPeer, NetworkError> {
-        self.accept_incoming().await?.handshake(local_node_id).await
+    pub async fn accept(&self) -> Result<QuicPeer, NetworkError> {
+        self.accept_incoming().await?.handshake().await
     }
 }
 
 pub(crate) struct QuicIncoming {
     incoming: quinn::Incoming,
+    identity: Arc<QuicTransportIdentity>,
 }
 
 impl QuicIncoming {
-    pub(crate) async fn handshake(self, local_node_id: NodeId) -> Result<QuicPeer, NetworkError> {
+    pub(crate) async fn handshake(self) -> Result<QuicPeer, NetworkError> {
         let connection = self.incoming.await.map_err(transport_error)?;
-        server_handshake(connection, local_node_id).await
+        server_handshake(connection, &self.identity).await
     }
 }
 
-#[derive(Debug)]
 pub struct QuicClient {
     endpoint: Endpoint,
+    identity: Arc<QuicTransportIdentity>,
 }
 
 impl QuicClient {
     pub fn new(
         bind_address: SocketAddr,
         trusted_server_certificate_der: &[u8],
+        identity: QuicTransportIdentity,
     ) -> Result<Self, NetworkError> {
         let mut roots = RootCertStore::empty();
         roots
@@ -109,20 +102,23 @@ impl QuicClient {
         let mut endpoint = Endpoint::client(bind_address).map_err(transport_error)?;
         endpoint.set_default_client_config(config);
 
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            identity: Arc::new(identity),
+        })
     }
 
-    pub async fn connect(
-        &self,
-        address: SocketAddr,
-        local_node_id: NodeId,
-    ) -> Result<QuicPeer, NetworkError> {
+    pub fn node_id(&self) -> NodeId {
+        self.identity.node_id()
+    }
+
+    pub async fn connect(&self, address: SocketAddr) -> Result<QuicPeer, NetworkError> {
         let connecting = self
             .endpoint
             .connect(address, SECOND_QUIC_SERVER_NAME)
             .map_err(transport_error)?;
         let connection = connecting.await.map_err(transport_error)?;
-        client_handshake(connection, local_node_id).await
+        client_handshake(connection, &self.identity).await
     }
 
     pub async fn wait_idle(&self) {
@@ -193,19 +189,29 @@ fn transport_config() -> Arc<TransportConfig> {
 
 async fn client_handshake(
     connection: Connection,
-    local_node_id: NodeId,
+    identity: &QuicTransportIdentity,
 ) -> Result<QuicPeer, NetworkError> {
+    let channel_binding = peer_channel_binding(&connection)?;
     let (mut send, mut recv) = connection.open_bi().await.map_err(transport_error)?;
     write_stream_message(
         &mut send,
         &NetworkMessage::Hello {
-            node_id: local_node_id,
+            node_id: identity.node_id(),
+            signature: identity.sign_peer_auth(&channel_binding, PeerAuthRole::Client),
         },
     )
     .await?;
 
     let remote_node_id = match read_stream_message(&mut recv).await? {
-        NetworkMessage::Hello { node_id } => node_id,
+        NetworkMessage::Hello { node_id, signature } => {
+            QuicTransportIdentity::verify_peer_auth(
+                node_id,
+                signature,
+                &channel_binding,
+                PeerAuthRole::Server,
+            )?;
+            node_id
+        }
         _ => return Err(NetworkError::UnexpectedMessage),
     };
 
@@ -217,19 +223,29 @@ async fn client_handshake(
 
 async fn server_handshake(
     connection: Connection,
-    local_node_id: NodeId,
+    identity: &QuicTransportIdentity,
 ) -> Result<QuicPeer, NetworkError> {
+    let channel_binding = peer_channel_binding(&connection)?;
     let (mut send, mut recv) = connection.accept_bi().await.map_err(transport_error)?;
 
     let remote_node_id = match read_stream_message(&mut recv).await? {
-        NetworkMessage::Hello { node_id } => node_id,
+        NetworkMessage::Hello { node_id, signature } => {
+            QuicTransportIdentity::verify_peer_auth(
+                node_id,
+                signature,
+                &channel_binding,
+                PeerAuthRole::Client,
+            )?;
+            node_id
+        }
         _ => return Err(NetworkError::UnexpectedMessage),
     };
 
     write_stream_message(
         &mut send,
         &NetworkMessage::Hello {
-            node_id: local_node_id,
+            node_id: identity.node_id(),
+            signature: identity.sign_peer_auth(&channel_binding, PeerAuthRole::Server),
         },
     )
     .await?;
@@ -238,6 +254,14 @@ async fn server_handshake(
         connection,
         remote_node_id,
     })
+}
+
+fn peer_channel_binding(connection: &Connection) -> Result<[u8; 32], NetworkError> {
+    let mut binding = [0_u8; 32];
+    connection
+        .export_keying_material(&mut binding, PEER_AUTH_EXPORTER_LABEL, b"")
+        .map_err(|error| NetworkError::Transport(format!("{error:?}")))?;
+    Ok(binding)
 }
 
 async fn write_stream_message(

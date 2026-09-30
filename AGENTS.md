@@ -79,3 +79,16 @@ Second 当前尚未正式发布，没有需要维护的历史用户、公开版�
 - 再加一个测试：**只有它能证明现有测试没有证明的重要行为时才加。**
 
 不要为了显得完整、稳妥或工程化而主动增加用户没有要求、项目当前也不需要的复杂度。
+
+## 6. 当前私有仓库验证策略
+
+Second 当前是私有 GitHub 仓库，用户当前没有可用的 GitHub Actions 时间。
+
+因此，除非用户以后明确改变这一约束，否则：
+
+- 不把新增 GitHub Actions / CI workflow 当作默认下一步、发布前置条件或工程整改项。
+- 不反复建议、催促或要求用户补 CI。
+- 当前开发验证以本地 `cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 和必要的 `git diff --check` 为准。
+- 只有用户明确要求启用 GitHub Actions，或仓库条件发生变化并由用户重新确认后，才重新讨论 CI。
+
+原则：**当前没有 Actions 预算不是代码缺陷，不应阻塞 Second 的继续开发。**

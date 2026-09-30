@@ -99,10 +99,11 @@ pub fn decode_network_message(frame: &[u8]) -> Result<NetworkMessage, NetworkErr
 
 fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {
     match message {
-        NetworkMessage::Hello { node_id } => {
-            let mut payload = Vec::with_capacity(33);
+        NetworkMessage::Hello { node_id, signature } => {
+            let mut payload = Vec::with_capacity(97);
             payload.push(1);
             payload.extend_from_slice(&node_id.to_bytes());
+            payload.extend_from_slice(signature);
             Ok(payload)
         }
         NetworkMessage::Ping { nonce } => {
@@ -304,11 +305,14 @@ fn decode_public_currency_summary(payload: &[u8]) -> Result<NetworkMessage, Netw
 }
 
 fn decode_hello(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
-    require_message_length(1, payload, 33)?;
+    require_message_length(1, payload, 97)?;
     let mut node_id = [0_u8; 32];
     node_id.copy_from_slice(&payload[1..33]);
+    let mut signature = [0_u8; 64];
+    signature.copy_from_slice(&payload[33..97]);
     Ok(NetworkMessage::Hello {
         node_id: NodeId::from_bytes(node_id),
+        signature,
     })
 }
 

@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -31,7 +33,6 @@ impl From<NetworkError> for NodeRuntimeError {
 pub struct NodeRuntime {
     server: QuicServer,
     transport_identity: QuicTransportIdentity,
-    local_node_id: NodeId,
     state: Arc<SecondState>,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
 }
@@ -39,17 +40,16 @@ pub struct NodeRuntime {
 impl NodeRuntime {
     pub fn load_and_bind(
         listen_address: SocketAddr,
-        local_node_id: NodeId,
         store: &StateStore,
     ) -> Result<Self, NodeRuntimeError> {
         let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
-        let transport_identity = QuicTransportIdentity::generate()?;
+        let transport_identity =
+            QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
 
         Ok(Self {
             server,
             transport_identity,
-            local_node_id,
             state: Arc::new(persisted.state),
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
         })
@@ -57,6 +57,10 @@ impl NodeRuntime {
 
     pub fn local_addr(&self) -> Result<SocketAddr, NodeRuntimeError> {
         self.server.local_addr().map_err(Into::into)
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.transport_identity.node_id()
     }
 
     pub fn transport_certificate_der(&self) -> &[u8] {
@@ -75,11 +79,9 @@ impl NodeRuntime {
 
             let state = Arc::clone(&self.state);
             let public_checkpoint_proof = self.public_checkpoint_proof.clone();
-            let local_node_id = self.local_node_id;
-
             tokio::spawn(async move {
                 let _permit = permit;
-                let Ok(peer) = incoming.handshake(local_node_id).await else {
+                let Ok(peer) = incoming.handshake().await else {
                     return;
                 };
 
@@ -116,4 +118,10 @@ impl Drop for ActiveConnectionPermit {
     fn drop(&mut self) {
         self.active_connections.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+fn transport_identity_path(store: &StateStore) -> PathBuf {
+    let mut path = OsString::from(store.base_path().as_os_str());
+    path.push(".transport");
+    PathBuf::from(path)
 }

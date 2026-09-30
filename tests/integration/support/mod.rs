@@ -243,6 +243,7 @@ pub fn quic_client(server_certificate: &[u8]) -> QuicClient {
     QuicClient::new(
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
         server_certificate,
+        QuicTransportIdentity::generate().unwrap(),
     )
     .unwrap()
 }

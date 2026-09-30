@@ -1,4 +1,7 @@
-use std::io::{BufRead, BufReader};
+use std::ffi::OsString;
+use std::fs;
+use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::support;
@@ -45,12 +48,17 @@ fn checkpoint_proof(
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
 }
 
-fn parse_listening(line: &str) -> (String, String) {
+fn parse_listening(line: &str) -> (String, String, String) {
     let mut fields = line.split_whitespace();
     assert_eq!(fields.next(), Some("LISTENING"));
     let address = fields
         .next()
         .expect("missing QUIC listening address")
+        .to_owned();
+    assert_eq!(fields.next(), Some("NODE"));
+    let node_id = fields
+        .next()
+        .expect("missing authenticated NodeId")
         .to_owned();
     assert_eq!(fields.next(), Some("CERT"));
     let certificate = fields
@@ -58,7 +66,21 @@ fn parse_listening(line: &str) -> (String, String) {
         .expect("missing QUIC transport certificate")
         .to_owned();
     assert_eq!(fields.next(), None);
-    (address, certificate)
+    (address, node_id, certificate)
+}
+
+fn transport_identity_path(base: &Path) -> PathBuf {
+    let mut path = OsString::from(base.as_os_str());
+    path.push(".transport");
+    PathBuf::from(path)
+}
+
+fn remove_transport_identity(base: &Path) {
+    match fs::remove_file(transport_identity_path(base)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to remove transport identity: {error}"),
+    }
 }
 
 #[test]
@@ -81,7 +103,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args(["node", "127.0.0.1:0", "1", server_base.to_str().unwrap()])
+        .args(["node", "127.0.0.1:0", server_base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -92,13 +114,12 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    let (address, server_certificate) = parse_listening(&listening);
+    let (address, server_node_id, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
         .args([
             "sync-public-certified",
             address.as_str(),
-            "2",
             trust_base.to_str().unwrap(),
             server_certificate.as_str(),
         ])
@@ -116,6 +137,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("CERTIFIED "));
+    assert!(client_stdout.contains(&format!("peer={server_node_id}")));
     assert!(client_stdout.contains("epoch=77"));
     assert!(client_stdout.contains("validator_set=7"));
     assert!(client_stdout.contains("votes=3"));
@@ -139,6 +161,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 
     server_store.remove_files().unwrap();
     trust_store.remove_files().unwrap();
+    remove_transport_identity(&server_base);
 }
 
 #[test]
@@ -150,7 +173,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args(["node", "127.0.0.1:0", "1", base.to_str().unwrap()])
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -161,15 +184,10 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    let (address, server_certificate) = parse_listening(&listening);
+    let (address, server_node_id, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
-        .args([
-            "sync-public",
-            address.as_str(),
-            "2",
-            server_certificate.as_str(),
-        ])
+        .args(["sync-public", address.as_str(), server_certificate.as_str()])
         .output()
         .unwrap();
 
@@ -184,6 +202,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
 
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("SYNCED "));
+    assert!(client_stdout.contains(&format!("peer={server_node_id}")));
     assert!(client_stdout.contains("count=600"));
     assert!(client_stdout.contains("supply=600"));
     assert!(client_stdout.contains("reserve=600"));
@@ -198,6 +217,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     server.wait().unwrap();
 
     store.remove_files().unwrap();
+    remove_transport_identity(&base);
 }
 
 #[test]
@@ -223,7 +243,7 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
 
     let executable = env!("CARGO_BIN_EXE_second");
     let mut server = Command::new(executable)
-        .args(["node", "127.0.0.1:0", "1", base.to_str().unwrap()])
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -234,13 +254,12 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    let (address, server_certificate) = parse_listening(&listening);
+    let (address, server_node_id, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
         .args([
             "query-public",
             address.as_str(),
-            "2",
             "1",
             "3",
             server_certificate.as_str(),
@@ -251,6 +270,7 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     assert!(client.status.success());
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("PUBLIC "));
+    assert!(client_stdout.contains(&format!("peer={server_node_id}")));
     assert!(client_stdout.contains("count=3"));
     assert!(client_stdout.contains("address=1 occupied=false role=reserve"));
     assert!(client_stdout.contains("address=2 occupied=true role=circulation"));
@@ -262,13 +282,7 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     assert!(!client_stdout.contains("876543"));
 
     let ping = Command::new(executable)
-        .args([
-            "ping",
-            address.as_str(),
-            "3",
-            "42",
-            server_certificate.as_str(),
-        ])
+        .args(["ping", address.as_str(), "42", server_certificate.as_str()])
         .output()
         .unwrap();
     assert!(
@@ -281,5 +295,26 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     server.kill().expect("node exited before test shutdown");
     server.wait().unwrap();
 
+    let mut restarted = Command::new(executable)
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = restarted.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut restarted_listening = String::new();
+    reader.read_line(&mut restarted_listening).unwrap();
+    let (_, restarted_node_id, restarted_certificate) = parse_listening(&restarted_listening);
+
+    assert_eq!(restarted_node_id, server_node_id);
+    assert_eq!(restarted_certificate, server_certificate);
+
+    restarted
+        .kill()
+        .expect("restarted node exited before test shutdown");
+    restarted.wait().unwrap();
+
     store.remove_files().unwrap();
+    remove_transport_identity(&base);
 }

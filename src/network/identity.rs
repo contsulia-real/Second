@@ -1,0 +1,254 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
+
+use ed25519_dalek::pkcs8::DecodePrivateKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rcgen::{CertificateParams, KeyPair, PKCS_ED25519, PublicKeyData};
+use rustls::pki_types::PrivatePkcs8KeyDer;
+
+use super::{CURRENT_NETWORK_PROTOCOL_VERSION, NetworkError, NodeId};
+use crate::network::quic::SECOND_QUIC_SERVER_NAME;
+
+const TRANSPORT_IDENTITY_MAGIC: &[u8; 8] = b"S2TIDV1\0";
+const MAX_TRANSPORT_PRIVATE_KEY_SIZE: usize = 4096;
+const PEER_AUTH_DOMAIN: &[u8] = b"SECOND_QUIC_PEER_AUTH_V1\0";
+
+#[derive(Clone, Copy)]
+pub(crate) enum PeerAuthRole {
+    Client = 1,
+    Server = 2,
+}
+
+#[derive(Clone)]
+pub struct QuicTransportIdentity {
+    certificate_der: Vec<u8>,
+    private_key_der: Vec<u8>,
+    signing_key: SigningKey,
+    node_id: NodeId,
+}
+
+impl QuicTransportIdentity {
+    pub fn generate() -> Result<Self, NetworkError> {
+        let key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(identity_error)?;
+        Self::from_key_pair(key_pair)
+    }
+
+    pub fn load_or_generate(path: impl AsRef<Path>) -> Result<Self, NetworkError> {
+        let path = path.as_ref();
+
+        match fs::read(path) {
+            Ok(bytes) => return Self::decode_file(&bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(identity_error(error)),
+        }
+
+        let identity = Self::generate()?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(identity_error)?;
+        }
+
+        let encoded = identity.encode_file()?;
+        match create_identity_file(path) {
+            Ok(mut file) => {
+                file.write_all(&encoded).map_err(identity_error)?;
+                file.sync_all().map_err(identity_error)?;
+                Ok(identity)
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let bytes = fs::read(path).map_err(identity_error)?;
+                Self::decode_file(&bytes)
+            }
+            Err(error) => Err(identity_error(error)),
+        }
+    }
+
+    pub const fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
+    pub fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
+    }
+
+    pub(crate) fn private_key_der(&self) -> &[u8] {
+        &self.private_key_der
+    }
+
+    pub(crate) fn sign_peer_auth(
+        &self,
+        channel_binding: &[u8; 32],
+        role: PeerAuthRole,
+    ) -> [u8; 64] {
+        self.signing_key
+            .sign(&peer_auth_message(channel_binding, role))
+            .to_bytes()
+    }
+
+    pub(crate) fn verify_peer_auth(
+        node_id: NodeId,
+        signature: [u8; 64],
+        channel_binding: &[u8; 32],
+        role: PeerAuthRole,
+    ) -> Result<(), NetworkError> {
+        let verifying_key = VerifyingKey::from_bytes(&node_id.to_bytes())
+            .map_err(|_| NetworkError::PeerAuthenticationFailed(node_id))?;
+        let signature = Signature::from_bytes(&signature);
+
+        verifying_key
+            .verify(&peer_auth_message(channel_binding, role), &signature)
+            .map_err(|_| NetworkError::PeerAuthenticationFailed(node_id))
+    }
+
+    fn from_private_key_der(private_key_der: &[u8]) -> Result<Self, NetworkError> {
+        let key_der = PrivatePkcs8KeyDer::from(private_key_der.to_vec());
+        let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(&key_der, &PKCS_ED25519)
+            .map_err(identity_error)?;
+        Self::from_key_pair(key_pair)
+    }
+
+    fn from_key_pair(key_pair: KeyPair) -> Result<Self, NetworkError> {
+        let public_key: [u8; 32] = key_pair
+            .der_bytes()
+            .try_into()
+            .map_err(|_| NetworkError::InvalidTransportIdentity)?;
+        let private_key_der = key_pair.serialize_der();
+        let signing_key = SigningKey::from_pkcs8_der(&private_key_der).map_err(identity_error)?;
+        if signing_key.verifying_key().to_bytes() != public_key {
+            return Err(NetworkError::InvalidTransportIdentity);
+        }
+
+        let params = CertificateParams::new(vec![SECOND_QUIC_SERVER_NAME.to_owned()])
+            .map_err(identity_error)?;
+        let certificate_der = params
+            .self_signed(&key_pair)
+            .map_err(identity_error)?
+            .der()
+            .to_vec();
+
+        Ok(Self {
+            certificate_der,
+            private_key_der,
+            signing_key,
+            node_id: NodeId::from_bytes(public_key),
+        })
+    }
+
+    fn encode_file(&self) -> Result<Vec<u8>, NetworkError> {
+        let key_len = u32::try_from(self.private_key_der.len())
+            .map_err(|_| NetworkError::InvalidTransportIdentity)?;
+        let mut encoded =
+            Vec::with_capacity(TRANSPORT_IDENTITY_MAGIC.len() + 4 + self.private_key_der.len());
+        encoded.extend_from_slice(TRANSPORT_IDENTITY_MAGIC);
+        encoded.extend_from_slice(&key_len.to_be_bytes());
+        encoded.extend_from_slice(&self.private_key_der);
+        Ok(encoded)
+    }
+
+    fn decode_file(bytes: &[u8]) -> Result<Self, NetworkError> {
+        if bytes.len() < TRANSPORT_IDENTITY_MAGIC.len() + 4
+            || &bytes[..TRANSPORT_IDENTITY_MAGIC.len()] != TRANSPORT_IDENTITY_MAGIC
+        {
+            return Err(NetworkError::InvalidTransportIdentity);
+        }
+
+        let key_len = u32::from_be_bytes(
+            bytes[TRANSPORT_IDENTITY_MAGIC.len()..TRANSPORT_IDENTITY_MAGIC.len() + 4]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidTransportIdentity)?,
+        ) as usize;
+        if key_len == 0 || key_len > MAX_TRANSPORT_PRIVATE_KEY_SIZE {
+            return Err(NetworkError::InvalidTransportIdentity);
+        }
+
+        let key_start = TRANSPORT_IDENTITY_MAGIC.len() + 4;
+        let key_end = key_start
+            .checked_add(key_len)
+            .ok_or(NetworkError::InvalidTransportIdentity)?;
+        if key_end != bytes.len() {
+            return Err(NetworkError::InvalidTransportIdentity);
+        }
+
+        Self::from_private_key_der(&bytes[key_start..key_end])
+    }
+}
+
+fn create_identity_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+
+    options.open(path)
+}
+
+fn peer_auth_message(channel_binding: &[u8; 32], role: PeerAuthRole) -> Vec<u8> {
+    let mut message = Vec::with_capacity(PEER_AUTH_DOMAIN.len() + 4 + 1 + channel_binding.len());
+    message.extend_from_slice(PEER_AUTH_DOMAIN);
+    message.extend_from_slice(&CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes());
+    message.push(role as u8);
+    message.extend_from_slice(channel_binding);
+    message
+}
+
+fn identity_error(error: impl std::fmt::Display) -> NetworkError {
+    NetworkError::TransportIdentity(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_authentication_is_bound_to_connection_and_role() {
+        let identity = QuicTransportIdentity::generate().unwrap();
+        let first_binding = [1; 32];
+        let second_binding = [2; 32];
+        let signature = identity.sign_peer_auth(&first_binding, PeerAuthRole::Client);
+        let other_identity = QuicTransportIdentity::generate().unwrap();
+
+        assert_eq!(
+            QuicTransportIdentity::verify_peer_auth(
+                identity.node_id(),
+                signature,
+                &first_binding,
+                PeerAuthRole::Client,
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            QuicTransportIdentity::verify_peer_auth(
+                other_identity.node_id(),
+                signature,
+                &first_binding,
+                PeerAuthRole::Client,
+            ),
+            Err(NetworkError::PeerAuthenticationFailed(_))
+        ));
+        assert!(matches!(
+            QuicTransportIdentity::verify_peer_auth(
+                identity.node_id(),
+                signature,
+                &second_binding,
+                PeerAuthRole::Client,
+            ),
+            Err(NetworkError::PeerAuthenticationFailed(_))
+        ));
+        assert!(matches!(
+            QuicTransportIdentity::verify_peer_auth(
+                identity.node_id(),
+                signature,
+                &first_binding,
+                PeerAuthRole::Server,
+            ),
+            Err(NetworkError::PeerAuthenticationFailed(_))
+        ));
+    }
+}

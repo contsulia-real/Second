@@ -6,9 +6,9 @@ use std::process::ExitCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use second::{
-    CurrencyAddress, CurrencyRole, NodeId, NodeRuntime, NodeRuntimeError, QuicClient, StateStore,
-    client_ping, client_public_currency_page, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view,
+    CurrencyAddress, CurrencyRole, NodeRuntime, NodeRuntimeError, QuicClient,
+    QuicTransportIdentity, StateStore, client_ping, client_public_currency_page,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
 };
 
 #[tokio::main]
@@ -26,49 +26,24 @@ async fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
 
     match args.as_slice() {
-        [command, address, node_id, nonce, server_certificate] if command == "ping" => {
-            ping(
-                address,
-                parse_u64("node id", node_id)?,
-                parse_u64("nonce", nonce)?,
-                server_certificate,
-            )
-            .await
+        [command, address, nonce, server_certificate] if command == "ping" => {
+            ping(address, parse_u64("nonce", nonce)?, server_certificate).await
         }
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
-        [command, address, node_id, server_certificate] if command == "sync-public" => {
-            sync_public(
-                address,
-                parse_u64("node id", node_id)?,
-                server_certificate,
-            )
-            .await
+        [command, address, server_certificate] if command == "sync-public" => {
+            sync_public(address, server_certificate).await
         }
-        [command, address, node_id, trust_snapshot_base, server_certificate]
+        [command, address, trust_snapshot_base, server_certificate]
             if command == "sync-public-certified" =>
         {
-            sync_public_certified(
-                address,
-                parse_u64("node id", node_id)?,
-                trust_snapshot_base,
-                server_certificate,
-            )
-            .await
+            sync_public_certified(address, trust_snapshot_base, server_certificate).await
         }
-        [command, address, node_id, snapshot_base] if command == "node" => {
-            node(
-                address,
-                parse_u64("node id", node_id)?,
-                snapshot_base,
-            )
-            .await
+        [command, address, snapshot_base] if command == "node" => {
+            node(address, snapshot_base).await
         }
-        [command, address, node_id, start, limit, server_certificate]
-            if command == "query-public" =>
-        {
+        [command, address, start, limit, server_certificate] if command == "query-public" => {
             query_public(
                 address,
-                parse_u64("node id", node_id)?,
                 parse_u64("currency start", start)?,
                 parse_u16("limit", limit)?,
                 server_certificate,
@@ -76,29 +51,30 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second node <listen-address> <node-id-u64> <snapshot-base> | second ping <address> <node-id-u64> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <node-id-u64> <server-cert-base64> | second sync-public-certified <address> <node-id-u64> <trust-snapshot-base> <server-cert-base64>"
+            "usage: second node <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64>"
                 .to_owned(),
         ),
     }
 }
 
-async fn node(address: &str, node_id: u64, snapshot_base: &str) -> Result<(), String> {
+async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
     let store = StateStore::new(snapshot_base);
-    let runtime = NodeRuntime::load_and_bind(
-        parse_socket_address(address)?,
-        NodeId::from_u64(node_id),
-        &store,
-    )
-    .map_err(|error| match error {
-        NodeRuntimeError::SnapshotMissing => format!("no snapshot found at {snapshot_base}"),
-        other => format!("failed to start node: {other:?}"),
-    })?;
+    let runtime =
+        NodeRuntime::load_and_bind(parse_socket_address(address)?, &store).map_err(|error| {
+            match error {
+                NodeRuntimeError::SnapshotMissing => {
+                    format!("no snapshot found at {snapshot_base}")
+                }
+                other => format!("failed to start node: {other:?}"),
+            }
+        })?;
 
     let local_address = runtime
         .local_addr()
         .map_err(|error| format!("failed to read QUIC listening address: {error:?}"))?;
     println!(
-        "LISTENING {local_address} CERT {}",
+        "LISTENING {local_address} NODE {} CERT {}",
+        runtime.node_id(),
         STANDARD.encode(runtime.transport_certificate_der())
     );
     io::stdout()
@@ -111,15 +87,10 @@ async fn node(address: &str, node_id: u64, snapshot_base: &str) -> Result<(), St
         .map_err(|error| format!("node runtime stopped: {error:?}"))
 }
 
-async fn ping(
-    address: &str,
-    node_id: u64,
-    nonce: u64,
-    server_certificate: &str,
-) -> Result<(), String> {
+async fn ping(address: &str, nonce: u64, server_certificate: &str) -> Result<(), String> {
     let client = quic_client(server_certificate)?;
     let peer = client
-        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .connect(parse_socket_address(address)?)
         .await
         .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
@@ -133,10 +104,10 @@ async fn ping(
     Ok(())
 }
 
-async fn sync_public(address: &str, node_id: u64, server_certificate: &str) -> Result<(), String> {
+async fn sync_public(address: &str, server_certificate: &str) -> Result<(), String> {
     let client = quic_client(server_certificate)?;
     let peer = client
-        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .connect(parse_socket_address(address)?)
         .await
         .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
@@ -165,7 +136,6 @@ async fn sync_public(address: &str, node_id: u64, server_certificate: &str) -> R
 
 async fn sync_public_certified(
     address: &str,
-    node_id: u64,
     trust_snapshot_base: &str,
     server_certificate: &str,
 ) -> Result<(), String> {
@@ -177,7 +147,7 @@ async fn sync_public_certified(
 
     let client = quic_client(server_certificate)?;
     let peer = client
-        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .connect(parse_socket_address(address)?)
         .await
         .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
@@ -222,14 +192,13 @@ async fn sync_public_certified(
 
 async fn query_public(
     address: &str,
-    node_id: u64,
     start: u64,
     limit: u16,
     server_certificate: &str,
 ) -> Result<(), String> {
     let client = quic_client(server_certificate)?;
     let peer = client
-        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .connect(parse_socket_address(address)?)
         .await
         .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
@@ -272,8 +241,14 @@ fn quic_client(server_certificate: &str) -> Result<QuicClient, String> {
     let certificate = STANDARD
         .decode(server_certificate)
         .map_err(|error| format!("invalid server certificate base64: {error}"))?;
-    QuicClient::new(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), &certificate)
-        .map_err(|error| format!("failed to configure QUIC client: {error:?}"))
+    let identity = QuicTransportIdentity::generate()
+        .map_err(|error| format!("failed to generate client transport identity: {error:?}"))?;
+    QuicClient::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        &certificate,
+        identity,
+    )
+    .map_err(|error| format!("failed to configure QUIC client: {error:?}"))
 }
 
 fn snapshot_status(snapshot_base: &str) -> Result<(), String> {

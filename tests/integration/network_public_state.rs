@@ -2,8 +2,8 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,
-    SecondState, client_public_currency_page, serve_public_currency_connection,
+    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, Operation, SecondState,
+    client_public_currency_page, serve_public_currency_connection,
 };
 use support::{payment_address, register_payment_addresses, verified_task};
 
@@ -22,22 +22,24 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
 
     let (server, certificate) = support::quic_server();
     let address = server.local_addr().unwrap();
+    let server_node_id = server.node_id();
 
     let server_task = tokio::spawn(async move {
-        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        let peer = server.accept().await.unwrap();
         serve_public_currency_connection(&peer, &state, None)
             .await
             .unwrap()
     });
 
     let client = support::quic_client(&certificate);
-    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
+    let client_node_id = client.node_id();
+    let peer = client.connect(address).await.unwrap();
 
     let page = client_public_currency_page(&peer, CurrencyAddress::new(1), 4)
         .await
         .unwrap();
 
-    assert_eq!(page.remote_node_id, NodeId::from_u64(1));
+    assert_eq!(page.remote_node_id, server_node_id);
     assert_eq!(page.states.len(), 4);
     assert_eq!(page.states[0].role, CurrencyRole::Reserve);
     assert!(!page.states[0].occupied);
@@ -50,7 +52,7 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
     assert!(!rendered.contains("987654"));
 
     peer.close();
-    assert_eq!(server_task.await.unwrap(), NodeId::from_u64(2));
+    assert_eq!(server_task.await.unwrap(), client_node_id);
 }
 
 #[test]

@@ -841,11 +841,17 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 当前网络层以 QUIC 作为节点传输层，不依赖 JSON 作为节点间 framing。QUIC 连接完成 TLS 1.3 握手后，应用层先使用一个可靠双向 stream 完成 NodeId Hello；后续每个请求/响应使用独立的可靠双向 stream。当前 public session 按 connection 串行处理 request，因此 transport 也只允许每个 connection 同时存在 1 个双向 stream；完成一个请求后仍可继续打开下一条独立 stream。单向 stream 被禁用。当前协议不使用 QUIC DATAGRAM，也不使用 0-RTT。
 
-QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前 `second node` 每次启动生成独立 transport certificate，并将 certificate 输出给显式 pin 的客户端；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
+QUIC 的 transport identity 与 Validator identity / consensus / recovery key 是不同职责，四者不得复用。transport identity 使用独立 Ed25519 key；`NodeId` 直接等于该 transport public key 的 32-byte 编码，因此 NodeId 不再是调用方可以任意声明的数字或标签。
 
-当前长期节点入口为 `second node <listen-address> <node-id> <snapshot-base>`。节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+同一 transport Ed25519 key 同时用于生成节点的 TLS self-signed certificate，并用于 Hello peer-auth signature。Hello signature 的签名输入绑定当前 network protocol version、client/server role 与 Quinn TLS exporter 派生的 per-connection channel binding；因此旧连接上的 Hello 不能在另一条 QUIC connection 上重放，client proof 也不能直接反射成 server proof。只有签名验证成功后，Hello 中的 NodeId 才能成为 `QuicPeer::remote_node_id()`。
 
-当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。Hello 中的 NodeId 目前仍未被密码学认证，因此不能拿它作为连接配额、peer 去重或 Validator 身份的安全依据。
+当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
+
+transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；后续 peer manager 可以使用已认证 NodeId 做连接去重和身份索引，但 trust/discovery/admission 仍需要独立规则。
+
+节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成认证 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+
+当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
 每个 stream 内仍使用统一的自定义二进制 frame：
 
@@ -1139,7 +1145,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有长期 node runtime 上继续完成经过认证的 peer identity / peer 管理；当前连接总量、单 connection stream 并发与 full public sync materialization 已有本地资源边界，但 NodeId Hello 尚不能作为安全身份；
+- 在现有 authenticated NodeId 基础上继续完成 peer manager、连接去重以及 peer trust/discovery/admission；transport identity 只证明 key ownership，不等于 Validator authority；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；
