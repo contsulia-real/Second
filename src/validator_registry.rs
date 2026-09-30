@@ -140,7 +140,7 @@ impl ValidatorRegistry {
         Ok(())
     }
 
-    pub fn apply_next_set(
+    pub(crate) fn apply_next_set(
         &mut self,
         next_validator_set: &ValidatorSet,
     ) -> Result<(), ValidatorRegistryError> {

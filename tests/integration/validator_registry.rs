@@ -1,10 +1,14 @@
 use crate::support;
 
 use second::{
-    SecondState, StateStore, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorRegistryError, ValidatorSet, ValidatorStatus,
+    CURRENT_PROTOCOL_VERSION, SecondState, StateStore, ValidatorConsensusKeyRotationRequest,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRegistryError,
+    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorStatus,
 };
-use support::{key, temp_base, validator_credential as credential, validator_set as set};
+use support::{
+    certify_and_activate_validator_transition, key, temp_base, validator_credential as credential,
+    validator_set as set,
+};
 
 #[test]
 fn retired_validator_id_can_never_rejoin() {
@@ -12,7 +16,17 @@ fn retired_validator_id_can_never_rejoin() {
     let mut registry = ValidatorRegistry::from_validator_set(&current).unwrap();
     let without_four = set(2, 1..=3);
 
-    registry.apply_next_set(&without_four).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        1,
+        &current,
+        &registry,
+        without_four.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);
     assert_eq!(
         registry.status(ValidatorId::new(4)),
         Some(ValidatorStatus::Retired)
@@ -54,7 +68,27 @@ fn historical_consensus_key_can_never_be_reassigned() {
         std::iter::once(rotated_one).chain((2..=4).map(credential)),
     )
     .unwrap();
-    registry.apply_next_set(&rotated).unwrap();
+    let rotation = ValidatorConsensusKeyRotationRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        ValidatorRotationAuthority::Identity,
+        ValidatorId::new(1),
+        current.version(),
+        2,
+        key(100).verifying_key().to_bytes(),
+        &key(3),
+    )
+    .unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        1,
+        &current,
+        &registry,
+        rotated.clone(),
+        Vec::new(),
+        vec![rotation],
+    )
+    .unwrap();
+    certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);
 
     let reused = ValidatorCredential::new(
         ValidatorId::new(5),
@@ -84,7 +118,17 @@ fn retired_identity_history_survives_snapshot_restart() {
     let current = set(1, 1..=4);
     let without_four = set(2, 1..=3);
     let mut registry = ValidatorRegistry::from_validator_set(&current).unwrap();
-    registry.apply_next_set(&without_four).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        1,
+        &current,
+        &registry,
+        without_four.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);
 
     let store = StateStore::new(temp_base("validator-registry"));
     let state = SecondState::genesis([], 1);

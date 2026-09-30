@@ -10,11 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, ExecutionError, ExecutionOutcome,
-    FinalityCertificate, FinalityStatement, LegalTask, LegalTaskPayload, Operation, PaymentAddress,
-    PreparationError, PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer,
-    QuicTransportIdentity, SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId,
-    ValidatorSet, ValidatorVote, VerifiedLegalTask,
+    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask,
+    LegalTaskPayload, Operation, PaymentAddress, PreparationError, PreparationOutcome,
+    PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore,
+    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
 };
 
 pub fn key(byte: u8) -> SigningKey {
@@ -94,6 +95,32 @@ pub fn validator_credential(id: u64) -> ValidatorCredential {
 
 pub fn validator_set(version: u64, ids: impl IntoIterator<Item = u64>) -> ValidatorSet {
     ValidatorSet::new(version, ids.into_iter().map(validator_credential)).unwrap()
+}
+
+pub fn certify_and_activate_validator_transition(
+    current: &ValidatorSet,
+    registry: &mut ValidatorRegistry,
+    transition: ValidatorSetTransition,
+    signer_ids: impl IntoIterator<Item = u64>,
+) -> ValidatorSet {
+    let activation_epoch = transition.activation_epoch();
+    let statement = transition.finality_statement();
+    let votes = signer_ids
+        .into_iter()
+        .map(|id| {
+            let validator_id = ValidatorId::new(id);
+            signed_vote(
+                &statement,
+                validator_id,
+                &key((validator_id.value() * 3 + 1) as u8),
+            )
+        })
+        .collect();
+
+    CertifiedValidatorSetTransition::new(transition, votes, current)
+        .unwrap()
+        .activate(activation_epoch, registry)
+        .unwrap()
 }
 
 pub fn signed_vote(

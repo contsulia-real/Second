@@ -773,6 +773,8 @@ Validator admission 的治理来源固定为**当前 active ValidatorSet 的 fin
 
 因此，Validator membership 的授权链是：当前 ValidatorSet → 对 next ValidatorSet transition 的 QC → 下一 epoch 激活。Genesis 初始 ValidatorSet 是这条治理链的根；之后不引入持币量、算力、transport NodeId、单个管理员 key 或候选人的自签 admission 作为独立治理权。RecoverySet 的未来规则和现实世界“一人一 Validator”仍是独立未决问题，不改变当前协议内的 membership authorization source。
 
+`ValidatorRegistry::apply_next_set` 只是 Registry 内部状态转换 primitive，不是公开授权入口；公共 membership mutation 必须经 `CertifiedValidatorSetTransition` 验证当前 ValidatorSet 的 QC，并由其 `activate()` 在声明的 activation epoch 调用该 primitive。是否以及如何把这一激活原子持久化到节点 snapshot，仍受后文“旧 validator-set version 下 PreparedTask 如何处理”的未决边界约束。
+
 ---
 
 ## 14. 公开状态与隐私边界
