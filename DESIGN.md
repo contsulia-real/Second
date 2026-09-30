@@ -1186,6 +1186,7 @@ ValidatorId + TaskId
 
 后续重点：
 
+- 明确 ValidatorSet governance epoch 的权威来源与推进规则。当前 transition 会绑定 `current_epoch` / `activation_epoch = current_epoch + 1`，durable activation 也会校验调用方传入的 epoch 必须等于证书声明值，但 Second 目前没有独立持久化/共识化的“当前 Validator epoch”时钟，因此节点自身还不能证明某个 activation epoch 已实际到达。public checkpoint 的 epoch 已定义为公开状态 freshness 序号，不得默认与 Validator governance epoch 合并；除非后续明确决定两者关系，否则不能用 checkpoint epoch 或本地系统时间替代 Validator epoch authority；
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
