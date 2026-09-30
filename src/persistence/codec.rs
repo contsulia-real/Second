@@ -14,8 +14,9 @@ use crate::{
 };
 
 use super::local_codec::{decode_local_state, encode_local_state};
-use super::prepared_validation::{
+use super::snapshot_validation::{
     validate_prepared_plans_against_state, validate_prepared_snapshot_links,
+    validate_vote_lock_registry,
 };
 use super::validator_codec::{decode_validator_registry, encode_validator_registry};
 
@@ -63,6 +64,7 @@ pub(super) fn encode_snapshot(
         .validator_registry
         .validate_current_set(contents.validator_set)
         .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    validate_vote_lock_registry(contents.validator_registry, contents.validator_vote_locks)?;
     validate_prepared_snapshot_links(
         &contents.state.protocol.task_bindings,
         &contents.state.business.payment_addresses,
@@ -506,6 +508,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
             currencies,
         },
     };
+    validate_vote_lock_registry(&validator_registry, &validator_vote_locks)?;
     validate_prepared_snapshot_links(
         &state.protocol.task_bindings,
         &state.business.payment_addresses,

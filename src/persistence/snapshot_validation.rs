@@ -6,8 +6,22 @@ use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
 use crate::{
     CurrencyClaimBook, OperationClaimId, PaymentAddress, PersistenceError, SecondState, TaskId,
-    ValidatorId,
+    ValidatorId, ValidatorRegistry,
 };
+
+pub(super) fn validate_vote_lock_registry(
+    validator_registry: &ValidatorRegistry,
+    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+) -> Result<(), PersistenceError> {
+    if validator_vote_locks
+        .keys()
+        .any(|(validator_id, _)| !validator_registry.contains(*validator_id))
+    {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    Ok(())
+}
 
 pub(super) fn validate_prepared_plans_against_state(
     state: &SecondState,

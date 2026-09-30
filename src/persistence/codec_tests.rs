@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
-use super::prepared_validation::{
+use super::snapshot_validation::{
     validate_prepared_plans_against_state, validate_prepared_snapshot_links,
+    validate_vote_lock_registry,
 };
 use crate::payment::{
     EstablishedTransfer, PaymentAddressRecord, PaymentAddressStatus, PaymentExecution,
@@ -11,7 +12,8 @@ use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
 use crate::{
     AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError,
-    PreparationError, SecondState, TaskId, ValidatorId,
+    PreparationError, SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry,
+    ValidatorSet,
 };
 
 #[test]
@@ -356,6 +358,37 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
     ]);
     assert_eq!(
         validate_prepared_plans_against_state(&state, &duplicate),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+}
+
+#[test]
+fn vote_locks_require_a_validator_from_registry_history() {
+    let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+    let consensus = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
+    let recovery = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+    let credential = ValidatorCredential::new(
+        ValidatorId::new(1),
+        identity.verifying_key().to_bytes(),
+        consensus.verifying_key().to_bytes(),
+        recovery.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let set = ValidatorSet::new(1, [credential]).unwrap();
+    let registry = ValidatorRegistry::from_validator_set(&set).unwrap();
+
+    let known = BTreeMap::from([(
+        (ValidatorId::new(1), FinalityScope::PublicCheckpoint(7)),
+        [4; 32],
+    )]);
+    assert_eq!(validate_vote_lock_registry(&registry, &known), Ok(()));
+
+    let unknown = BTreeMap::from([(
+        (ValidatorId::new(2), FinalityScope::PublicCheckpoint(7)),
+        [4; 32],
+    )]);
+    assert_eq!(
+        validate_vote_lock_registry(&registry, &unknown),
         Err(PersistenceError::InvalidSnapshot)
     );
 }
