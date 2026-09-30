@@ -285,7 +285,7 @@ Issue(count = N) 创建 N 个新的 Currency identity，并直接归属于目标
 
 不是修改一个余额数字，而是真正创建 N 个新资产对象。
 
-一旦 identity range 正式分配，它永久消耗，即使同一 LegalTask 后续业务失败也不能复用。
+一旦 identity range 正式分配，它永久消耗，即使同一 LegalTask 后续业务失败也不能复用。allocator 在推进 durable frontier 之前必须先成功物化本次 frozen address plan；本地 `Vec` 无法表示或预留所需容量时返回 execution error，不能因资源分配失败烧掉 identity。这个保护不定义 `Issue` 的协议级数量上限。
 
 ~~~text
 ΔCurrentSupply = +N

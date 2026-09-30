@@ -96,6 +96,32 @@ fn prepared_issue_reserves_addresses_without_exposing_currency_before_commit() {
 }
 
 #[test]
+fn impossible_issue_allocation_fails_without_burning_currency_frontier() {
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], 0);
+    let mut prepared = FinalityHarness::new("issue-allocation-failure");
+    let task = verified_task(
+        10,
+        vec![Operation::Issue {
+            account: alice,
+            count: u64::MAX,
+        }],
+    );
+
+    assert_eq!(
+        prepared.prepare(&mut state, &task, 1),
+        Err(PreparationError::Execution(
+            ExecutionError::CurrencyAllocationFailed {
+                requested: u64::MAX
+            }
+        ))
+    );
+    assert_eq!(state.next_currency_address(), 0);
+    assert_eq!(state.current_supply(), 0);
+    assert_eq!(prepared.prepared_count(), 0);
+}
+
+#[test]
 fn cancelling_prepared_issue_burns_reserved_addresses_forever() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);

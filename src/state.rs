@@ -201,9 +201,15 @@ impl SecondState {
         let end_exclusive = start
             .checked_add(count)
             .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
+        let capacity = usize::try_from(count)
+            .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
+        let mut addresses = Vec::new();
+        addresses
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
+        addresses.extend((start..end_exclusive).map(CurrencyAddress::new));
 
         self.protocol.next_currency_address = end_exclusive;
-
-        Ok((start..end_exclusive).map(CurrencyAddress::new).collect())
+        Ok(addresses)
     }
 }

@@ -60,6 +60,9 @@ pub enum ExecutionError {
         available: u64,
     },
     CurrencySequenceSpaceExhausted,
+    CurrencyAllocationFailed {
+        requested: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
