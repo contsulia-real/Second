@@ -138,7 +138,11 @@ impl QuicPeer {
     }
 
     pub fn close(&self) {
-        self.connection.close(0_u32.into(), b"done");
+        self.close_with_reason(b"done");
+    }
+
+    pub(crate) fn close_with_reason(&self, reason: &'static [u8]) {
+        self.connection.close(0_u32.into(), reason);
     }
 
     pub async fn exchange(&self, message: &NetworkMessage) -> Result<NetworkMessage, NetworkError> {

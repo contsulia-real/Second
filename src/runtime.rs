@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 
+use crate::network::{PeerManager, PeerRegistrationError};
 use crate::{
     NetworkError, NodeId, PersistenceError, PublicCurrencyCheckpointProof, QuicServer,
     QuicTransportIdentity, SecondState, StateStore, serve_public_currency_connection,
@@ -69,6 +70,7 @@ impl NodeRuntime {
 
     pub async fn run(self) -> Result<(), NodeRuntimeError> {
         let active_connections = Arc::new(AtomicUsize::new(0));
+        let peer_manager = PeerManager::new(self.node_id());
 
         loop {
             let incoming = self.server.accept_incoming().await?;
@@ -79,11 +81,25 @@ impl NodeRuntime {
 
             let state = Arc::clone(&self.state);
             let public_checkpoint_proof = self.public_checkpoint_proof.clone();
+            let peer_manager = peer_manager.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let Ok(peer) = incoming.handshake().await else {
                     return;
                 };
+
+                let peer_lease = match peer_manager.register(peer.remote_node_id()) {
+                    Ok(lease) => lease,
+                    Err(PeerRegistrationError::SelfConnection) => {
+                        peer.close_with_reason(b"self connection");
+                        return;
+                    }
+                    Err(PeerRegistrationError::Duplicate(_)) => {
+                        peer.close_with_reason(b"duplicate peer");
+                        return;
+                    }
+                };
+                let _peer_lease = peer_lease;
 
                 let _ = serve_public_currency_connection(
                     &peer,

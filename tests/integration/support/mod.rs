@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
+use std::ffi::OsString;
+use std::fs;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -261,4 +264,18 @@ pub fn temp_base(prefix: &str) -> PathBuf {
         NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed),
     );
     std::env::temp_dir().join(unique)
+}
+
+pub fn transport_identity_path(base: &Path) -> PathBuf {
+    let mut path = OsString::from(base.as_os_str());
+    path.push(".transport");
+    PathBuf::from(path)
+}
+
+pub fn remove_transport_identity(base: &Path) {
+    match fs::remove_file(transport_identity_path(base)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to remove transport identity: {error}"),
+    }
 }

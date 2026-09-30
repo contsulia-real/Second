@@ -847,9 +847,13 @@ QUIC 的 transport identity 与 Validator identity / consensus / recovery key �
 
 当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
 
-transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；后续 peer manager 可以使用已认证 NodeId 做连接去重和身份索引，但 trust/discovery/admission 仍需要独立规则。
+transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；trust/discovery/admission 仍需要独立规则。
 
-节点启动时恢复 snapshot，持续接受 QUIC connection；每个已完成认证 Hello 的 peer connection 独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+当前 runtime 已有进程内 peer manager。peer 只有在 authenticated Hello 完成后才进入 registry；registry 以 NodeId 为唯一键，同一 NodeId 在同一节点上同时只允许一条 active connection，自连接（remote NodeId 等于 local NodeId）直接拒绝。当前 runtime 只有 inbound connection，因此重复连接采用 first-active-wins：已有连接继续服务，后到的重复连接关闭。connection task 结束时 lease 自动释放 NodeId，registry 不进入 snapshot，也不作为任何协议状态或共识状态持久化。
+
+如果以后加入主动 outbound dialing，不能直接沿用当前 inbound-only first-active-wins 作为双向连接竞态规则；届时必须在同一个 peer manager 上定义确定性的 simultaneous-dial arbitration，避免双方各自保留不同 connection 或互相关闭导致无连接。该规则在 outbound runtime 真正实现前不提前冻结。
+
+节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
 
 当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
@@ -1145,7 +1149,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 authenticated NodeId 基础上继续完成 peer manager、连接去重以及 peer trust/discovery/admission；transport identity 只证明 key ownership，不等于 Validator authority；
+- 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 peer trust/discovery/admission；如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；

@@ -1,7 +1,4 @@
-use std::ffi::OsString;
-use std::fs;
-use std::io::{self, BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use crate::support;
@@ -67,20 +64,6 @@ fn parse_listening(line: &str) -> (String, String, String) {
         .to_owned();
     assert_eq!(fields.next(), None);
     (address, node_id, certificate)
-}
-
-fn transport_identity_path(base: &Path) -> PathBuf {
-    let mut path = OsString::from(base.as_os_str());
-    path.push(".transport");
-    PathBuf::from(path)
-}
-
-fn remove_transport_identity(base: &Path) {
-    match fs::remove_file(transport_identity_path(base)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => panic!("failed to remove transport identity: {error}"),
-    }
 }
 
 #[test]
@@ -161,7 +144,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 
     server_store.remove_files().unwrap();
     trust_store.remove_files().unwrap();
-    remove_transport_identity(&server_base);
+    support::remove_transport_identity(&server_base);
 }
 
 #[test]
@@ -217,7 +200,7 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     server.wait().unwrap();
 
     store.remove_files().unwrap();
-    remove_transport_identity(&base);
+    support::remove_transport_identity(&base);
 }
 
 #[test]
@@ -316,5 +299,5 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     restarted.wait().unwrap();
 
     store.remove_files().unwrap();
-    remove_transport_identity(&base);
+    support::remove_transport_identity(&base);
 }
