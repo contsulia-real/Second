@@ -4,9 +4,7 @@ use super::snapshot_validation::{
     validate_prepared_plans_against_state, validate_prepared_snapshot_links,
     validate_vote_lock_registry,
 };
-use crate::payment::{
-    EstablishedTransfer, PaymentAddressRecord, PaymentAddressStatus, PaymentExecution,
-};
+use crate::payment::{EstablishedTransfer, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
@@ -43,16 +41,16 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let payment_addresses = BTreeMap::from([
         (
             source,
-            PaymentAddressRecord {
+            crate::payment::PaymentAddressRecord {
                 account: source_account,
-                status: PaymentAddressStatus::Active,
+                status: crate::PaymentAddressStatus::Active,
             },
         ),
         (
             destination,
-            PaymentAddressRecord {
+            crate::payment::PaymentAddressRecord {
                 account: destination_account,
-                status: PaymentAddressStatus::Active,
+                status: crate::PaymentAddressStatus::Active,
             },
         ),
     ]);
@@ -116,20 +114,7 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             &payment_addresses,
             &wrong_execution,
             &prepared,
-            &vote_locks,
-        ),
-        Err(PersistenceError::InvalidSnapshot)
-    );
-
-    let mut wrong_addresses = payment_addresses;
-    wrong_addresses.get_mut(&source).unwrap().account = AccountAddress::from_bytes([9; 32]);
-    assert_eq!(
-        validate_prepared_snapshot_links(
-            &bindings,
-            &wrong_addresses,
-            &executions,
-            &prepared,
-            &vote_locks,
+            &vote_locks
         ),
         Err(PersistenceError::InvalidSnapshot)
     );
@@ -159,7 +144,6 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     prepared_task.advance_phase(PreparedTaskPhase::Voting);
     let plan_digest = prepared_task.plan_digest().unwrap();
     let prepared = BTreeMap::from([(task_id.clone(), prepared_task)]);
-    let payment_addresses = BTreeMap::new();
     let executions = BTreeMap::new();
 
     let valid_lock = BTreeMap::from([(
@@ -172,7 +156,7 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     assert_eq!(
         validate_prepared_snapshot_links(
             &bindings,
-            &payment_addresses,
+            &BTreeMap::new(),
             &executions,
             &prepared,
             &valid_lock,
@@ -187,7 +171,7 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     assert_eq!(
         validate_prepared_snapshot_links(
             &bindings,
-            &payment_addresses,
+            &BTreeMap::new(),
             &executions,
             &prepared,
             &wrong_lock,
@@ -207,13 +191,12 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
         [7; 32],
     )]);
     let prepared = BTreeMap::new();
-    let payment_addresses = BTreeMap::new();
     let executions = BTreeMap::new();
 
     assert_eq!(
         validate_prepared_snapshot_links(
             &BTreeMap::new(),
-            &payment_addresses,
+            &BTreeMap::new(),
             &executions,
             &prepared,
             &vote_locks,
@@ -231,7 +214,7 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
     assert_eq!(
         validate_prepared_snapshot_links(
             &unfinished,
-            &payment_addresses,
+            &BTreeMap::new(),
             &executions,
             &prepared,
             &vote_locks,
@@ -249,7 +232,7 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
     assert_eq!(
         validate_prepared_snapshot_links(
             &succeeded,
-            &payment_addresses,
+            &BTreeMap::new(),
             &executions,
             &prepared,
             &vote_locks,

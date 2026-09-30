@@ -414,18 +414,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
             return Err(PersistenceError::InvalidSnapshot);
         }
 
-        let source_record = payment_addresses
-            .get(&source)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        let destination_record = payment_addresses
-            .get(&destination)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        if source_record.status == PaymentAddressStatus::Retired
-            || destination_record.status == PaymentAddressStatus::Retired
-        {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-
         if payment_executions
             .insert(
                 OperationClaimId::new(task_id, operation_index),

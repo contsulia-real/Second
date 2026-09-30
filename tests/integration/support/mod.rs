@@ -76,11 +76,25 @@ pub fn register_payment_addresses(
     state: &mut SecondState,
     accounts: impl IntoIterator<Item = AccountAddress>,
 ) {
-    for account in accounts {
-        state
-            .register_payment_address(payment_address(account), account)
-            .unwrap();
+    static NEXT_PAYMENT_TASK: AtomicU64 = AtomicU64::new(0);
+    let operations = accounts
+        .into_iter()
+        .map(|account| Operation::RegisterPaymentAddress {
+            address: payment_address(account),
+            account,
+        })
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return;
     }
+
+    let task_number = u128::MAX - u128::from(NEXT_PAYMENT_TASK.fetch_add(1, Ordering::Relaxed));
+    let task = verified_task(task_number, operations);
+    let mut harness = FinalityHarness::new("register-payment-addresses");
+    assert_eq!(
+        harness.execute(state, &task, 0).unwrap(),
+        ExecutionOutcome::Succeeded
+    );
 }
 
 pub fn validator_credential(id: u64) -> ValidatorCredential {

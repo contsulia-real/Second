@@ -7,8 +7,8 @@ use crate::state::BusinessState;
 use crate::{
     CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyClaimBook, ExecutionError, ExecutionOutcome,
     FinalityCertificate, FinalityError, FinalityStatement, Operation, OperationClaimId,
-    PersistenceError, SecondState, StateStore, TaskId, ValidatorId, ValidatorSet, ValidatorSigner,
-    ValidatorSigningError, ValidatorVote, VerifiedLegalTask,
+    PaymentAddress, PersistenceError, SecondState, StateStore, TaskId, ValidatorId, ValidatorSet,
+    ValidatorSigner, ValidatorSigningError, ValidatorVote, VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +35,7 @@ pub enum PreparationError {
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
     CancellationClosed(TaskId),
+    PaymentAddressContention(PaymentAddress),
     InvalidPreparedPlan,
     OperationIndexOverflow,
     LengthOverflow,
@@ -80,6 +81,7 @@ enum BuildOutcome {
 pub struct PreparedTaskBook {
     tasks: BTreeMap<TaskId, PreparedTask>,
     claims: CurrencyClaimBook,
+    payment_address_claims: BTreeMap<PaymentAddress, TaskId>,
     store: StateStore,
 }
 
@@ -87,14 +89,17 @@ impl PreparedTaskBook {
     pub fn new(store: StateStore) -> Result<Self, PreparationError> {
         let tasks = store.load_prepared_tasks()?;
         let mut claims = CurrencyClaimBook::new();
+        let mut payment_address_claims = BTreeMap::new();
 
         for prepared in tasks.values() {
             prepared.restore_claims(&mut claims)?;
+            prepared.restore_payment_address_claims(&mut payment_address_claims)?;
         }
 
         Ok(Self {
             tasks,
             claims,
+            payment_address_claims,
             store,
         })
     }
@@ -132,7 +137,7 @@ impl PreparedTaskBook {
                     &self.tasks,
                     &updated_tasks,
                 ) {
-                    self.claims.release_task(task.task_id());
+                    self.release_task_claims(task.task_id());
                     return Err(error.into());
                 }
 
@@ -141,7 +146,7 @@ impl PreparedTaskBook {
                 Ok(PreparationOutcome::Prepared)
             }
             Err(error) => {
-                self.claims.release_task(task.task_id());
+                self.release_task_claims(task.task_id());
 
                 if protocol_changed || durable_prerequisite_changed {
                     self.store.save_with_prepared(
@@ -209,7 +214,7 @@ impl PreparedTaskBook {
         }
 
         self.tasks = remaining;
-        self.claims.release_task(task_id);
+        self.release_task_claims(task_id);
         Ok(outcome)
     }
 
@@ -318,7 +323,7 @@ impl PreparedTaskBook {
 
         self.store.replace_prepared_tasks(&self.tasks, &remaining)?;
         self.tasks = remaining;
-        self.claims.release_task(task_id);
+        self.release_task_claims(task_id);
         Ok(())
     }
 
@@ -355,6 +360,7 @@ impl PreparedTaskBook {
         working: &mut BusinessState,
     ) -> Result<Vec<PreparedOperation>, PreparationError> {
         let mut prepared = Vec::with_capacity(task.operations().len());
+        let mut simulated_prerequisite = state.prerequisite.clone();
 
         for (index, operation) in task.operations().iter().enumerate() {
             let operation_index =
@@ -378,6 +384,7 @@ impl PreparedTaskBook {
                     amount,
                 } => {
                     let transfer = state.establish_transfer(
+                        working,
                         claim_id.clone(),
                         *source,
                         *destination,
@@ -388,7 +395,7 @@ impl PreparedTaskBook {
 
                     let currencies = self.claims.claim_transfer_in_business_state(
                         working,
-                        claim_id,
+                        claim_id.clone(),
                         transfer.source_account,
                         *amount,
                     )?;
@@ -398,6 +405,7 @@ impl PreparedTaskBook {
                         transfer.destination_account,
                         &currencies,
                     )?;
+                    simulated_prerequisite.payment_executions.remove(&claim_id);
 
                     PreparedOperation::Transfer {
                         transfer,
@@ -437,12 +445,58 @@ impl PreparedTaskBook {
                         replacement_reserve,
                     }
                 }
+                Operation::RegisterPaymentAddress { address, account } => {
+                    self.claim_payment_address(task.task_id(), *address)?;
+                    state
+                        .register_payment_address_in_business_state(working, *address, *account)?;
+                    PreparedOperation::RegisterPaymentAddress {
+                        address: *address,
+                        account: *account,
+                    }
+                }
+                Operation::RetirePaymentAddress { address } => {
+                    self.claim_payment_address(task.task_id(), *address)?;
+                    state.retire_payment_address_in_business_state(working, *address)?;
+                    PreparedOperation::RetirePaymentAddress { address: *address }
+                }
+                Operation::FinalizePaymentAddressRetirement { address } => {
+                    self.claim_payment_address(task.task_id(), *address)?;
+                    state.finalize_payment_address_retirement_in_business_state(
+                        working,
+                        &simulated_prerequisite,
+                        *address,
+                    )?;
+                    PreparedOperation::FinalizePaymentAddressRetirement { address: *address }
+                }
             };
 
             prepared.push(prepared_operation);
         }
 
         Ok(prepared)
+    }
+
+    fn claim_payment_address(
+        &mut self,
+        task_id: TaskId,
+        address: PaymentAddress,
+    ) -> Result<(), PreparationError> {
+        match self.payment_address_claims.get(&address) {
+            Some(owner) if owner != &task_id => {
+                Err(PreparationError::PaymentAddressContention(address))
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.payment_address_claims.insert(address, task_id);
+                Ok(())
+            }
+        }
+    }
+
+    fn release_task_claims(&mut self, task_id: TaskId) {
+        self.claims.release_task(task_id.clone());
+        self.payment_address_claims
+            .retain(|_, owner| owner != &task_id);
     }
 
     fn commit_inner(

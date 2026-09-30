@@ -25,6 +25,16 @@ pub enum Operation {
     LeakRepair {
         leaked: Vec<CurrencyAddress>,
     },
+    RegisterPaymentAddress {
+        address: PaymentAddress,
+        account: AccountAddress,
+    },
+    RetirePaymentAddress {
+        address: PaymentAddress,
+    },
+    FinalizePaymentAddressRetirement {
+        address: PaymentAddress,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,7 +91,11 @@ impl LegalTaskPayload {
                 Operation::LeakRepair { leaked } => {
                     validate_currency_set(leaked, TaskValidationError::EmptyLeakRepair)?;
                 }
-                Operation::Transfer { .. } | Operation::Issue { .. } => {}
+                Operation::Transfer { .. }
+                | Operation::Issue { .. }
+                | Operation::RegisterPaymentAddress { .. }
+                | Operation::RetirePaymentAddress { .. }
+                | Operation::FinalizePaymentAddressRetirement { .. } => {}
             }
         }
 
@@ -136,6 +150,22 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
             push_array_len(out, 2)?;
             push_unsigned(out, 3);
             push_currency_addresses(out, leaked)?;
+        }
+        Operation::RegisterPaymentAddress { address, account } => {
+            push_array_len(out, 3)?;
+            push_unsigned(out, 4);
+            push_text(out, &address.canonical_string())?;
+            push_text(out, &account.canonical_string())?;
+        }
+        Operation::RetirePaymentAddress { address } => {
+            push_array_len(out, 2)?;
+            push_unsigned(out, 5);
+            push_text(out, &address.canonical_string())?;
+        }
+        Operation::FinalizePaymentAddressRetirement { address } => {
+            push_array_len(out, 2)?;
+            push_unsigned(out, 6);
+            push_text(out, &address.canonical_string())?;
         }
     }
 

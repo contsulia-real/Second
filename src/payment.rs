@@ -42,19 +42,20 @@ impl PaymentExecution {
 }
 
 impl SecondState {
-    pub fn register_payment_address(
-        &mut self,
+    pub(crate) fn register_payment_address_in_business_state(
+        &self,
+        working: &mut BusinessState,
         address: PaymentAddress,
         account: AccountAddress,
     ) -> Result<(), ExecutionError> {
-        if !self.business.accounts.contains(&account) {
+        if !working.accounts.contains(&account) {
             return Err(ExecutionError::AccountNotFound(account));
         }
-        if self.business.payment_addresses.contains_key(&address) {
+        if working.payment_addresses.contains_key(&address) {
             return Err(ExecutionError::PaymentAddressAlreadyExists(address));
         }
 
-        self.business.payment_addresses.insert(
+        working.payment_addresses.insert(
             address,
             PaymentAddressRecord {
                 account,
@@ -82,12 +83,12 @@ impl SecondState {
         self.prerequisite.payment_executions.len()
     }
 
-    pub fn retire_payment_address(
-        &mut self,
+    pub(crate) fn retire_payment_address_in_business_state(
+        &self,
+        working: &mut BusinessState,
         address: PaymentAddress,
     ) -> Result<(), ExecutionError> {
-        let record = self
-            .business
+        let record = working
             .payment_addresses
             .get_mut(&address)
             .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;
@@ -103,12 +104,13 @@ impl SecondState {
         }
     }
 
-    pub fn finalize_payment_address_retirement(
-        &mut self,
+    pub(crate) fn finalize_payment_address_retirement_in_business_state(
+        &self,
+        working: &mut BusinessState,
+        prerequisite: &PrerequisiteState,
         address: PaymentAddress,
     ) -> Result<(), ExecutionError> {
-        let status = self
-            .business
+        let status = working
             .payment_addresses
             .get(&address)
             .map(|record| record.status)
@@ -118,8 +120,7 @@ impl SecondState {
             return Err(ExecutionError::InvalidPaymentAddressTransition(address));
         }
 
-        if self
-            .prerequisite
+        if prerequisite
             .payment_executions
             .values()
             .any(|execution| execution.source == address || execution.destination == address)
@@ -127,7 +128,7 @@ impl SecondState {
             return Err(ExecutionError::InvalidPaymentAddressTransition(address));
         }
 
-        self.business
+        working
             .payment_addresses
             .get_mut(&address)
             .ok_or(ExecutionError::PaymentAddressUnavailable(address))?
@@ -137,6 +138,7 @@ impl SecondState {
 
     pub(crate) fn establish_transfer(
         &mut self,
+        working: &BusinessState,
         claim_id: OperationClaimId,
         source: PaymentAddress,
         destination: PaymentAddress,
@@ -150,15 +152,17 @@ impl SecondState {
             return Ok(EstablishedTransfer {
                 source,
                 destination,
-                source_account: self.payment_account(source)?,
-                destination_account: self.payment_account(destination)?,
+                source_account: self.payment_account_in_business_state(working, source)?,
+                destination_account: self
+                    .payment_account_in_business_state(working, destination)?,
                 amount,
             });
         }
 
-        let source_account = self.require_payment_address_available_for_establishment(source)?;
+        let source_account =
+            self.require_payment_address_available_for_establishment(working, source)?;
         let destination_account =
-            self.require_payment_address_available_for_establishment(destination)?;
+            self.require_payment_address_available_for_establishment(working, destination)?;
 
         self.prerequisite.payment_executions.insert(
             claim_id,
@@ -223,8 +227,12 @@ impl SecondState {
         )
     }
 
-    fn payment_account(&self, address: PaymentAddress) -> Result<AccountAddress, ExecutionError> {
-        self.business
+    fn payment_account_in_business_state(
+        &self,
+        working: &BusinessState,
+        address: PaymentAddress,
+    ) -> Result<AccountAddress, ExecutionError> {
+        working
             .payment_addresses
             .get(&address)
             .map(|record| record.account)
@@ -233,10 +241,10 @@ impl SecondState {
 
     fn require_payment_address_available_for_establishment(
         &self,
+        working: &BusinessState,
         address: PaymentAddress,
     ) -> Result<AccountAddress, ExecutionError> {
-        let record = self
-            .business
+        let record = working
             .payment_addresses
             .get(&address)
             .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;

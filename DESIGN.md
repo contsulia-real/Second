@@ -187,6 +187,10 @@ invalidate established payments
 
 PaymentAddress 本身没有独立余额，也不维护地址级 usage quota、max usage 或地址级过期逻辑。
 
+PaymentAddress binding / lifecycle mutation 已纳入与资产业务相同的 LegalTask authority：`RegisterPaymentAddress`、`RetirePaymentAddress`、`FinalizePaymentAddressRetirement` 都必须走 `LegalTask -> prepare -> finality -> commit`。Second 不再暴露可绕过 finality 的公开 PaymentAddress state mutator；谁有资格签发这些 LegalTask 仍由外部 authorization 决定，不另设管理员写入口。
+
+同一 active PreparedTask 可以按原始 operation 顺序连续操作同一个 PaymentAddress；不同 active PreparedTask 不能同时冻结同一 PaymentAddress 的 lifecycle mutation。这个 lifecycle claim 必须随 PreparedTask 持久化语义恢复，cancel/commit 后释放。Transfer establishment 不占 lifecycle claim：已经建立的 Transfer 仍允许跨 `retiring` 完成。
+
 ---
 
 ## 5. Currency 角色
@@ -419,7 +423,7 @@ Success(task_X)
 
 - 不重新执行 Operation；
 - 返回 already succeeded；
-- 不重复 Issue / Transfer / Destroy / Leak Repair。
+- 不重复 Issue / Transfer / Destroy / Leak Repair / PaymentAddress lifecycle mutation。
 
 ---
 
@@ -475,6 +479,9 @@ Second/LegalTask/v1\0
 1 = Issue
 2 = Destroy
 3 = LeakRepair
+4 = RegisterPaymentAddress
+5 = RetirePaymentAddress
+6 = FinalizePaymentAddressRetirement
 ~~~
 
 ### 8.2 输入结构合法性
@@ -1177,7 +1184,6 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 明确 PaymentAddress lifecycle 的授权与 durable commit authority。当前已经冻结 `active -> retiring -> retired`、永久 `PaymentAddress -> Account` binding 以及在途 Transfer 规则，但尚未决定谁有权创建 binding、请求 retiring、确认 retired，也没有把这些 mutation 定义为 LegalTask 或另一种 finalized subject。`SecondState::{register_payment_address, retire_payment_address, finalize_payment_address_retirement}` 当前只表达状态机语义；在正式节点持久化入口确定前，不能把它们接成绕过 finality 的任意 state write；
 - 明确 ValidatorSet activation 与旧 validator-set version 下尚未结束的 PreparedTask 的关系。PreparedTask plan/finality subject 已绑定其 prepare 时的 validator-set version，而 snapshot 当前只保存 active ValidatorSet；在决定旧 set 的 `Prepared` / `Voting` / `Finalized` task 是必须先清空、允许跨 epoch 并保留历史 ValidatorSet，还是采用其他明确规则前，不能把 `CertifiedValidatorSetTransition` 直接接成 durable activation，避免把已经进入投票或 finality 的任务变成无法验证/commit 的孤儿；
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；

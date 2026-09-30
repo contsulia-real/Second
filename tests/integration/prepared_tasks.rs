@@ -741,3 +741,52 @@ fn stale_preparer_cannot_overwrite_newer_finalized_state() {
 
     store.remove_files().unwrap();
 }
+
+#[test]
+fn payment_address_lifecycle_claim_survives_restart_and_releases_on_cancel() {
+    let alice = support::account(1);
+    let address = support::payment(700);
+    let store = StateStore::new(temp_base("payment-address-lifecycle-claim"));
+    let validator_set = validators();
+    let first = verified_task(
+        930,
+        vec![Operation::RegisterPaymentAddress {
+            address,
+            account: alice,
+        }],
+    );
+    let second = verified_task(
+        931,
+        vec![Operation::RegisterPaymentAddress {
+            address,
+            account: alice,
+        }],
+    );
+
+    let mut state = SecondState::genesis([alice], 1);
+    {
+        let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+        prepared
+            .prepare(&mut state, &first, 1, &validator_set)
+            .unwrap();
+    }
+
+    let restored = store.load().unwrap().unwrap();
+    state = restored.state;
+    let mut recovered = PreparedTaskBook::new(store.clone()).unwrap();
+
+    assert_eq!(
+        recovered.prepare(&mut state, &second, 2, &validator_set),
+        Err(PreparationError::PaymentAddressContention(address))
+    );
+
+    recovered.cancel(first.task_id()).unwrap();
+    assert_eq!(
+        recovered
+            .prepare(&mut state, &second, 2, &validator_set)
+            .unwrap(),
+        PreparationOutcome::Prepared
+    );
+
+    store.remove_files().unwrap();
+}

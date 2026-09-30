@@ -151,6 +151,19 @@ fn encode_prepared_operation(
             encode_addresses(out, reserve)?;
             encode_addresses(out, replacement_reserve)?;
         }
+        PreparedOperation::RegisterPaymentAddress { address, account } => {
+            out.push(5);
+            out.extend_from_slice(&address.bytes());
+            out.extend_from_slice(&account.bytes());
+        }
+        PreparedOperation::RetirePaymentAddress { address } => {
+            out.push(6);
+            out.extend_from_slice(&address.bytes());
+        }
+        PreparedOperation::FinalizePaymentAddressRetirement { address } => {
+            out.push(7);
+            out.extend_from_slice(&address.bytes());
+        }
     }
     Ok(())
 }
@@ -194,6 +207,16 @@ fn decode_prepared_operation(
                 replacement_reserve: decode_addresses(decoder)?,
             })
         }
+        5 => Ok(PreparedOperation::RegisterPaymentAddress {
+            address: PaymentAddress::from_bytes(decoder.read_array_32()?),
+            account: AccountAddress::from_bytes(decoder.read_array_32()?),
+        }),
+        6 => Ok(PreparedOperation::RetirePaymentAddress {
+            address: PaymentAddress::from_bytes(decoder.read_array_32()?),
+        }),
+        7 => Ok(PreparedOperation::FinalizePaymentAddressRetirement {
+            address: PaymentAddress::from_bytes(decoder.read_array_32()?),
+        }),
         _ => Err(PersistenceError::InvalidSnapshot),
     }
 }

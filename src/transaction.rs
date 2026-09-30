@@ -45,6 +45,16 @@ enum RawOperation {
     LeakRepair {
         currencies: Vec<String>,
     },
+    RegisterPaymentAddress {
+        address: String,
+        account: String,
+    },
+    RetirePaymentAddress {
+        address: String,
+    },
+    FinalizePaymentAddressRetirement {
+        address: String,
+    },
 }
 
 pub fn parse_transaction_request_json(
@@ -99,6 +109,24 @@ fn parse_operation(operation: RawOperation) -> Result<Operation, TransactionRequ
         RawOperation::LeakRepair { currencies } => Ok(Operation::LeakRepair {
             leaked: parse_currency_addresses(currencies)?,
         }),
+        RawOperation::RegisterPaymentAddress { address, account } => {
+            Ok(Operation::RegisterPaymentAddress {
+                address: PaymentAddress::parse(&address)
+                    .map_err(|_| TransactionRequestParseError::InvalidPaymentAddress)?,
+                account: AccountAddress::parse(&account)
+                    .map_err(|_| TransactionRequestParseError::InvalidAccountAddress)?,
+            })
+        }
+        RawOperation::RetirePaymentAddress { address } => Ok(Operation::RetirePaymentAddress {
+            address: PaymentAddress::parse(&address)
+                .map_err(|_| TransactionRequestParseError::InvalidPaymentAddress)?,
+        }),
+        RawOperation::FinalizePaymentAddressRetirement { address } => {
+            Ok(Operation::FinalizePaymentAddressRetirement {
+                address: PaymentAddress::parse(&address)
+                    .map_err(|_| TransactionRequestParseError::InvalidPaymentAddress)?,
+            })
+        }
     }
 }
 

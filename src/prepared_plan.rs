@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 
 use crate::payment::EstablishedTransfer;
 use crate::state::{BusinessState, PrerequisiteState};
 use crate::{
     AccountAddress, ClaimError, CurrencyAddress, CurrencyClaimBook, OperationClaimId,
-    PreparationError, SecondState, TaskId,
+    PaymentAddress, PreparationError, SecondState, TaskId,
 };
 
 const PREPARED_TASK_DOMAIN: &[u8] = b"SECOND_PREPARED_TASK_V1\0";
@@ -27,6 +29,16 @@ pub(crate) enum PreparedOperation {
         leaked_owners: Vec<AccountAddress>,
         reserve: Vec<CurrencyAddress>,
         replacement_reserve: Vec<CurrencyAddress>,
+    },
+    RegisterPaymentAddress {
+        address: PaymentAddress,
+        account: AccountAddress,
+    },
+    RetirePaymentAddress {
+        address: PaymentAddress,
+    },
+    FinalizePaymentAddressRetirement {
+        address: PaymentAddress,
     },
 }
 
@@ -90,6 +102,19 @@ impl PreparedOperation {
                     replacement_reserve,
                 )?;
             }
+            Self::RegisterPaymentAddress { address, account } => {
+                state.register_payment_address_in_business_state(working, *address, *account)?;
+            }
+            Self::RetirePaymentAddress { address } => {
+                state.retire_payment_address_in_business_state(working, *address)?;
+            }
+            Self::FinalizePaymentAddressRetirement { address } => {
+                state.finalize_payment_address_retirement_in_business_state(
+                    working,
+                    prerequisite,
+                    *address,
+                )?;
+            }
         }
 
         Ok(())
@@ -110,6 +135,21 @@ impl PreparedOperation {
             Self::LeakRepair {
                 leaked, reserve, ..
             } => claims.restore_leak_repair(claim_id, leaked, reserve),
+            Self::RegisterPaymentAddress { .. }
+            | Self::RetirePaymentAddress { .. }
+            | Self::FinalizePaymentAddressRetirement { .. } => Ok(()),
+        }
+    }
+
+    fn lifecycle_payment_address(&self) -> Option<PaymentAddress> {
+        match self {
+            Self::RegisterPaymentAddress { address, .. }
+            | Self::RetirePaymentAddress { address }
+            | Self::FinalizePaymentAddressRetirement { address } => Some(*address),
+            Self::Issue { .. }
+            | Self::Transfer { .. }
+            | Self::Destroy { .. }
+            | Self::LeakRepair { .. } => None,
         }
     }
 }
@@ -218,6 +258,19 @@ impl PreparedTask {
                     hash_addresses(&mut hasher, reserve)?;
                     hash_addresses(&mut hasher, replacement_reserve)?;
                 }
+                PreparedOperation::RegisterPaymentAddress { address, account } => {
+                    hasher.update([5]);
+                    hasher.update(address.bytes());
+                    hasher.update(account.bytes());
+                }
+                PreparedOperation::RetirePaymentAddress { address } => {
+                    hasher.update([6]);
+                    hasher.update(address.bytes());
+                }
+                PreparedOperation::FinalizePaymentAddressRetirement { address } => {
+                    hasher.update([7]);
+                    hasher.update(address.bytes());
+                }
             }
         }
 
@@ -236,6 +289,29 @@ impl PreparedTask {
                 claims,
             )?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn restore_payment_address_claims(
+        &self,
+        claims: &mut BTreeMap<PaymentAddress, TaskId>,
+    ) -> Result<(), PreparationError> {
+        for operation in &self.operations {
+            let Some(address) = operation.lifecycle_payment_address() else {
+                continue;
+            };
+
+            match claims.get(&address) {
+                Some(owner) if owner != &self.task_id => {
+                    return Err(PreparationError::PaymentAddressContention(address));
+                }
+                Some(_) => {}
+                None => {
+                    claims.insert(address, self.task_id.clone());
+                }
+            }
+        }
+
         Ok(())
     }
 

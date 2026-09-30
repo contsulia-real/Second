@@ -12,8 +12,25 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     let bob_pay = support::payment(102);
     let mut state = SecondState::genesis([alice, bob], 1);
 
-    state.register_payment_address(alice_pay, alice).unwrap();
-    state.register_payment_address(bob_pay, bob).unwrap();
+    state
+        .execute_finalized(
+            &verified_task_with_expiry(
+                1,
+                None,
+                vec![
+                    Operation::RegisterPaymentAddress {
+                        address: alice_pay,
+                        account: alice,
+                    },
+                    Operation::RegisterPaymentAddress {
+                        address: bob_pay,
+                        account: bob,
+                    },
+                ],
+            ),
+            0,
+        )
+        .unwrap();
 
     let established = verified_task_with_expiry(
         10,
@@ -49,18 +66,43 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
         )
         .unwrap();
 
-    state.retire_payment_address(alice_pay).unwrap();
-    state.retire_payment_address(bob_pay).unwrap();
+    state
+        .execute_finalized(
+            &verified_task_with_expiry(
+                30,
+                None,
+                vec![
+                    Operation::RetirePaymentAddress { address: alice_pay },
+                    Operation::RetirePaymentAddress { address: bob_pay },
+                ],
+            ),
+            3,
+        )
+        .unwrap();
     assert_eq!(
         state.payment_address_status(alice_pay),
         Some(PaymentAddressStatus::Retiring)
     );
     assert_eq!(
-        state.finalize_payment_address_retirement(alice_pay),
+        state.execute_finalized(
+            &verified_task_with_expiry(
+                31,
+                None,
+                vec![Operation::FinalizePaymentAddressRetirement { address: alice_pay }],
+            ),
+            3,
+        ),
         Err(ExecutionError::InvalidPaymentAddressTransition(alice_pay))
     );
     assert_eq!(
-        state.finalize_payment_address_retirement(bob_pay),
+        state.execute_finalized(
+            &verified_task_with_expiry(
+                32,
+                None,
+                vec![Operation::FinalizePaymentAddressRetirement { address: bob_pay }],
+            ),
+            3,
+        ),
         Err(ExecutionError::InvalidPaymentAddressTransition(bob_pay))
     );
 
@@ -85,9 +127,18 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     assert_eq!(state.payment_execution_count(), 0);
 
     state
-        .finalize_payment_address_retirement(alice_pay)
+        .execute_finalized(
+            &verified_task_with_expiry(
+                33,
+                None,
+                vec![
+                    Operation::FinalizePaymentAddressRetirement { address: alice_pay },
+                    Operation::FinalizePaymentAddressRetirement { address: bob_pay },
+                ],
+            ),
+            11,
+        )
         .unwrap();
-    state.finalize_payment_address_retirement(bob_pay).unwrap();
     assert_eq!(
         state.payment_address_status(alice_pay),
         Some(PaymentAddressStatus::Retired)
@@ -107,8 +158,25 @@ fn later_transfer_is_not_established_when_an_earlier_operation_fails() {
     let bob_pay = support::payment(102);
     let mut state = SecondState::genesis([alice, bob], 1);
 
-    state.register_payment_address(alice_pay, alice).unwrap();
-    state.register_payment_address(bob_pay, bob).unwrap();
+    state
+        .execute_finalized(
+            &verified_task_with_expiry(
+                19,
+                None,
+                vec![
+                    Operation::RegisterPaymentAddress {
+                        address: alice_pay,
+                        account: alice,
+                    },
+                    Operation::RegisterPaymentAddress {
+                        address: bob_pay,
+                        account: bob,
+                    },
+                ],
+            ),
+            0,
+        )
+        .unwrap();
 
     let task = verified_task_with_expiry(
         20,
@@ -130,5 +198,59 @@ fn later_transfer_is_not_established_when_an_earlier_operation_fails() {
         state.execute_finalized(&task, 1),
         Err(ExecutionError::AccountNotFound(missing))
     );
+    assert_eq!(state.payment_execution_count(), 0);
+}
+
+#[test]
+fn one_finalized_task_can_register_addresses_then_transfer_through_them() {
+    let alice = support::account(1);
+    let bob = support::account(2);
+    let alice_pay = support::payment(201);
+    let bob_pay = support::payment(202);
+    let mut state = SecondState::genesis([alice, bob], 1);
+
+    state
+        .execute_finalized(
+            &verified_task_with_expiry(
+                40,
+                None,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+
+    state
+        .execute_finalized(
+            &verified_task_with_expiry(
+                41,
+                None,
+                vec![
+                    Operation::RegisterPaymentAddress {
+                        address: alice_pay,
+                        account: alice,
+                    },
+                    Operation::RegisterPaymentAddress {
+                        address: bob_pay,
+                        account: bob,
+                    },
+                    Operation::Transfer {
+                        source: alice_pay,
+                        destination: bob_pay,
+                        amount: 1,
+                    },
+                ],
+            ),
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(state.payment_address_account(alice_pay), Some(alice));
+    assert_eq!(state.payment_address_account(bob_pay), Some(bob));
+    assert_eq!(state.balance(alice), 0);
+    assert_eq!(state.balance(bob), 1);
     assert_eq!(state.payment_execution_count(), 0);
 }

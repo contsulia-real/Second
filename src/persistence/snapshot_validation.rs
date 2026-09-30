@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::payment::{PaymentAddressRecord, PaymentExecution};
+use crate::payment::{PaymentAddressRecord, PaymentAddressStatus, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
 use crate::validator_signer::FinalityScope;
@@ -28,11 +28,15 @@ pub(super) fn validate_prepared_plans_against_state(
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
 ) -> Result<(), PersistenceError> {
     let mut claims = CurrencyClaimBook::new();
+    let mut payment_address_claims = BTreeMap::new();
     let mut preallocated = BTreeSet::new();
 
     for prepared in prepared_tasks.values() {
         prepared
             .restore_claims(&mut claims)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        prepared
+            .restore_payment_address_claims(&mut payment_address_claims)
             .map_err(|_| PersistenceError::InvalidSnapshot)?;
 
         for operation in &prepared.operations {
@@ -42,7 +46,11 @@ pub(super) fn validate_prepared_plans_against_state(
                     replacement_reserve,
                     ..
                 } => Some(replacement_reserve.as_slice()),
-                PreparedOperation::Transfer { .. } | PreparedOperation::Destroy { .. } => None,
+                PreparedOperation::Transfer { .. }
+                | PreparedOperation::Destroy { .. }
+                | PreparedOperation::RegisterPaymentAddress { .. }
+                | PreparedOperation::RetirePaymentAddress { .. }
+                | PreparedOperation::FinalizePaymentAddressRetirement { .. } => None,
             };
 
             if let Some(addresses) = addresses {
@@ -71,6 +79,8 @@ pub(super) fn validate_prepared_snapshot_links(
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
     validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
 ) -> Result<(), PersistenceError> {
+    let mut active_transfer_claims = BTreeSet::new();
+
     for (task_id, prepared) in prepared_tasks {
         let binding = task_bindings
             .get(task_id)
@@ -86,25 +96,14 @@ pub(super) fn validate_prepared_snapshot_links(
             let claim_id = OperationClaimId::new(task_id.clone(), operation_index);
 
             if let PreparedOperation::Transfer { transfer, .. } = operation {
-                let source = payment_addresses
-                    .get(&transfer.source)
-                    .ok_or(PersistenceError::InvalidSnapshot)?;
-                let destination = payment_addresses
-                    .get(&transfer.destination)
-                    .ok_or(PersistenceError::InvalidSnapshot)?;
-                if source.account != transfer.source_account
-                    || destination.account != transfer.destination_account
-                {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
-
                 let execution = payment_executions
                     .get(&claim_id)
                     .ok_or(PersistenceError::InvalidSnapshot)?;
                 if !execution.matches(transfer.source, transfer.destination, transfer.amount) {
                     return Err(PersistenceError::InvalidSnapshot);
                 }
-                expected_transfer_claims.insert(claim_id);
+                expected_transfer_claims.insert(claim_id.clone());
+                active_transfer_claims.insert(claim_id);
             }
         }
 
@@ -112,6 +111,24 @@ pub(super) fn validate_prepared_snapshot_links(
             .keys()
             .filter(|claim_id| claim_id.task_id() == task_id)
             .any(|claim_id| !expected_transfer_claims.contains(claim_id))
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    for (claim_id, execution) in payment_executions {
+        if active_transfer_claims.contains(claim_id) {
+            continue;
+        }
+
+        let source = payment_addresses
+            .get(&execution.source)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        let destination = payment_addresses
+            .get(&execution.destination)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        if source.status == PaymentAddressStatus::Retired
+            || destination.status == PaymentAddressStatus::Retired
         {
             return Err(PersistenceError::InvalidSnapshot);
         }
