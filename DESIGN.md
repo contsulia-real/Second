@@ -839,7 +839,7 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 ## 16. 网络设计
 
-当前网络层以 QUIC 作为节点传输层，不依赖 JSON 作为节点间 framing。QUIC 连接完成 TLS 1.3 握手后，应用层先使用一个可靠双向 stream 完成 NodeId Hello；后续每个请求/响应使用独立的可靠双向 stream。当前协议不使用 QUIC DATAGRAM，也不使用 0-RTT。
+当前网络层以 QUIC 作为节点传输层，不依赖 JSON 作为节点间 framing。QUIC 连接完成 TLS 1.3 握手后，应用层先使用一个可靠双向 stream 完成 NodeId Hello；后续每个请求/响应使用独立的可靠双向 stream。当前 public session 按 connection 串行处理 request，因此 transport 也只允许每个 connection 同时存在 1 个双向 stream；完成一个请求后仍可继续打开下一条独立 stream。单向 stream 被禁用。当前协议不使用 QUIC DATAGRAM，也不使用 0-RTT。
 
 QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前 `second node` 每次启动生成独立 transport certificate，并将 certificate 输出给显式 pin 的客户端；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
 
@@ -1135,7 +1135,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有长期 node runtime 上继续完成 peer 管理与连接/同步资源预算；
+- 在现有长期 node runtime 上继续完成 peer 管理、连接总量限制与 full public sync 总量预算；单 connection 的并发 bidi stream 已按当前串行 session 收紧为 1；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 明确 Validator admission 的最终治理来源；

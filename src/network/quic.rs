@@ -181,6 +181,7 @@ impl QuicRequestStream {
 
 fn transport_config() -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
+    config.max_concurrent_bidi_streams(1_u8.into());
     config.max_concurrent_uni_streams(0_u8.into());
     config.max_idle_timeout(Some(
         QUIC_IDLE_TIMEOUT
