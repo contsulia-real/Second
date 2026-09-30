@@ -43,10 +43,8 @@ pub enum ExecutionError {
     PaymentAddressAlreadyExists(PaymentAddress),
     PaymentAddressUnavailable(PaymentAddress),
     InvalidPaymentAddressTransition(PaymentAddress),
-    PaymentAddressUsageExhausted(PaymentAddress),
     InFlightTransferMismatch(OperationClaimId),
     TransferNotEstablished(OperationClaimId),
-    PaymentAddressUsageOverflow(PaymentAddress),
     InsufficientBalance {
         account: AccountAddress,
         required: u64,

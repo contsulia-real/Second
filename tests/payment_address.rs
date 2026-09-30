@@ -4,19 +4,17 @@ use second::{ExecutionError, Operation, PaymentAddressStatus, SecondState};
 use support::verified_task_with_expiry;
 
 #[test]
-fn established_transfer_can_finish_after_addresses_retire_and_expire() {
+fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     let alice = support::account(1);
     let bob = support::account(2);
     let alice_pay = support::payment(101);
     let bob_pay = support::payment(102);
     let mut state = SecondState::genesis([alice, bob], 1);
 
-    state
-        .register_payment_address(alice_pay, alice, 5, 1)
-        .unwrap();
-    state.register_payment_address(bob_pay, bob, 5, 1).unwrap();
+    state.register_payment_address(alice_pay, alice).unwrap();
+    state.register_payment_address(bob_pay, bob).unwrap();
 
-    let transfer = verified_task_with_expiry(
+    let established = verified_task_with_expiry(
         10,
         Some(100),
         vec![Operation::Transfer {
@@ -27,7 +25,7 @@ fn established_transfer_can_finish_after_addresses_retire_and_expire() {
     );
 
     assert_eq!(
-        state.execute(&transfer, 1),
+        state.execute(&established, 1),
         Err(ExecutionError::InsufficientBalance {
             account: alice,
             required: 1,
@@ -35,8 +33,6 @@ fn established_transfer_can_finish_after_addresses_retire_and_expire() {
         })
     );
     assert_eq!(state.payment_execution_count(), 1);
-    assert_eq!(state.payment_address_usage_count(alice_pay), Some(0));
-    assert_eq!(state.payment_address_usage_count(bob_pay), Some(0));
 
     state
         .execute(
@@ -59,17 +55,29 @@ fn established_transfer_can_finish_after_addresses_retire_and_expire() {
         Some(PaymentAddressStatus::Retiring)
     );
 
-    state.execute(&transfer, 10).unwrap();
+    let new_transfer = verified_task_with_expiry(
+        12,
+        Some(100),
+        vec![Operation::Transfer {
+            source: alice_pay,
+            destination: bob_pay,
+            amount: 1,
+        }],
+    );
+    assert_eq!(
+        state.execute(&new_transfer, 3),
+        Err(ExecutionError::PaymentAddressUnavailable(alice_pay))
+    );
+
+    state.execute(&established, 10).unwrap();
 
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.balance(bob), 1);
     assert_eq!(state.payment_execution_count(), 0);
-    assert_eq!(state.payment_address_usage_count(alice_pay), Some(1));
-    assert_eq!(state.payment_address_usage_count(bob_pay), Some(1));
 }
 
 #[test]
-fn bounded_reaper_removes_earliest_expiring_establishment_first() {
+fn expired_transfer_reservations_are_reaped_in_expiry_order() {
     let a = support::account(1);
     let b = support::account(2);
     let c = support::account(3);
@@ -81,9 +89,7 @@ fn bounded_reaper_removes_earliest_expiring_establishment_first() {
     let mut state = SecondState::genesis([a, b, c, d], 1);
 
     for (address, account) in [(a_pay, a), (b_pay, b), (c_pay, c), (d_pay, d)] {
-        state
-            .register_payment_address(address, account, u64::MAX, 1)
-            .unwrap();
+        state.register_payment_address(address, account).unwrap();
     }
 
     let later = verified_task_with_expiry(
@@ -115,34 +121,10 @@ fn bounded_reaper_removes_earliest_expiring_establishment_first() {
     ));
     assert_eq!(state.payment_execution_count(), 2);
 
-    assert_eq!(state.reap_expired_payment_executions(30, 1), 1);
+    assert_eq!(state.reap_expired_payment_executions(15, 1), 1);
     assert_eq!(state.payment_execution_count(), 1);
+    assert_eq!(state.reap_expired_payment_executions(15, 1), 0);
 
-    let freed_pair = verified_task_with_expiry(
-        3,
-        Some(100),
-        vec![Operation::Transfer {
-            source: c_pay,
-            destination: d_pay,
-            amount: 1,
-        }],
-    );
-    assert!(matches!(
-        state.execute(&freed_pair, 30),
-        Err(ExecutionError::InsufficientBalance { account, .. }) if account == c
-    ));
-
-    let still_reserved_pair = verified_task_with_expiry(
-        4,
-        Some(100),
-        vec![Operation::Transfer {
-            source: a_pay,
-            destination: b_pay,
-            amount: 1,
-        }],
-    );
-    assert_eq!(
-        state.execute(&still_reserved_pair, 30),
-        Err(ExecutionError::PaymentAddressUsageExhausted(a_pay))
-    );
+    assert_eq!(state.reap_expired_payment_executions(25, 1), 1);
+    assert_eq!(state.payment_execution_count(), 0);
 }

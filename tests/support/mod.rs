@@ -70,7 +70,7 @@ pub fn register_payment_addresses(
 ) {
     for account in accounts {
         state
-            .register_payment_address(payment_address(account), account, u64::MAX, u64::MAX)
+            .register_payment_address(payment_address(account), account)
             .unwrap();
     }
 }

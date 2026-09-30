@@ -15,9 +15,6 @@ pub enum PaymentAddressStatus {
 pub(crate) struct PaymentAddressRecord {
     pub(crate) account: AccountAddress,
     pub(crate) status: PaymentAddressStatus,
-    pub(crate) usage_count: u64,
-    pub(crate) expires_at: u64,
-    pub(crate) max_usage: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,8 +55,6 @@ impl SecondState {
         &mut self,
         address: PaymentAddress,
         account: AccountAddress,
-        expires_at: u64,
-        max_usage: u64,
     ) -> Result<(), ExecutionError> {
         if !self.business.accounts.contains(&account) {
             return Err(ExecutionError::AccountNotFound(account));
@@ -73,9 +68,6 @@ impl SecondState {
             PaymentAddressRecord {
                 account,
                 status: PaymentAddressStatus::Active,
-                usage_count: 0,
-                expires_at,
-                max_usage,
             },
         );
         Ok(())
@@ -93,13 +85,6 @@ impl SecondState {
             .payment_addresses
             .get(&address)
             .map(|record| record.account)
-    }
-
-    pub fn payment_address_usage_count(&self, address: PaymentAddress) -> Option<u64> {
-        self.business
-            .payment_addresses
-            .get(&address)
-            .map(|record| record.usage_count)
     }
 
     pub fn payment_execution_count(&self) -> usize {
@@ -168,7 +153,6 @@ impl SecondState {
     pub(crate) fn establish_task_transfers(
         &mut self,
         task: &VerifiedLegalTask,
-        now: u64,
     ) -> Result<(), ExecutionError> {
         let mut candidate = self.clone();
 
@@ -190,7 +174,6 @@ impl SecondState {
                 *source,
                 *destination,
                 *amount,
-                now,
                 expires_at,
             )?;
         }
@@ -205,7 +188,6 @@ impl SecondState {
         source: PaymentAddress,
         destination: PaymentAddress,
         amount: u64,
-        now: u64,
         expires_at: u64,
     ) -> Result<EstablishedTransfer, ExecutionError> {
         if let Some(existing) = self.prerequisite.payment_executions.get(&claim_id) {
@@ -223,15 +205,9 @@ impl SecondState {
             });
         }
 
-        let source_account =
-            self.require_payment_address_available_for_establishment(source, now)?;
+        let source_account = self.require_payment_address_available_for_establishment(source)?;
         let destination_account =
-            self.require_payment_address_available_for_establishment(destination, now)?;
-
-        self.require_payment_capacity(source)?;
-        if destination != source {
-            self.require_payment_capacity(destination)?;
-        }
+            self.require_payment_address_available_for_establishment(destination)?;
 
         self.prerequisite.payment_executions.insert(
             claim_id,
@@ -282,10 +258,6 @@ impl SecondState {
             transfer.destination_account,
             currencies,
         )?;
-        increment_usage(working, transfer.source)?;
-        if transfer.destination != transfer.source {
-            increment_usage(working, transfer.destination)?;
-        }
         prerequisite.payment_executions.remove(&claim_id);
         Ok(())
     }
@@ -318,7 +290,6 @@ impl SecondState {
     fn require_payment_address_available_for_establishment(
         &self,
         address: PaymentAddress,
-        now: u64,
     ) -> Result<AccountAddress, ExecutionError> {
         let record = self
             .business
@@ -326,36 +297,11 @@ impl SecondState {
             .get(&address)
             .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;
 
-        if record.status != PaymentAddressStatus::Active || record.expires_at <= now {
+        if record.status != PaymentAddressStatus::Active {
             return Err(ExecutionError::PaymentAddressUnavailable(address));
         }
 
         Ok(record.account)
-    }
-
-    fn require_payment_capacity(&self, address: PaymentAddress) -> Result<(), ExecutionError> {
-        let record = self
-            .business
-            .payment_addresses
-            .get(&address)
-            .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;
-        let in_flight = self
-            .prerequisite
-            .payment_executions
-            .values()
-            .filter(|execution| execution.source == address || execution.destination == address)
-            .count() as u64;
-        let reserved = record
-            .usage_count
-            .checked_add(in_flight)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(ExecutionError::PaymentAddressUsageOverflow(address))?;
-
-        if reserved > record.max_usage {
-            return Err(ExecutionError::PaymentAddressUsageExhausted(address));
-        }
-
-        Ok(())
     }
 
     fn require_payment_address_for_execution(
@@ -375,19 +321,4 @@ impl SecondState {
 
         Ok(())
     }
-}
-
-fn increment_usage(
-    working: &mut BusinessState,
-    address: PaymentAddress,
-) -> Result<(), ExecutionError> {
-    let record = working
-        .payment_addresses
-        .get_mut(&address)
-        .ok_or(ExecutionError::PaymentAddressUnavailable(address))?;
-    record.usage_count = record
-        .usage_count
-        .checked_add(1)
-        .ok_or(ExecutionError::PaymentAddressUsageOverflow(address))?;
-    Ok(())
 }

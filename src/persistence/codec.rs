@@ -203,9 +203,6 @@ fn encode_payload(
             PaymentAddressStatus::Retiring => 2,
             PaymentAddressStatus::Retired => 3,
         });
-        out.extend_from_slice(&record.usage_count.to_be_bytes());
-        out.extend_from_slice(&record.expires_at.to_be_bytes());
-        out.extend_from_slice(&record.max_usage.to_be_bytes());
     }
 
     push_len(&mut out, state.business.currencies.len())?;
@@ -288,7 +285,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     }
 
     let payment_address_count = decoder.read_len()?;
-    const PAYMENT_ADDRESS_ENCODED_SIZE: usize = 32 + 32 + 1 + 8 + 8 + 8;
+    const PAYMENT_ADDRESS_ENCODED_SIZE: usize = 32 + 32 + 1;
     if payment_address_count > decoder.remaining() / PAYMENT_ADDRESS_ENCODED_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
@@ -305,23 +302,8 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
             3 => PaymentAddressStatus::Retired,
             _ => return Err(PersistenceError::InvalidSnapshot),
         };
-        let usage_count = decoder.read_u64()?;
-        let expires_at = decoder.read_u64()?;
-        let max_usage = decoder.read_u64()?;
-        if usage_count > max_usage {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
         if payment_addresses
-            .insert(
-                address,
-                PaymentAddressRecord {
-                    account,
-                    status,
-                    usage_count,
-                    expires_at,
-                    max_usage,
-                },
-            )
+            .insert(address, PaymentAddressRecord { account, status })
             .is_some()
         {
             return Err(PersistenceError::InvalidSnapshot);
@@ -437,37 +419,11 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         }
     }
 
-    let mut in_flight_by_address = BTreeMap::<PaymentAddress, u64>::new();
-    for (claim_id, execution) in &payment_executions {
+    for claim_id in payment_executions.keys() {
         let binding = task_bindings
             .get(claim_id.task_id())
             .ok_or(PersistenceError::InvalidSnapshot)?;
         if binding.succeeded {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-
-        let source_count = in_flight_by_address.entry(execution.source).or_default();
-        *source_count = source_count
-            .checked_add(1)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-
-        if execution.destination != execution.source {
-            let destination_count = in_flight_by_address
-                .entry(execution.destination)
-                .or_default();
-            *destination_count = destination_count
-                .checked_add(1)
-                .ok_or(PersistenceError::InvalidSnapshot)?;
-        }
-    }
-
-    for (address, record) in &payment_addresses {
-        let in_flight = in_flight_by_address.get(address).copied().unwrap_or(0);
-        let reserved = record
-            .usage_count
-            .checked_add(in_flight)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        if reserved > record.max_usage {
             return Err(PersistenceError::InvalidSnapshot);
         }
     }

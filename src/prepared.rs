@@ -311,7 +311,7 @@ impl PreparedTaskBook {
         }
 
         let mut working = state.business.clone();
-        let operations = self.prepare_operations(state, task, now, &mut working)?;
+        let operations = self.prepare_operations(state, task, &mut working)?;
 
         Ok(BuildOutcome::Prepared(PreparedTask::new(
             task.task_id(),
@@ -326,7 +326,6 @@ impl PreparedTaskBook {
         &mut self,
         state: &mut SecondState,
         task: &VerifiedLegalTask,
-        now: u64,
         working: &mut BusinessState,
     ) -> Result<Vec<PreparedOperation>, PreparationError> {
         let mut prepared = Vec::with_capacity(task.operations().len());
@@ -358,7 +357,6 @@ impl PreparedTaskBook {
                         *source,
                         *destination,
                         *amount,
-                        now,
                         expires_at,
                     )?;
 

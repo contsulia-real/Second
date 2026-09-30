@@ -10,7 +10,6 @@ use crate::{
 #[derive(Clone)]
 struct OperationExecutionContext {
     claim_id: OperationClaimId,
-    now: u64,
     expires_at: u64,
 }
 
@@ -28,7 +27,7 @@ impl SecondState {
             return Err(ExecutionError::TaskExpired);
         }
 
-        self.establish_task_transfers(task, now)?;
+        self.establish_task_transfers(task)?;
 
         let mut working = self.business.clone();
         let mut prerequisite = self.prerequisite.clone();
@@ -42,7 +41,6 @@ impl SecondState {
                 operation,
                 OperationExecutionContext {
                     claim_id: OperationClaimId::new(task.task_id(), operation_index),
-                    now,
                     expires_at: task.expires_at(),
                 },
             )?;
@@ -71,7 +69,7 @@ impl SecondState {
             return Err(ExecutionError::TaskExpired.into());
         }
 
-        if let Err(error) = self.establish_task_transfers(task, now) {
+        if let Err(error) = self.establish_task_transfers(task) {
             claims.release_task(task.task_id());
             return Err(error.into());
         }
@@ -79,7 +77,7 @@ impl SecondState {
         let mut working = self.business.clone();
         let mut prerequisite = self.prerequisite.clone();
         let result =
-            self.execute_operations_with_claims(&mut working, &mut prerequisite, task, now, claims);
+            self.execute_operations_with_claims(&mut working, &mut prerequisite, task, claims);
 
         match result {
             Ok(()) => {
@@ -101,7 +99,6 @@ impl SecondState {
         working: &mut BusinessState,
         prerequisite: &mut crate::state::PrerequisiteState,
         task: &VerifiedLegalTask,
-        now: u64,
         claims: &mut CurrencyClaimBook,
     ) -> Result<(), ConcurrentExecutionError> {
         let mut operation_index = 0_u64;
@@ -114,7 +111,6 @@ impl SecondState {
                 operation,
                 OperationExecutionContext {
                     claim_id,
-                    now,
                     expires_at: task.expires_at(),
                 },
                 claims,
@@ -150,7 +146,6 @@ impl SecondState {
                     *source,
                     *destination,
                     *amount,
-                    context.now,
                     expires_at,
                 )?;
                 let currencies = claims.claim_transfer_in_business_state(
@@ -207,7 +202,6 @@ impl SecondState {
                     *source,
                     *destination,
                     *amount,
-                    context.now,
                     expires_at,
                 )?;
                 let candidates =
