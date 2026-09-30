@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::payment::EstablishedTransfer;
-use crate::prepared_plan::{PreparedOperation, PreparedTask};
+use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::validator_signer::FinalityScope;
 use crate::{
     AccountAddress, CurrencyAddress, PaymentAddress, PersistenceError, TaskId, ValidatorId,
@@ -21,6 +21,11 @@ pub(super) fn encode_local_state(
         push_task_id(out, &prepared.task_id);
         out.extend_from_slice(&prepared.request_digest);
         out.extend_from_slice(&prepared.validator_set_version.to_be_bytes());
+        out.push(match prepared.phase {
+            PreparedTaskPhase::Prepared => 1,
+            PreparedTaskPhase::Voting => 2,
+            PreparedTaskPhase::Finalized => 3,
+        });
 
         push_len(out, prepared.operations.len())?;
         for operation in &prepared.operations {
@@ -42,7 +47,7 @@ pub(super) fn decode_local_state(
     decoder: &mut Decoder<'_>,
 ) -> Result<(BTreeMap<TaskId, PreparedTask>, VoteLocks), PersistenceError> {
     let task_count = decoder.read_len()?;
-    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 8;
+    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 1 + 8;
     if task_count > decoder.remaining() / MIN_PREPARED_TASK_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
@@ -52,6 +57,12 @@ pub(super) fn decode_local_state(
         let task_id = decoder.read_task_id()?;
         let request_digest = decoder.read_array_32()?;
         let validator_set_version = decoder.read_u64()?;
+        let phase = match decoder.read_u8()? {
+            1 => PreparedTaskPhase::Prepared,
+            2 => PreparedTaskPhase::Voting,
+            3 => PreparedTaskPhase::Finalized,
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
         let operation_count = decoder.read_len()?;
         const MIN_PREPARED_OPERATION_SIZE: usize = 1 + 8;
         if operation_count > decoder.remaining() / MIN_PREPARED_OPERATION_SIZE {
@@ -66,7 +77,13 @@ pub(super) fn decode_local_state(
         if prepared_tasks
             .insert(
                 task_id.clone(),
-                PreparedTask::new(task_id, request_digest, validator_set_version, operations),
+                PreparedTask::from_persisted(
+                    task_id,
+                    request_digest,
+                    validator_set_version,
+                    phase,
+                    operations,
+                ),
             )
             .is_some()
         {

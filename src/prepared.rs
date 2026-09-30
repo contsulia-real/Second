@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::SigningKey;
 
-use crate::prepared_plan::{PreparedOperation, PreparedTask};
+use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::BusinessState;
 use crate::{
     CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyClaimBook, ExecutionError, ExecutionOutcome,
@@ -34,6 +34,7 @@ pub enum PreparationError {
     },
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
+    CancellationClosed(TaskId),
     OperationIndexOverflow,
     LengthOverflow,
 }
@@ -173,6 +174,7 @@ impl PreparedTaskBook {
         }
 
         certificate.verify(validator_set)?;
+        self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Finalized)?;
 
         let mut candidate = state.clone();
         let outcome = self.commit_inner(&mut candidate, &prepared)?;
@@ -228,13 +230,15 @@ impl PreparedTaskBook {
     }
 
     pub fn sign_prepared_vote(
-        &self,
+        &mut self,
         task_id: TaskId,
         validator_id: ValidatorId,
         signing_key: &SigningKey,
         validator_set: &ValidatorSet,
     ) -> Result<ValidatorVote, PreparationError> {
         let statement = self.prepared_finality_statement(task_id.clone(), validator_set)?;
+        self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Voting)?;
+
         let signer = ValidatorSigner::new(validator_id, signing_key.clone(), self.store.clone());
         signer
             .sign_prepared_task(task_id, &statement, validator_set)
@@ -242,8 +246,13 @@ impl PreparedTaskBook {
     }
 
     pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
-        if !self.tasks.contains_key(&task_id) {
-            return Err(PreparationError::NotPrepared(task_id));
+        let prepared = self
+            .tasks
+            .get(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
+
+        if prepared.phase != PreparedTaskPhase::Prepared {
+            return Err(PreparationError::CancellationClosed(task_id));
         }
 
         self.remove_prepared_durably(task_id)
@@ -259,6 +268,31 @@ impl PreparedTaskBook {
 
     pub fn is_prepared(&self, task_id: TaskId) -> bool {
         self.tasks.contains_key(&task_id)
+    }
+
+    fn advance_phase_durably(
+        &mut self,
+        task_id: TaskId,
+        phase: PreparedTaskPhase,
+    ) -> Result<(), PreparationError> {
+        let current = self
+            .tasks
+            .get(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
+
+        if phase <= current.phase {
+            return Ok(());
+        }
+
+        let mut updated = self.tasks.clone();
+        updated
+            .get_mut(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id.clone()))?
+            .advance_phase(phase);
+
+        self.store.replace_prepared_tasks(&updated)?;
+        self.tasks = updated;
+        Ok(())
     }
 
     fn remove_prepared_durably(&mut self, task_id: TaskId) -> Result<(), PreparationError> {

@@ -96,11 +96,19 @@ impl PreparedOperation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum PreparedTaskPhase {
+    Prepared,
+    Voting,
+    Finalized,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedTask {
     pub(crate) task_id: TaskId,
     pub(crate) request_digest: [u8; 32],
     pub(crate) validator_set_version: u64,
+    pub(crate) phase: PreparedTaskPhase,
     pub(crate) operations: Vec<PreparedOperation>,
 }
 
@@ -115,8 +123,34 @@ impl PreparedTask {
             task_id,
             request_digest,
             validator_set_version,
+            phase: PreparedTaskPhase::Prepared,
             operations,
         }
+    }
+
+    pub(crate) fn from_persisted(
+        task_id: TaskId,
+        request_digest: [u8; 32],
+        validator_set_version: u64,
+        phase: PreparedTaskPhase,
+        operations: Vec<PreparedOperation>,
+    ) -> Self {
+        Self {
+            task_id,
+            request_digest,
+            validator_set_version,
+            phase,
+            operations,
+        }
+    }
+
+    pub(crate) fn advance_phase(&mut self, phase: PreparedTaskPhase) -> bool {
+        if phase <= self.phase {
+            return false;
+        }
+
+        self.phase = phase;
+        true
     }
 
     pub(crate) fn plan_digest(&self) -> Result<[u8; 32], PreparationError> {

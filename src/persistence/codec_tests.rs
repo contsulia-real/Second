@@ -71,8 +71,16 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
         ),
     )]);
 
+    let vote_locks = BTreeMap::new();
+
     assert_eq!(
-        validate_prepared_snapshot_links(&bindings, &payment_addresses, &executions, &prepared),
+        validate_prepared_snapshot_links(
+            &bindings,
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &vote_locks,
+        ),
         Ok(())
     );
 
@@ -89,6 +97,7 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             &payment_addresses,
             &executions,
             &prepared,
+            &vote_locks,
         ),
         Err(PersistenceError::InvalidSnapshot)
     );
@@ -101,6 +110,7 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             &payment_addresses,
             &wrong_execution,
             &prepared,
+            &vote_locks,
         ),
         Err(PersistenceError::InvalidSnapshot)
     );
@@ -108,7 +118,13 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let mut wrong_addresses = payment_addresses;
     wrong_addresses.get_mut(&source).unwrap().account = AccountAddress::from_bytes([9; 32]);
     assert_eq!(
-        validate_prepared_snapshot_links(&bindings, &wrong_addresses, &executions, &prepared),
+        validate_prepared_snapshot_links(
+            &bindings,
+            &wrong_addresses,
+            &executions,
+            &prepared,
+            &vote_locks,
+        ),
         Err(PersistenceError::InvalidSnapshot)
     );
 }

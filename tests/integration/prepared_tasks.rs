@@ -281,12 +281,20 @@ fn valid_finality_apply_failure_keeps_prepared_plan_recoverable() {
     assert_eq!(prepared.claimed_currency_count(), 1);
     assert_eq!(stale_state.balance(alice), 1);
     assert_eq!(stale_state.balance(bob), 0);
+    assert_eq!(
+        prepared.cancel(task.task_id()),
+        Err(PreparationError::CancellationClosed(task.task_id()))
+    );
 
     drop(prepared);
 
-    let recovered = PreparedTaskBook::new(store.clone()).unwrap();
+    let mut recovered = PreparedTaskBook::new(store.clone()).unwrap();
     assert!(recovered.is_prepared(task.task_id()));
     assert_eq!(recovered.claimed_currency_count(), 1);
+    assert_eq!(
+        recovered.cancel(task.task_id()),
+        Err(PreparationError::CancellationClosed(task.task_id()))
+    );
 
     store.remove_files().unwrap();
 }

@@ -3,8 +3,8 @@ use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation,
-    PreparationError, PreparedTaskBook, SecondState, StateStore, ValidatorCredential, ValidatorId,
-    ValidatorSet, ValidatorSigner, ValidatorSigningError,
+    PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState, StateStore,
+    ValidatorCredential, ValidatorId, ValidatorSet, ValidatorSigner, ValidatorSigningError,
 };
 use support::{key, payment_address, register_payment_addresses, temp_base, verified_task};
 
@@ -25,9 +25,9 @@ fn validators() -> ValidatorSet {
 }
 
 #[test]
-fn validator_can_repeat_the_same_vote_but_cannot_sign_a_reprepared_plan() {
+fn voting_task_cannot_be_cancelled_and_phase_survives_restart() {
     let alice = support::account(1);
-    let store = StateStore::new(temp_base("vote-lock-never-change"));
+    let store = StateStore::new(temp_base("vote-lock-never-cancel"));
     let set = validators();
     let mut state = SecondState::genesis([alice], 1);
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
@@ -40,7 +40,7 @@ fn validator_can_repeat_the_same_vote_but_cannot_sign_a_reprepared_plan() {
     );
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
-    let first_digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
+    let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
     let first_vote = prepared
         .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1), &set)
         .unwrap();
@@ -53,23 +53,20 @@ fn validator_can_repeat_the_same_vote_but_cannot_sign_a_reprepared_plan() {
         ValidatorSigner::new(ValidatorId::new(1), key(1), store.clone())
             .prepared_task_lock(task.task_id())
             .unwrap(),
-        Some(first_digest)
+        Some(digest)
+    );
+    assert_eq!(
+        prepared.cancel(task.task_id()),
+        Err(PreparationError::CancellationClosed(task.task_id()))
     );
 
-    prepared.cancel(task.task_id()).unwrap();
-    prepared.prepare(&mut state, &task, 2, &set).unwrap();
-    let second_digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
-    assert_ne!(first_digest, second_digest);
+    drop(prepared);
 
+    let mut recovered = PreparedTaskBook::new(store.clone()).unwrap();
+    assert!(recovered.is_prepared(task.task_id()));
     assert_eq!(
-        prepared.sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1), &set),
-        Err(PreparationError::Signing(
-            ValidatorSigningError::VoteLocked {
-                validator_id: ValidatorId::new(1),
-                locked_digest: first_digest,
-                attempted_digest: second_digest,
-            }
-        ))
+        recovered.cancel(task.task_id()),
+        Err(PreparationError::CancellationClosed(task.task_id()))
     );
 
     store.remove_files().unwrap();
@@ -116,7 +113,7 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
     }
 
     let restored = store.load().unwrap().unwrap();
-    let prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
 
     assert!(prepared.is_prepared(task.task_id()));
     assert_eq!(
@@ -208,6 +205,41 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
             .unwrap(),
         Some(digest)
     );
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() {
+    let store = StateStore::new(temp_base("checkpoint-vote-lock"));
+    let set = validators();
+    let validator_id = ValidatorId::new(1);
+    let first_state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    let second_state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    store.save(&first_state, &set).unwrap();
+    let first = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        first_state.public_currency_summary(),
+    );
+    let conflicting = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        second_state.public_currency_summary(),
+    );
+
+    ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_public_checkpoint(&first, &set)
+        .unwrap();
+
+    let recovered = ValidatorSigner::new(validator_id, key(1), store.clone());
+    assert!(matches!(
+        recovered.sign_public_checkpoint(&conflicting, &set),
+        Err(ValidatorSigningError::VoteLocked {
+            validator_id: locked_validator,
+            ..
+        }) if locked_validator == validator_id
+    ));
 
     store.remove_files().unwrap();
 }

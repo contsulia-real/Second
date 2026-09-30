@@ -629,6 +629,24 @@ commit
 
 Genesis 本身的初始账户、地址起点和 Reserve 初始化不属于 LegalTask 执行，不要求经过 Finality。
 
+PreparedTask 的生命周期固定为：
+
+~~~text
+Prepared ──cancel──> Cancelled
+
+Prepared
+  ↓ first vote path opened
+Voting
+  ↓ valid FinalityCertificate verified
+Finalized
+  ↓ successful commit
+Committed
+~~~
+
+只有 `Prepared` phase 允许 cancel。第一次通过 `sign_prepared_vote()` 打开投票路径时，必须先把 `Prepared → Voting` 持久化，再尝试产生 Validator vote；该转换不可逆。`commit()` 验证到有效 FinalityCertificate 后，必须先把 phase 持久化为 `Finalized`，再尝试 apply，因此即使本地 apply 暂时失败，任务也不能再 cancel。`Voting` / `Finalized` 都必须跨重启恢复。
+
+phase 是本地 lifecycle / recovery 元数据，不属于 prepared plan 本身，也不得进入 plan digest；否则 `Prepared → Voting` 会改变 Validator 已经要签名的 finality subject。
+
 ### 12.2 Prepared plan
 
 Prepared plan digest 绑定：
@@ -642,7 +660,7 @@ Prepared plan digest 绑定：
 
 重启后必须恢复**同一份 prepared plan**，不能重新选币或重新分配 identity 再制造一份新计划。
 
-### 12.2 Finality subject
+### 12.3 Finality subject
 
 Validator 对通用 FinalityStatement 投票：
 
@@ -1117,7 +1135,6 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 明确 PreparedTask cancellation 与 finality 的分界：当 validator votes 已经可能存在于外部时，本地节点无法仅凭自身状态判断是否已经形成 QC，因此不能擅自把“何时仍允许 cancel”固化为协议规则；
 - 在现有长期 node runtime 上继续完成 peer 管理与连接/同步资源预算；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；

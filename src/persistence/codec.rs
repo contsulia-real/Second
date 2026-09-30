@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
-use crate::prepared_plan::{PreparedOperation, PreparedTask};
+use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
 use crate::validator_signer::FinalityScope;
 use crate::{
@@ -481,6 +481,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         &payment_addresses,
         &payment_executions,
         &prepared_tasks,
+        &validator_vote_locks,
     )?;
 
     decoder.finish()?;
@@ -515,6 +516,7 @@ pub(super) fn validate_prepared_snapshot_links(
     payment_addresses: &BTreeMap<PaymentAddress, PaymentAddressRecord>,
     payment_executions: &BTreeMap<OperationClaimId, PaymentExecution>,
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
 ) -> Result<(), PersistenceError> {
     for (task_id, prepared) in prepared_tasks {
         let binding = task_bindings
@@ -558,6 +560,19 @@ pub(super) fn validate_prepared_snapshot_links(
             .filter(|claim_id| claim_id.task_id() == task_id)
             .any(|claim_id| !expected_transfer_claims.contains(claim_id))
         {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    for (_, scope) in validator_vote_locks.keys() {
+        let FinalityScope::PreparedTask(task_id) = scope else {
+            continue;
+        };
+        let Some(prepared) = prepared_tasks.get(task_id) else {
+            continue;
+        };
+
+        if prepared.phase == PreparedTaskPhase::Prepared {
             return Err(PersistenceError::InvalidSnapshot);
         }
     }
