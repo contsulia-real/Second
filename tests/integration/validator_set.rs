@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{ValidatorCredential, ValidatorId, ValidatorSet};
 use support::key;

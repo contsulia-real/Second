@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError, ExecutionOutcome,

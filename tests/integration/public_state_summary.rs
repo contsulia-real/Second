@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{Operation, SecondState};
 use support::{payment_address, register_payment_addresses, verified_task};

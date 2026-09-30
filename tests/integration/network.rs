@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     MAX_NETWORK_FRAME_SIZE, NetworkError, NetworkMessage, NodeId, client_ping,

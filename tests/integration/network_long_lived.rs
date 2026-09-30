@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     CurrencyAddress, NodeId, SecondState, client_ping, client_public_currency_page,

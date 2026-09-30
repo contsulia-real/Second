@@ -1,6 +1,6 @@
 use std::fs;
 
-mod support;
+use crate::support;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, Operation, PersistedNodeState, PublicCurrencyCheckpoint,

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,

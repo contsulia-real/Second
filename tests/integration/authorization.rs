@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     AuthorizationError, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,

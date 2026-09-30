@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-mod support;
+use crate::support;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation, SecondState,

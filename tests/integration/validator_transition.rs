@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,

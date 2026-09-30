@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
-mod support;
+use crate::support;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, Operation, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,

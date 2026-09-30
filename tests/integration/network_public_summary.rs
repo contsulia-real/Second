@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     NodeId, SecondState, client_public_currency_summary, serve_public_currency_connection,

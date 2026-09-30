@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use second::{
     SecondState, StateStore, ValidatorCredential, ValidatorId, ValidatorRegistry,
