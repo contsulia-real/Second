@@ -9,6 +9,45 @@ use crate::{
     ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
+pub(super) fn resolve_validator_set<'a>(
+    active_validator_set: &'a ValidatorSet,
+    retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
+    version: u64,
+) -> Option<&'a ValidatorSet> {
+    if active_validator_set.version() == version {
+        Some(active_validator_set)
+    } else {
+        retained_validator_sets.get(&version)
+    }
+}
+
+pub(super) fn validate_active_prepared_vote_lock_membership(
+    active_validator_set: &ValidatorSet,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+) -> Result<(), PersistenceError> {
+    for (validator_id, scope) in validator_vote_locks.keys() {
+        let FinalityScope::PreparedTask(task_id) = scope else {
+            continue;
+        };
+        let Some(prepared) = prepared_tasks.get(task_id) else {
+            continue;
+        };
+        let validator_set = resolve_validator_set(
+            active_validator_set,
+            retained_validator_sets,
+            prepared.validator_set_version,
+        )
+        .ok_or(PersistenceError::InvalidSnapshot)?;
+        if !validator_set.contains(*validator_id) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn validate_retained_validator_sets(
     active_validator_set: &ValidatorSet,
     retained_validator_sets: &BTreeMap<u64, ValidatorSet>,

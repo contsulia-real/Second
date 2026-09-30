@@ -15,8 +15,9 @@ use crate::{
 
 use super::local_codec::{decode_local_state, encode_local_state};
 use super::snapshot_validation::{
-    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
-    validate_retained_validator_sets, validate_vote_lock_registry,
+    validate_active_prepared_vote_lock_membership, validate_prepared_plans_against_state,
+    validate_prepared_snapshot_links, validate_retained_validator_sets,
+    validate_vote_lock_registry,
 };
 use super::validator_codec::{
     decode_validator_registry, decode_validator_set, encode_validator_registry,
@@ -76,6 +77,12 @@ pub(super) fn encode_snapshot(
         contents.prepared_tasks,
     )?;
     validate_vote_lock_registry(contents.validator_registry, contents.validator_vote_locks)?;
+    validate_active_prepared_vote_lock_membership(
+        contents.validator_set,
+        contents.retained_validator_sets,
+        contents.prepared_tasks,
+        contents.validator_vote_locks,
+    )?;
     validate_prepared_snapshot_links(
         &contents.state.protocol.task_bindings,
         &contents.state.business.payment_addresses,
@@ -495,6 +502,12 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         },
     };
     validate_vote_lock_registry(&validator_registry, &validator_vote_locks)?;
+    validate_active_prepared_vote_lock_membership(
+        &validator_set,
+        &retained_validator_sets,
+        &prepared_tasks,
+        &validator_vote_locks,
+    )?;
     validate_prepared_snapshot_links(
         &state.protocol.task_bindings,
         &state.business.payment_addresses,

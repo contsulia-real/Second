@@ -15,6 +15,7 @@ use super::codec::{SnapshotContents, encode_snapshot};
 use super::slot::{
     load_latest, lock_store_file, remove_slots, shared_path_lock, slot_path, write_slots,
 };
+use super::snapshot_validation::resolve_validator_set;
 use super::{PersistedNodeState, VoteLockStatus};
 
 struct StateStoreGuard<'a> {
@@ -168,9 +169,13 @@ impl StateStore {
             return Err(PersistenceError::StalePreparedTasks);
         }
 
-        resolve_validator_set(&snapshot, prepared.validator_set_version)
-            .cloned()
-            .ok_or(PersistenceError::InvalidSnapshot)
+        resolve_validator_set(
+            &snapshot.validator_set,
+            &snapshot.retained_validator_sets,
+            prepared.validator_set_version,
+        )
+        .cloned()
+        .ok_or(PersistenceError::InvalidSnapshot)
     }
 
     pub fn attach_checkpoint_proof(
@@ -530,14 +535,6 @@ fn retained_sets_for_prepared(
     Ok(retained)
 }
 
-fn resolve_validator_set(snapshot: &PersistedNodeState, version: u64) -> Option<&ValidatorSet> {
-    if snapshot.validator_set.version() == version {
-        Some(&snapshot.validator_set)
-    } else {
-        snapshot.retained_validator_sets.get(&version)
-    }
-}
-
 fn validate_vote_validator_set(
     snapshot: &PersistedNodeState,
     scope: &FinalityScope,
@@ -549,8 +546,12 @@ fn validate_vote_validator_set(
                 .prepared_tasks
                 .get(task_id)
                 .ok_or(PersistenceError::StalePreparedTasks)?;
-            let expected = resolve_validator_set(snapshot, prepared.validator_set_version)
-                .ok_or(PersistenceError::InvalidSnapshot)?;
+            let expected = resolve_validator_set(
+                &snapshot.validator_set,
+                &snapshot.retained_validator_sets,
+                prepared.validator_set_version,
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?;
             if expected != validator_set {
                 return Err(PersistenceError::ValidatorRegistryMismatch);
             }

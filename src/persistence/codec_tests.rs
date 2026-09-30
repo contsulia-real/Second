@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::snapshot_validation::{
-    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
-    validate_vote_lock_registry,
+    validate_active_prepared_vote_lock_membership, validate_prepared_plans_against_state,
+    validate_prepared_snapshot_links, validate_vote_lock_registry,
 };
 use crate::payment::{EstablishedTransfer, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
@@ -384,6 +384,55 @@ fn vote_locks_require_a_validator_from_registry_history() {
     )]);
     assert_eq!(
         validate_vote_lock_registry(&registry, &unknown),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+}
+
+#[test]
+fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
+    let identity = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let consensus = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let recovery = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
+    let credential = ValidatorCredential::new(
+        ValidatorId::new(1),
+        identity.verifying_key().to_bytes(),
+        consensus.verifying_key().to_bytes(),
+        recovery.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let set = ValidatorSet::new(1, [credential]).unwrap();
+    let task_id = TaskId::parse("vote-lock-membership").unwrap();
+    let mut prepared_task = PreparedTask::new(
+        task_id.clone(),
+        [7; 32],
+        1,
+        vec![PreparedOperation::Issue {
+            account: AccountAddress::from_bytes([3; 32]),
+            addresses: vec![CurrencyAddress::new(1)],
+        }],
+    );
+    prepared_task.advance_phase(PreparedTaskPhase::Voting);
+    let digest = prepared_task.plan_digest().unwrap();
+    let prepared = BTreeMap::from([(task_id.clone(), prepared_task)]);
+
+    let valid = BTreeMap::from([(
+        (
+            ValidatorId::new(1),
+            FinalityScope::PreparedTask(task_id.clone()),
+        ),
+        digest,
+    )]);
+    assert_eq!(
+        validate_active_prepared_vote_lock_membership(&set, &BTreeMap::new(), &prepared, &valid,),
+        Ok(())
+    );
+
+    let invalid = BTreeMap::from([(
+        (ValidatorId::new(2), FinalityScope::PreparedTask(task_id)),
+        digest,
+    )]);
+    assert_eq!(
+        validate_active_prepared_vote_lock_membership(&set, &BTreeMap::new(), &prepared, &invalid,),
         Err(PersistenceError::InvalidSnapshot)
     );
 }
