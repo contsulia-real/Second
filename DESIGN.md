@@ -1117,7 +1117,6 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 继续审核 TaskId first-request binding 的内部 request_digest 是否完全等价于“第一份 verified signed request”；
 - 继续审核 prepare / finality / commit 在所有失败路径上的 protocol/business 边界；
 - 在现有长期 node runtime 上继续完成 peer 管理与连接/同步资源预算；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
