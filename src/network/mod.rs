@@ -1,6 +1,8 @@
 mod codec;
 mod identity;
 mod peer_manager;
+mod peer_record;
+mod peer_store;
 mod quic;
 mod session;
 
@@ -15,11 +17,16 @@ use crate::{
 pub use codec::{decode_network_message, encode_network_message};
 pub use identity::QuicTransportIdentity;
 pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
+pub(crate) use peer_record::validate_peer_limit;
+pub use peer_record::{MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, PeerRecord};
+pub(crate) use peer_store::PeerStore;
 pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
+pub(crate) use session::serve_public_network_connection;
 pub use session::{
-    client_ping, client_public_currency_checkpoint_proof, client_public_currency_page,
-    client_public_currency_summary, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view, serve_ping_session, serve_public_currency_connection,
+    client_peer_records, client_ping, client_public_currency_checkpoint_proof,
+    client_public_currency_page, client_public_currency_summary,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    serve_ping_session, serve_public_currency_connection,
 };
 
 pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 1;
@@ -109,6 +116,12 @@ pub enum NetworkMessage {
         proof: PublicCurrencyCheckpointProof,
     },
     NoPublicCurrencyCheckpoint,
+    GetPeers {
+        limit: u16,
+    },
+    Peers {
+        records: Vec<PeerRecord>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +154,17 @@ pub enum NetworkError {
     InvalidCurrencyRole(u8),
     InvalidBoolean(u8),
     InvalidCursorFlag(u8),
+    InvalidPeerRecord,
+    InvalidPeerAddressFamily(u8),
+    InvalidPeerLimit {
+        requested: u16,
+        maximum: u16,
+    },
+    TooManyPeerRecords {
+        announced: usize,
+        maximum: usize,
+    },
+    PeerStore(String),
     InvalidPublicCurrencyLimit {
         requested: u16,
         maximum: u16,

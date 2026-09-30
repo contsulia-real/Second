@@ -37,15 +37,15 @@ pub use ids::{
     TaskId, TaskIdParseError, ValidatorId,
 };
 pub use network::{
-    CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE,
-    NetworkError, NetworkMessage, NodeId, PublicCurrencyPage, QuicClient, QuicPeer,
-    QuicRequestStream, QuicServer, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
-    RemotePublicCurrencyPage, RemotePublicCurrencySummary, RemotePublicCurrencyView,
-    SECOND_QUIC_SERVER_NAME, client_ping, client_public_currency_checkpoint_proof,
-    client_public_currency_page, client_public_currency_summary,
-    client_sync_certified_public_currency_view, client_sync_public_currency_view,
-    decode_network_message, encode_network_message, serve_ping_session,
-    serve_public_currency_connection,
+    CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE,
+    MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord,
+    PublicCurrencyPage, QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
+    RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
+    RemotePublicCurrencyView, SECOND_QUIC_SERVER_NAME, client_peer_records, client_ping,
+    client_public_currency_checkpoint_proof, client_public_currency_page,
+    client_public_currency_summary, client_sync_certified_public_currency_view,
+    client_sync_public_currency_view, decode_network_message, encode_network_message,
+    serve_ping_session, serve_public_currency_connection,
 };
 pub use payment::PaymentAddressStatus;
 pub use persistence::{PersistedNodeState, StateStore};

@@ -14,6 +14,7 @@ mod network_long_lived;
 mod network_public_state;
 mod network_public_summary;
 mod payment_address;
+mod peer_discovery;
 mod peer_manager;
 mod persistence;
 mod prepared_tasks;

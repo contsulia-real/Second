@@ -874,15 +874,19 @@ transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应
 
 当两个长期节点同时互拨形成两条连接时，peer manager 使用 NodeId 定义确定性仲裁：较小 NodeId 的节点保留 outbound，较大 NodeId 的节点保留对应的 inbound；反向连接被关闭。该规则只在同一 NodeId 已出现重复 active connection 时参与选择，不会因为连接方向“非首选”而拒绝一条原本唯一的连接。被替换连接的旧 lease 即使稍后释放，也不能删除新连接的 registry entry。
 
-`NodeRuntime::dial` 复用节点自身持久 transport identity 发起 QUIC + authenticated Hello，并要求调用方同时提供目标 address、expected NodeId 与当前 self-signed server certificate pin；TLS endpoint 与 Hello NodeId 都必须匹配预期。outbound connection 注册后与 inbound 一样运行 public Currency serving session，因此保留下来的单条 QUIC connection 可由双方各自发起 public request。当前未引入自动 peer discovery、bootstrap/DHT 或长期 peer 选择策略。
+`PeerRecord` 是当前唯一的 outbound reachability 记录，内容只有 `NodeId + SocketAddr + self-signed server certificate pin`；它只回答“如何尝试连接这个 transport identity”，不携带 Validator role、ValidatorSet membership、共识权重或其他授权语义。`NodeRuntime::dial(&PeerRecord)` 复用节点自身持久 transport identity 发起 QUIC + authenticated Hello，要求 TLS endpoint 的 certificate pin 与 Hello 的 expected NodeId 都匹配；只有实际完成该认证的 outbound 目标才会被提升为本地已验证 peer record。outbound connection 注册后与 inbound 一样运行 public network session，因此保留下来的单条 QUIC connection 可由双方各自发起 public request。
 
-节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+节点维护独立的本地 `PeerStore` sidecar `<snapshot-base>.peers`，当前最多保存 32 个最近成功完成 authenticated outbound dial 的 `PeerRecord`。第三方通过 gossip 返回的 record 在真正 dial 成功前只是未验证 candidate，不会因为被某个 peer 宣称就进入已验证集合；认证失败、自连接或 NodeId/certificate endpoint 不匹配都不会获得持久化资格。PeerStore 是可丢弃的本地连接缓存，不属于 Second state snapshot、ValidatorRegistry、finality 或任何共识 authority。
 
-当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
+`GetPeers { limit }` 当前上限为 32，节点只从自己已验证的 PeerStore 返回记录，并排除自己和当前请求方。`NodeRuntime::bootstrap` 先尝试本地持久 PeerStore，再把调用方提供的 bootstrap records 作为 fallback；连接任一 peer 成功后可继续请求更多 candidate，并逐个通过真实 QUIC/TLS + Hello authentication 后再提升和持久化。不同 endpoint/certificate 的同一 NodeId candidate 可以分别尝试，避免一个过期或恶意记录阻断后续正确 endpoint。当前没有 DHT、DNS seed、NAT traversal，也没有冻结长期自动重连/peer quality 策略。
+
+节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public network session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+
+当前节点网络面暴露 Ping/Pong、public Currency 查询/同步以及有界 `GetPeers/Peers` reachability discovery；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
 当前 public Node admission 是开放的：任何能够完成 authenticated Hello、证明持有其 NodeId 对应 transport private key 的 peer，都可以使用上述公开只读网络能力，前提是通过现有 connection / stream / sync resource guardrail 与 peer 去重规则。public admission 不维护 allowlist，也不要求 ValidatorCredential，因为这些数据本来就是公开状态。
 
-这不意味着 Second 的 Validator 层是 permissionless。transport-authenticated public peer 只获得公开网络访问权；Validator vote、ValidatorSet membership、未来任何私有 LegalTask 通道或其他 privileged protocol 都必须使用各自独立的授权规则。后续 peer trust / discovery 主要决定节点主动连接谁、如何找到长期 peer，以及未来 privileged peer role 如何绑定，不反向改变当前 public read service 的开放 admission。
+这不意味着 Second 的 Validator 层是 permissionless。transport-authenticated public peer 只获得公开网络访问权；Validator vote、ValidatorSet membership、未来任何私有 LegalTask 通道或其他 privileged protocol 都必须使用各自独立的授权规则。peer discovery 只传播 reachability candidate，不建立任何 authority；未来 privileged peer role 若需要与 transport endpoint 绑定，必须另外定义可验证 binding，不反向改变当前 public read service 的开放 admission。
 
 每个 stream 内仍使用统一的自定义二进制 frame：
 
@@ -900,7 +904,8 @@ payload
 - 公共 Currency 分页；
 - 公共 summary；
 - public checkpoint proof；
-- certified public state sync。
+- certified public state sync；
+- 有界 `PeerRecord` 查询与 bootstrap peer discovery。
 
 full public sync 的本地 materialization budget 当前为 64 MiB，仅约束客户端为 `Vec<PublicCurrencyState>` 物化整份公开状态所允许占用的元素存储空间。允许的 state 数量通过当前 `size_of::<PublicCurrencyState>()` 动态换算，而不是把 Currency 数量写成协议上限；远端 summary 声明的 `current_supply` 超出预算时，客户端必须在请求任何分页数据之前拒绝。实际 Vec 使用 `try_reserve_exact`，无法满足本地分配时返回错误而不是继续无界增长。该预算同样是本地资源保护策略，不限制 Second 协议本身允许存在多少 Currency。
 
@@ -1188,7 +1193,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 authenticated inbound/outbound peer manager 基础上继续决定自动 peer discovery、bootstrap 与长期 outbound target selection；当前显式 dial 已要求 address + expected NodeId + certificate pin，但 transport identity 只证明 key ownership，不等于 Validator authority；
+- 在现有 authenticated bootstrap + bounded peer discovery 基础上继续决定生产环境 bootstrap record 的配置/发布来源，以及长期 outbound maintenance、retry/backoff、地址更新和 target selection；当前不引入 DHT/DNS seed/NAT traversal，transport identity 仍只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；

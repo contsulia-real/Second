@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,10 +13,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use second::{
     AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
     ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask,
-    LegalTaskPayload, Operation, PaymentAddress, PreparationError, PreparationOutcome,
-    PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore,
-    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
-    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
+    LegalTaskPayload, NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError,
+    PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity,
+    SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry,
+    ValidatorSet, ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
 };
 
 pub fn key(byte: u8) -> SigningKey {
@@ -288,6 +289,40 @@ pub fn quic_client(server_certificate: &[u8]) -> QuicClient {
     .unwrap()
 }
 
+pub fn node_runtime_fixture(prefix: &str) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
+    let base = temp_base(prefix);
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    store.initialize(&state, &validator_set(1, 1..=4)).unwrap();
+
+    let runtime = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
+    );
+    (runtime, store, base)
+}
+
+pub fn peer_record(runtime: &NodeRuntime) -> PeerRecord {
+    PeerRecord::new(
+        runtime.node_id(),
+        runtime.local_addr().unwrap(),
+        runtime.transport_certificate_der().to_vec(),
+    )
+    .unwrap()
+}
+
+pub fn spawn_node_runtime(runtime: &Arc<NodeRuntime>) -> tokio::task::JoinHandle<()> {
+    let runtime = Arc::clone(runtime);
+    tokio::spawn(async move {
+        let _ = runtime.run().await;
+    })
+}
+
+pub fn cleanup_node_runtime(store: StateStore, base: PathBuf) {
+    store.remove_files().unwrap();
+    remove_transport_identity(&base);
+    remove_optional_file(peer_store_path(&base), "peer store");
+}
+
 pub fn temp_base(prefix: &str) -> PathBuf {
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -309,6 +344,10 @@ pub fn transport_identity_path(base: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+pub fn peer_store_path(base: &Path) -> PathBuf {
+    append_suffix(base, ".peers")
+}
+
 pub fn remove_transport_identity(base: &Path) {
     let identity = transport_identity_path(base);
     for path in [
@@ -321,6 +360,14 @@ pub fn remove_transport_identity(base: &Path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => panic!("failed to remove transport identity artifact: {error}"),
         }
+    }
+}
+
+fn remove_optional_file(path: PathBuf, description: &str) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to remove {description} artifact: {error}"),
     }
 }
 

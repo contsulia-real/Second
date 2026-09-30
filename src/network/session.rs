@@ -7,9 +7,9 @@ use super::quic::QuicPeer;
 
 const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 use super::{
-    MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
+    MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord, PeerStore,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
-    RemotePublicCurrencyView, validate_public_currency_limit,
+    RemotePublicCurrencyView, validate_peer_limit, validate_public_currency_limit,
 };
 
 pub async fn client_ping(peer: &QuicPeer, nonce: u64) -> Result<NodeId, NetworkError> {
@@ -23,6 +23,25 @@ pub async fn client_ping(peer: &QuicPeer, nonce: u64) -> Result<NodeId, NetworkE
             expected: nonce,
             actual: response_nonce,
         }),
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
+pub async fn client_peer_records(
+    peer: &QuicPeer,
+    limit: u16,
+) -> Result<Vec<PeerRecord>, NetworkError> {
+    validate_peer_limit(limit)?;
+    match peer.exchange(&NetworkMessage::GetPeers { limit }).await? {
+        NetworkMessage::Peers { records } => {
+            if records.len() > usize::from(limit) {
+                return Err(NetworkError::TooManyPeerRecords {
+                    announced: records.len(),
+                    maximum: usize::from(limit),
+                });
+            }
+            Ok(records)
+        }
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
@@ -191,6 +210,33 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
+    serve_public_connection(peer, state, checkpoint_proof, None, None).await
+}
+
+pub(crate) async fn serve_public_network_connection(
+    peer: &QuicPeer,
+    state: &SecondState,
+    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    peer_store: &PeerStore,
+    local_node_id: NodeId,
+) -> Result<NodeId, NetworkError> {
+    serve_public_connection(
+        peer,
+        state,
+        checkpoint_proof,
+        Some(peer_store),
+        Some(local_node_id),
+    )
+    .await
+}
+
+async fn serve_public_connection(
+    peer: &QuicPeer,
+    state: &SecondState,
+    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    peer_store: Option<&PeerStore>,
+    local_node_id: Option<NodeId>,
+) -> Result<NodeId, NetworkError> {
     if checkpoint_proof
         .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
     {
@@ -214,6 +260,14 @@ pub async fn serve_public_currency_connection(
                 .cloned()
                 .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
                 .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
+            NetworkMessage::GetPeers { limit } => {
+                validate_peer_limit(*limit)?;
+                let store = peer_store.ok_or(NetworkError::UnexpectedMessage)?;
+                let local_node_id = local_node_id.ok_or(NetworkError::UnexpectedMessage)?;
+                NetworkMessage::Peers {
+                    records: store.recent(*limit, &[local_node_id, peer.remote_node_id()]),
+                }
+            }
             _ => return Err(NetworkError::UnexpectedMessage),
         };
 
