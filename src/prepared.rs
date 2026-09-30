@@ -176,8 +176,8 @@ impl PreparedTaskBook {
             .cloned()
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
 
-        let validator_set = self.store.validator_set_for_prepared_task(&task_id)?;
-        let expected_statement = self.prepared_finality_statement(task_id.clone())?;
+        let (expected_statement, validator_set) =
+            self.prepared_finality_context(task_id.clone())?;
         let actual_statement = certificate.statement();
 
         if actual_statement.subject_digest() != expected_statement.subject_digest() {
@@ -223,16 +223,30 @@ impl PreparedTaskBook {
         &self,
         task_id: TaskId,
     ) -> Result<FinalityStatement, PreparationError> {
+        self.prepared_finality_context(task_id)
+            .map(|(statement, _)| statement)
+    }
+
+    fn prepared_finality_context(
+        &self,
+        task_id: TaskId,
+    ) -> Result<(FinalityStatement, ValidatorSet), PreparationError> {
         let prepared = self
             .tasks
             .get(&task_id)
             .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
-        self.store.validator_set_for_prepared_task(&task_id)?;
+        let plan_digest = prepared.plan_digest()?;
+        let validator_set = self
+            .store
+            .validator_set_for_prepared_task(&task_id, plan_digest)?;
 
-        Ok(FinalityStatement::new(
-            CURRENT_PROTOCOL_VERSION,
-            prepared.validator_set_version,
-            prepared.plan_digest()?,
+        Ok((
+            FinalityStatement::new(
+                CURRENT_PROTOCOL_VERSION,
+                prepared.validator_set_version,
+                plan_digest,
+            ),
+            validator_set,
         ))
     }
 
@@ -242,8 +256,7 @@ impl PreparedTaskBook {
         validator_id: ValidatorId,
         signing_key: &SigningKey,
     ) -> Result<ValidatorVote, PreparationError> {
-        let validator_set = self.store.validator_set_for_prepared_task(&task_id)?;
-        let statement = self.prepared_finality_statement(task_id.clone())?;
+        let (statement, validator_set) = self.prepared_finality_context(task_id.clone())?;
         self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Voting)?;
 
         let signer = ValidatorSigner::new(validator_id, signing_key.clone(), self.store.clone());

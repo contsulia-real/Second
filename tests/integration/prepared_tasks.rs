@@ -366,6 +366,37 @@ fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
 }
 
 #[test]
+fn stale_book_cannot_publish_finality_statement_for_reprepared_plan() {
+    let alice = support::account(1);
+    let store = StateStore::new(temp_base("stale-finality-statement"));
+    let set = validators();
+    let mut state = SecondState::genesis([alice], 1);
+    let task = verified_task(
+        10,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+
+    let mut current = PreparedTaskBook::new(store.clone()).unwrap();
+    current.prepare(&mut state, &task, 1, &set).unwrap();
+    let stale = PreparedTaskBook::new(store.clone()).unwrap();
+
+    current.cancel(task.task_id()).unwrap();
+    current.prepare(&mut state, &task, 2, &set).unwrap();
+
+    assert_eq!(
+        stale.prepared_finality_statement(task.task_id()),
+        Err(PreparationError::Persistence(
+            PersistenceError::StalePreparedTasks
+        ))
+    );
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);

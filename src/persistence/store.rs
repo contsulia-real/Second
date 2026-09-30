@@ -154,12 +154,20 @@ impl StateStore {
     pub(crate) fn validator_set_for_prepared_task(
         &self,
         task_id: &TaskId,
+        expected_plan_digest: [u8; 32],
     ) -> Result<ValidatorSet, PersistenceError> {
         let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
         let prepared = snapshot
             .prepared_tasks
             .get(task_id)
             .ok_or(PersistenceError::StalePreparedTasks)?;
+        let durable_plan_digest = prepared
+            .plan_digest()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if durable_plan_digest != expected_plan_digest {
+            return Err(PersistenceError::StalePreparedTasks);
+        }
+
         resolve_validator_set(&snapshot, prepared.validator_set_version)
             .cloned()
             .ok_or(PersistenceError::InvalidSnapshot)
