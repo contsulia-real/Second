@@ -251,8 +251,12 @@ fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
             out.push(1);
             push_task_id(out, task_id);
         }
-        FinalityScope::PublicCheckpoint(epoch) => {
+        FinalityScope::PublicCheckpoint {
+            validator_set_version,
+            epoch,
+        } => {
             out.push(2);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
             out.extend_from_slice(&epoch.to_be_bytes());
         }
         FinalityScope::ValidatorSetTransition {
@@ -269,7 +273,10 @@ fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
 fn decode_scope(decoder: &mut Decoder<'_>) -> Result<FinalityScope, PersistenceError> {
     match decoder.read_u8()? {
         1 => Ok(FinalityScope::PreparedTask(decoder.read_task_id()?)),
-        2 => Ok(FinalityScope::PublicCheckpoint(decoder.read_u64()?)),
+        2 => Ok(FinalityScope::PublicCheckpoint {
+            validator_set_version: decoder.read_u64()?,
+            epoch: decoder.read_u64()?,
+        }),
         3 => Ok(FinalityScope::ValidatorSetTransition {
             current_validator_set_version: decoder.read_u64()?,
             activation_epoch: decoder.read_u64()?,

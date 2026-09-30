@@ -10,7 +10,10 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum FinalityScope {
     PreparedTask(TaskId),
-    PublicCheckpoint(u64),
+    PublicCheckpoint {
+        validator_set_version: u64,
+        epoch: u64,
+    },
     ValidatorSetTransition {
         current_validator_set_version: u64,
         activation_epoch: u64,
@@ -70,7 +73,10 @@ impl ValidatorSigner {
         self.sign_locked(
             &statement,
             validator_set,
-            FinalityScope::PublicCheckpoint(checkpoint.epoch()),
+            FinalityScope::PublicCheckpoint {
+                validator_set_version: validator_set.version(),
+                epoch: checkpoint.epoch(),
+            },
             |latest| {
                 if checkpoint.epoch() < latest.checkpoint_floor_epoch {
                     return Err(PersistenceError::StaleCheckpointEpoch {

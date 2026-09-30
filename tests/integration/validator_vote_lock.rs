@@ -357,6 +357,81 @@ fn public_checkpoint_signer_rejects_summary_that_is_not_the_persisted_state() {
 }
 
 #[test]
+fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
+    let store = StateStore::new(temp_base("checkpoint-vote-lock-set-version"));
+    let set_v7 = validators();
+    let validator_id = ValidatorId::new(1);
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], 1);
+    store.initialize(&state, &set_v7).unwrap();
+
+    let checkpoint_v7 = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        state.public_currency_summary(),
+    );
+    ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_public_checkpoint(&checkpoint_v7, &set_v7)
+        .unwrap();
+
+    let task = verified_task(
+        700,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    prepared.prepare(&mut state, &task, 1, &set_v7).unwrap();
+    let statement = prepared
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
+    let certificate = support::certificate_from_keys(
+        statement,
+        &set_v7,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key(id as u8))),
+    );
+    prepared
+        .commit(&mut state, task.task_id(), &certificate)
+        .unwrap();
+
+    let persisted = store.load().unwrap().unwrap();
+    let set_v8 = ValidatorSet::new(8, (1..=4).map(validator_credential)).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        20,
+        &set_v7,
+        &persisted.validator_registry,
+        set_v8.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let transition_statement = transition.finality_statement();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&transition_statement, ValidatorId::new(id), &key(id as u8)))
+        .collect();
+    let certified = CertifiedValidatorSetTransition::new(transition, votes, &set_v7).unwrap();
+    store
+        .activate_validator_set_transition(&certified, 21)
+        .unwrap();
+
+    let checkpoint_v8 = PublicCurrencyCheckpoint::new(
+        CURRENT_PROTOCOL_VERSION,
+        10,
+        state.public_currency_summary(),
+    );
+    ValidatorSigner::new(validator_id, key(1), store.clone())
+        .sign_public_checkpoint(&checkpoint_v8, &set_v8)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() {
     let store = StateStore::new(temp_base("checkpoint-vote-lock"));
     let set = validators();

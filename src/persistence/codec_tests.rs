@@ -361,13 +361,25 @@ fn vote_locks_require_a_validator_from_registry_history() {
     let registry = ValidatorRegistry::from_validator_set(&set).unwrap();
 
     let known = BTreeMap::from([(
-        (ValidatorId::new(1), FinalityScope::PublicCheckpoint(7)),
+        (
+            ValidatorId::new(1),
+            FinalityScope::PublicCheckpoint {
+                validator_set_version: 1,
+                epoch: 7,
+            },
+        ),
         [4; 32],
     )]);
     assert_eq!(validate_vote_lock_registry(&registry, &known), Ok(()));
 
     let unknown = BTreeMap::from([(
-        (ValidatorId::new(2), FinalityScope::PublicCheckpoint(7)),
+        (
+            ValidatorId::new(2),
+            FinalityScope::PublicCheckpoint {
+                validator_set_version: 1,
+                epoch: 7,
+            },
+        ),
         [4; 32],
     )]);
     assert_eq!(
