@@ -26,6 +26,16 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
         Operation::LeakRepair {
             leaked: vec![CurrencyAddress::new(11)],
         },
+        Operation::RegisterPaymentAddress {
+            address: payment(12),
+            account: account(12),
+        },
+        Operation::RetirePaymentAddress {
+            address: payment(13),
+        },
+        Operation::FinalizePaymentAddressRetirement {
+            address: payment(14),
+        },
     ];
     let payload = LegalTaskPayload::new(
         TaskId::parse("request_1").unwrap(),
@@ -58,6 +68,19 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
             {
                 "type": "leak_repair",
                 "currencies": [CurrencyAddress::new(11).to_string()]
+            },
+            {
+                "type": "register_payment_address",
+                "address": payment(12).to_string(),
+                "account": account(12).to_string()
+            },
+            {
+                "type": "retire_payment_address",
+                "address": payment(13).to_string()
+            },
+            {
+                "type": "finalize_payment_address_retirement",
+                "address": payment(14).to_string()
             }
         ],
         "signature": signed.signature_base64url()
