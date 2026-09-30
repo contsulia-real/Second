@@ -564,7 +564,7 @@ pub(super) fn validate_prepared_snapshot_links(
         }
     }
 
-    for (_, scope) in validator_vote_locks.keys() {
+    for ((_, scope), locked_digest) in validator_vote_locks {
         let FinalityScope::PreparedTask(task_id) = scope else {
             continue;
         };
@@ -573,6 +573,13 @@ pub(super) fn validate_prepared_snapshot_links(
         };
 
         if prepared.phase == PreparedTaskPhase::Prepared {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let expected_digest = prepared
+            .plan_digest()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if locked_digest != &expected_digest {
             return Err(PersistenceError::InvalidSnapshot);
         }
     }

@@ -4,10 +4,12 @@ use super::codec::validate_prepared_snapshot_links;
 use crate::payment::{
     EstablishedTransfer, PaymentAddressRecord, PaymentAddressStatus, PaymentExecution,
 };
-use crate::prepared_plan::{PreparedOperation, PreparedTask};
+use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
+use crate::validator_signer::FinalityScope;
 use crate::{
     AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError, TaskId,
+    ValidatorId,
 };
 
 #[test]
@@ -124,6 +126,67 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             &executions,
             &prepared,
             &vote_locks,
+        ),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+}
+
+#[test]
+fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
+    let task_id = TaskId::parse("vote-lock-plan").unwrap();
+    let request_digest = [7; 32];
+    let account = AccountAddress::from_bytes([3; 32]);
+    let bindings = BTreeMap::from([(
+        task_id.clone(),
+        TaskBinding {
+            request_digest,
+            succeeded: false,
+        },
+    )]);
+    let mut prepared_task = PreparedTask::new(
+        task_id.clone(),
+        request_digest,
+        1,
+        vec![PreparedOperation::Issue {
+            account,
+            addresses: vec![CurrencyAddress::new(1)],
+        }],
+    );
+    prepared_task.advance_phase(PreparedTaskPhase::Voting);
+    let plan_digest = prepared_task.plan_digest().unwrap();
+    let prepared = BTreeMap::from([(task_id.clone(), prepared_task)]);
+    let payment_addresses = BTreeMap::new();
+    let executions = BTreeMap::new();
+
+    let valid_lock = BTreeMap::from([(
+        (
+            ValidatorId::new(1),
+            FinalityScope::PreparedTask(task_id.clone()),
+        ),
+        plan_digest,
+    )]);
+    assert_eq!(
+        validate_prepared_snapshot_links(
+            &bindings,
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &valid_lock,
+        ),
+        Ok(())
+    );
+
+    let wrong_lock = BTreeMap::from([(
+        (ValidatorId::new(1), FinalityScope::PreparedTask(task_id)),
+        [9; 32],
+    )]);
+    assert_eq!(
+        validate_prepared_snapshot_links(
+            &bindings,
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &wrong_lock,
         ),
         Err(PersistenceError::InvalidSnapshot)
     );
