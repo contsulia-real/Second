@@ -175,13 +175,7 @@ impl PreparedTaskBook {
         certificate.verify(validator_set)?;
 
         let mut candidate = state.clone();
-        let outcome = match self.commit_inner(&mut candidate, &prepared) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.remove_prepared_durably(task_id)?;
-                return Err(error);
-            }
-        };
+        let outcome = self.commit_inner(&mut candidate, &prepared)?;
 
         let mut remaining = self.tasks.clone();
         remaining.remove(&task_id);

@@ -625,7 +625,7 @@ commit
 
 禁止存在可由正式节点调用的 direct executor 旁路。
 
-`prepare` 可以建立和持久化协议必须保留的事实（例如 TaskId binding、Transfer establishment、Currency identity reservation 和 claims），但不能直接提交最终业务资产变化。只有验证通过的 FinalityCertificate 才能进入 `PreparedTaskBook::commit()` 并提交 BusinessState。
+`prepare` 可以建立和持久化协议必须保留的事实（例如 TaskId binding、Transfer establishment、Currency identity reservation 和 claims），但不能直接提交最终业务资产变化。只有验证通过的 FinalityCertificate 才能进入 `PreparedTaskBook::commit()` 并提交 BusinessState。证书验证通过后，如果本地 plan apply 因状态不一致等原因失败，该错误不等价于 cancellation：不得隐式删除 prepared plan 或释放其 claims，必须保留可恢复的 finalized commit 上下文。
 
 Genesis 本身的初始账户、地址起点和 Reserve 初始化不属于 LegalTask 执行，不要求经过 Finality。
 
@@ -908,7 +908,7 @@ Second 不默认要求：
 <base>.b
 ~~~
 
-加载时选择有效 generation 中最新的一份。
+加载时选择有效 generation 中最新的一份。同一 generation 的 primary slot 完成 `write_all + sync_all` 即构成 durable commit point；另一 slot 是同 generation 的恢复镜像，镜像刷新失败不能把已经 durable 的提交重新报告为失败。读取时只要至少一份 slot 有效即可恢复；若同 generation 存在两份内容不同但都有效的 snapshot，则仍视为冲突并拒绝。
 
 文件槽位 I/O、快照 codec、validator codec、local prepared codec 已按职责拆分。
 
@@ -1117,7 +1117,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 继续审核 prepare / finality / commit 在所有失败路径上的 protocol/business 边界；
+- 明确 PreparedTask cancellation 与 finality 的分界：当 validator votes 已经可能存在于外部时，本地节点无法仅凭自身状态判断是否已经形成 QC，因此不能擅自把“何时仍允许 cancel”固化为协议规则；
 - 在现有长期 node runtime 上继续完成 peer 管理与连接/同步资源预算；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；

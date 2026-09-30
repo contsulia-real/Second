@@ -75,6 +75,7 @@ pub(super) fn load_latest(
     base_path: &Path,
 ) -> Result<Option<PersistedNodeState>, PersistenceError> {
     let mut any_file_exists = false;
+    let mut first_io_error = None;
     let mut valid = Vec::new();
 
     for path in [
@@ -88,7 +89,10 @@ pub(super) fn load_latest(
             }
             Ok(None) => {}
             Err(PersistenceError::Io(io::ErrorKind::NotFound)) => {}
-            Err(PersistenceError::Io(kind)) => return Err(PersistenceError::Io(kind)),
+            Err(PersistenceError::Io(kind)) => {
+                any_file_exists = true;
+                first_io_error.get_or_insert(kind);
+            }
             Err(_) => {
                 any_file_exists = true;
             }
@@ -109,6 +113,10 @@ pub(super) fn load_latest(
         return Ok(Some(latest.snapshot));
     }
 
+    if let Some(kind) = first_io_error {
+        return Err(PersistenceError::Io(kind));
+    }
+
     if any_file_exists {
         Err(PersistenceError::NoValidSnapshot)
     } else {
@@ -124,7 +132,11 @@ pub(super) fn write_slots(
     ensure_parent_dir(base_path)?;
 
     write_snapshot_file(&slot_path(base_path, generation), bytes)?;
-    write_snapshot_file(&mirror_slot_path(base_path, generation), bytes)
+
+    // The fsynced primary slot is the commit point. The mirror is recovery redundancy:
+    // failing to refresh it must not report a durable generation as uncommitted.
+    let _ = write_snapshot_file(&mirror_slot_path(base_path, generation), bytes);
+    Ok(())
 }
 
 fn write_snapshot_file(path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {

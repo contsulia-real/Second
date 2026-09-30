@@ -326,6 +326,43 @@ fn newer_snapshot_wins_and_generation_increments() {
 }
 
 #[test]
+fn durable_primary_commit_survives_mirror_write_failure() {
+    let base = temp_base("mirror-write-failure");
+    let store = StateStore::new(&base);
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], 1);
+    let set = validators();
+
+    assert_eq!(store.save(&state, &set).unwrap(), 1);
+
+    let blocked_mirror = store.slot_path_for_generation(1);
+    fs::remove_file(&blocked_mirror).unwrap();
+    fs::create_dir(&blocked_mirror).unwrap();
+
+    state
+        .execute_finalized(
+            &verified_task(
+                1,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(store.save(&state, &set).unwrap(), 2);
+
+    let restored = store.load().unwrap().unwrap();
+    assert_eq!(restored.generation, 2);
+    assert_eq!(restored.state.balance(alice), 1);
+
+    fs::remove_dir(&blocked_mirror).unwrap();
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
     let base = temp_base("fallback");
     let store = StateStore::new(&base);

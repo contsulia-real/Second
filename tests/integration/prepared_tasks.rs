@@ -230,6 +230,68 @@ fn prepared_transfer_holds_claim_until_cancel_or_commit() {
 }
 
 #[test]
+fn valid_finality_apply_failure_keeps_prepared_plan_recoverable() {
+    let alice = support::account(1);
+    let bob = support::account(2);
+    let mut state = SecondState::genesis([alice, bob], 1);
+    register_payment_addresses(&mut state, [alice, bob]);
+    state
+        .execute_finalized(
+            &verified_task(
+                1,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+
+    let mut stale_state = state.clone();
+    let store = StateStore::new(temp_base("finality-apply-failure"));
+    let validator_set = validators();
+    let task = verified_task(
+        10,
+        vec![Operation::Transfer {
+            source: payment_address(alice),
+            destination: payment_address(bob),
+            amount: 1,
+        }],
+    );
+    let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+
+    prepared
+        .prepare(&mut state, &task, 2, &validator_set)
+        .unwrap();
+    let certificate = certify(&prepared, task.task_id(), &validator_set);
+
+    assert!(matches!(
+        prepared.commit(
+            &mut stale_state,
+            task.task_id(),
+            &certificate,
+            &validator_set,
+        ),
+        Err(PreparationError::Execution(
+            ExecutionError::TransferNotEstablished(_)
+        ))
+    ));
+    assert!(prepared.is_prepared(task.task_id()));
+    assert_eq!(prepared.claimed_currency_count(), 1);
+    assert_eq!(stale_state.balance(alice), 1);
+    assert_eq!(stale_state.balance(bob), 0);
+
+    drop(prepared);
+
+    let recovered = PreparedTaskBook::new(store.clone()).unwrap();
+    assert!(recovered.is_prepared(task.task_id()));
+    assert_eq!(recovered.claimed_currency_count(), 1);
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn same_task_cannot_be_prepared_twice_at_the_same_time() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
