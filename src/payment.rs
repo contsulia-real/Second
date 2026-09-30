@@ -1,8 +1,5 @@
 use crate::state::{BusinessState, PrerequisiteState};
-use crate::{
-    AccountAddress, ExecutionError, Operation, OperationClaimId, PaymentAddress, SecondState,
-    VerifiedLegalTask,
-};
+use crate::{AccountAddress, ExecutionError, OperationClaimId, PaymentAddress, SecondState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaymentAddressStatus {
@@ -161,38 +158,6 @@ impl SecondState {
         Ok(())
     }
 
-    pub(crate) fn establish_task_transfers(
-        &mut self,
-        task: &VerifiedLegalTask,
-    ) -> Result<(), ExecutionError> {
-        let mut candidate = self.clone();
-
-        for (index, operation) in task.operations().iter().enumerate() {
-            let Operation::Transfer {
-                source,
-                destination,
-                amount,
-            } = operation
-            else {
-                continue;
-            };
-            let operation_index =
-                u64::try_from(index).map_err(|_| ExecutionError::OperationIndexOverflow)?;
-            let expires_at = task.expires_at();
-
-            candidate.establish_transfer(
-                OperationClaimId::new(task.task_id(), operation_index),
-                *source,
-                *destination,
-                *amount,
-                expires_at,
-            )?;
-        }
-
-        self.prerequisite = candidate.prerequisite;
-        Ok(())
-    }
-
     pub(crate) fn establish_transfer(
         &mut self,
         claim_id: OperationClaimId,
@@ -238,6 +203,29 @@ impl SecondState {
             amount,
             expires_at,
         })
+    }
+
+    pub(crate) fn establish_transfer_for_execution(
+        &mut self,
+        working_prerequisite: &mut PrerequisiteState,
+        claim_id: OperationClaimId,
+        source: PaymentAddress,
+        destination: PaymentAddress,
+        amount: u64,
+        expires_at: u64,
+    ) -> Result<EstablishedTransfer, ExecutionError> {
+        let transfer =
+            self.establish_transfer(claim_id.clone(), source, destination, amount, expires_at)?;
+        let execution = self
+            .prerequisite
+            .payment_executions
+            .get(&claim_id)
+            .cloned()
+            .ok_or(ExecutionError::TransferNotEstablished(claim_id.clone()))?;
+        working_prerequisite
+            .payment_executions
+            .insert(claim_id, execution);
+        Ok(transfer)
     }
 
     pub(crate) fn apply_established_transfer(

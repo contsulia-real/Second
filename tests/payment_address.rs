@@ -98,6 +98,41 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
 }
 
 #[test]
+fn later_transfer_is_not_established_when_an_earlier_operation_fails() {
+    let alice = support::account(1);
+    let bob = support::account(2);
+    let missing = support::account(99);
+    let alice_pay = support::payment(101);
+    let bob_pay = support::payment(102);
+    let mut state = SecondState::genesis([alice, bob], 1);
+
+    state.register_payment_address(alice_pay, alice).unwrap();
+    state.register_payment_address(bob_pay, bob).unwrap();
+
+    let task = verified_task_with_expiry(
+        20,
+        Some(100),
+        vec![
+            Operation::Issue {
+                account: missing,
+                count: 1,
+            },
+            Operation::Transfer {
+                source: alice_pay,
+                destination: bob_pay,
+                amount: 1,
+            },
+        ],
+    );
+
+    assert_eq!(
+        state.execute(&task, 1),
+        Err(ExecutionError::AccountNotFound(missing))
+    );
+    assert_eq!(state.payment_execution_count(), 0);
+}
+
+#[test]
 fn expired_transfer_reservations_are_reaped_in_expiry_order() {
     let a = support::account(1);
     let b = support::account(2);

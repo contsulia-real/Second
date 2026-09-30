@@ -27,8 +27,6 @@ impl SecondState {
             return Err(ExecutionError::TaskExpired);
         }
 
-        self.establish_task_transfers(task)?;
-
         let mut working = self.business.clone();
         let mut prerequisite = self.prerequisite.clone();
 
@@ -67,11 +65,6 @@ impl SecondState {
         if now > task.expires_at() {
             claims.release_task(task.task_id());
             return Err(ExecutionError::TaskExpired.into());
-        }
-
-        if let Err(error) = self.establish_task_transfers(task) {
-            claims.release_task(task.task_id());
-            return Err(error.into());
         }
 
         let mut working = self.business.clone();
@@ -141,7 +134,8 @@ impl SecondState {
                 amount,
             } => {
                 let expires_at = context.expires_at;
-                let transfer = self.establish_transfer(
+                let transfer = self.establish_transfer_for_execution(
+                    prerequisite,
                     context.claim_id.clone(),
                     *source,
                     *destination,
@@ -197,7 +191,8 @@ impl SecondState {
                 amount,
             } => {
                 let expires_at = context.expires_at;
-                let transfer = self.establish_transfer(
+                let transfer = self.establish_transfer_for_execution(
+                    prerequisite,
                     context.claim_id.clone(),
                     *source,
                     *destination,
