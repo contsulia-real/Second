@@ -19,7 +19,6 @@ pub(crate) struct PaymentExecution {
     pub(crate) source: PaymentAddress,
     pub(crate) destination: PaymentAddress,
     pub(crate) amount: u64,
-    pub(crate) expires_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,7 +28,6 @@ pub(crate) struct EstablishedTransfer {
     pub(crate) source_account: AccountAddress,
     pub(crate) destination_account: AccountAddress,
     pub(crate) amount: u64,
-    pub(crate) expires_at: u64,
 }
 
 impl PaymentExecution {
@@ -38,12 +36,8 @@ impl PaymentExecution {
         source: PaymentAddress,
         destination: PaymentAddress,
         amount: u64,
-        expires_at: u64,
     ) -> bool {
-        self.source == source
-            && self.destination == destination
-            && self.amount == amount
-            && self.expires_at == expires_at
+        self.source == source && self.destination == destination && self.amount == amount
     }
 }
 
@@ -147,10 +141,9 @@ impl SecondState {
         source: PaymentAddress,
         destination: PaymentAddress,
         amount: u64,
-        expires_at: u64,
     ) -> Result<EstablishedTransfer, ExecutionError> {
         if let Some(existing) = self.prerequisite.payment_executions.get(&claim_id) {
-            if !existing.matches(source, destination, amount, expires_at) {
+            if !existing.matches(source, destination, amount) {
                 return Err(ExecutionError::InFlightTransferMismatch(claim_id));
             }
 
@@ -160,7 +153,6 @@ impl SecondState {
                 source_account: self.payment_account(source)?,
                 destination_account: self.payment_account(destination)?,
                 amount,
-                expires_at,
             });
         }
 
@@ -174,7 +166,6 @@ impl SecondState {
                 source,
                 destination,
                 amount,
-                expires_at,
             },
         );
 
@@ -184,7 +175,6 @@ impl SecondState {
             source_account,
             destination_account,
             amount,
-            expires_at,
         })
     }
 
@@ -195,10 +185,8 @@ impl SecondState {
         source: PaymentAddress,
         destination: PaymentAddress,
         amount: u64,
-        expires_at: u64,
     ) -> Result<EstablishedTransfer, ExecutionError> {
-        let transfer =
-            self.establish_transfer(claim_id.clone(), source, destination, amount, expires_at)?;
+        let transfer = self.establish_transfer(claim_id.clone(), source, destination, amount)?;
         let execution = self
             .prerequisite
             .payment_executions
@@ -224,12 +212,7 @@ impl SecondState {
             .get(&claim_id)
             .ok_or(ExecutionError::TransferNotEstablished(claim_id.clone()))?;
 
-        if !execution.matches(
-            transfer.source,
-            transfer.destination,
-            transfer.amount,
-            transfer.expires_at,
-        ) {
+        if !execution.matches(transfer.source, transfer.destination, transfer.amount) {
             return Err(ExecutionError::InFlightTransferMismatch(claim_id));
         }
 

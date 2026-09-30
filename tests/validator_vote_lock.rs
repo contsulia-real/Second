@@ -182,7 +182,7 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
         LegalTaskPayload::new(
             support::task_id(10),
             CURRENT_PROTOCOL_VERSION,
-            5,
+            Some(5),
             vec![Operation::Issue {
                 account: alice,
                 count: 1,

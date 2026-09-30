@@ -30,7 +30,7 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
     let payload = LegalTaskPayload::new(
         TaskId::parse("request_1").unwrap(),
         CURRENT_PROTOCOL_VERSION,
-        100,
+        Some(100),
         operations.clone(),
     );
     let signed = LegalTask::sign(payload.clone(), &issuer).unwrap();
@@ -81,6 +81,32 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
 }
 
 #[test]
+fn json_request_can_omit_expiry() {
+    let issuer = key(7);
+    let payload = LegalTaskPayload::new(
+        TaskId::parse("no_expiry").unwrap(),
+        CURRENT_PROTOCOL_VERSION,
+        None,
+        Vec::new(),
+    );
+    let signed = LegalTask::sign(payload.clone(), &issuer).unwrap();
+    let request = json!({
+        "request_id": "no_expiry",
+        "version": CURRENT_PROTOCOL_VERSION,
+        "operations": [],
+        "signature": signed.signature_base64url()
+    });
+
+    let parsed = parse_transaction_request_json(
+        request.to_string().as_bytes(),
+        issuer.verifying_key().to_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(parsed.payload(), &payload);
+}
+
+#[test]
 fn strict_json_rejects_duplicate_unknown_and_wrong_json_types() {
     let issuer = key(7);
     let public_key = issuer.verifying_key().to_bytes();
@@ -88,7 +114,7 @@ fn strict_json_rejects_duplicate_unknown_and_wrong_json_types() {
         LegalTaskPayload::new(
             TaskId::parse("r").unwrap(),
             CURRENT_PROTOCOL_VERSION,
-            10,
+            Some(10),
             Vec::new(),
         ),
         &issuer,
@@ -136,7 +162,7 @@ fn strict_json_rejects_protocol_invalid_values_before_signature_verification() {
         LegalTaskPayload::new(
             TaskId::parse("r").unwrap(),
             CURRENT_PROTOCOL_VERSION,
-            10,
+            Some(10),
             Vec::new(),
         ),
         &issuer,

@@ -37,7 +37,7 @@ fn state_with_issue() -> SecondState {
         LegalTaskPayload::new(
             support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            u64::MAX,
+            None,
             vec![Operation::Issue {
                 account: alice,
                 count: 2,

@@ -138,12 +138,16 @@ impl VerifiedLegalTask {
         self.task.payload.task_id()
     }
 
-    pub const fn expires_at(&self) -> u64 {
+    pub const fn expires_at(&self) -> Option<u64> {
         self.task.payload.expires_at()
     }
 
     pub fn operations(&self) -> &[Operation] {
         self.task.payload.operations()
+    }
+
+    pub fn is_expired(&self, now: u64) -> bool {
+        self.expires_at().is_some_and(|expires_at| now > expires_at)
     }
 
     pub fn signed_task(&self) -> &LegalTask {

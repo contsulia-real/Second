@@ -100,7 +100,6 @@ impl PreparedOperation {
 pub(crate) struct PreparedTask {
     pub(crate) task_id: TaskId,
     pub(crate) request_digest: [u8; 32],
-    pub(crate) expires_at: u64,
     pub(crate) validator_set_version: u64,
     pub(crate) operations: Vec<PreparedOperation>,
 }
@@ -109,14 +108,12 @@ impl PreparedTask {
     pub(crate) fn new(
         task_id: TaskId,
         request_digest: [u8; 32],
-        expires_at: u64,
         validator_set_version: u64,
         operations: Vec<PreparedOperation>,
     ) -> Self {
         Self {
             task_id,
             request_digest,
-            expires_at,
             validator_set_version,
             operations,
         }
@@ -148,7 +145,6 @@ impl PreparedTask {
                     hasher.update(transfer.source_account.bytes());
                     hasher.update(transfer.destination_account.bytes());
                     hasher.update(transfer.amount.to_be_bytes());
-                    hasher.update(transfer.expires_at.to_be_bytes());
                     hash_addresses(&mut hasher, currencies)?;
                 }
                 PreparedOperation::Destroy { currencies } => {

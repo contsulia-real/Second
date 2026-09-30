@@ -10,7 +10,6 @@ use crate::{
 #[derive(Clone)]
 struct OperationExecutionContext {
     claim_id: OperationClaimId,
-    expires_at: u64,
 }
 
 impl SecondState {
@@ -23,7 +22,7 @@ impl SecondState {
             return Ok(ExecutionOutcome::AlreadySucceeded);
         }
 
-        if now > task.expires_at() {
+        if task.is_expired(now) {
             return Err(ExecutionError::TaskExpired);
         }
 
@@ -39,7 +38,6 @@ impl SecondState {
                 operation,
                 OperationExecutionContext {
                     claim_id: OperationClaimId::new(task.task_id(), operation_index),
-                    expires_at: task.expires_at(),
                 },
             )?;
         }
@@ -62,7 +60,7 @@ impl SecondState {
             return Ok(ExecutionOutcome::AlreadySucceeded);
         }
 
-        if now > task.expires_at() {
+        if task.is_expired(now) {
             claims.release_task(task.task_id());
             return Err(ExecutionError::TaskExpired.into());
         }
@@ -102,10 +100,7 @@ impl SecondState {
                 working,
                 prerequisite,
                 operation,
-                OperationExecutionContext {
-                    claim_id,
-                    expires_at: task.expires_at(),
-                },
+                OperationExecutionContext { claim_id },
                 claims,
             )?;
             operation_index = operation_index
@@ -133,14 +128,12 @@ impl SecondState {
                 destination,
                 amount,
             } => {
-                let expires_at = context.expires_at;
                 let transfer = self.establish_transfer_for_execution(
                     prerequisite,
                     context.claim_id.clone(),
                     *source,
                     *destination,
                     *amount,
-                    expires_at,
                 )?;
                 let currencies = claims.claim_transfer_in_business_state(
                     working,
@@ -190,14 +183,12 @@ impl SecondState {
                 destination,
                 amount,
             } => {
-                let expires_at = context.expires_at;
                 let transfer = self.establish_transfer_for_execution(
                     prerequisite,
                     context.claim_id.clone(),
                     *source,
                     *destination,
                     *amount,
-                    expires_at,
                 )?;
                 let candidates =
                     self.select_transfer_candidates(working, transfer.source_account, *amount)?;

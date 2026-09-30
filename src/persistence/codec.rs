@@ -17,8 +17,8 @@ use super::local_codec::{decode_local_state, encode_local_state};
 use super::validator_codec::{decode_validator_registry, encode_validator_registry};
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 6;
-const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V6\0";
+const SNAPSHOT_VERSION: u32 = 7;
+const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V7\0";
 const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
@@ -235,7 +235,6 @@ fn encode_payload(
         out.extend_from_slice(&execution.source.bytes());
         out.extend_from_slice(&execution.destination.bytes());
         out.extend_from_slice(&execution.amount.to_be_bytes());
-        out.extend_from_slice(&execution.expires_at.to_be_bytes());
     }
 
     out.extend_from_slice(&validator_set.version().to_be_bytes());
@@ -396,8 +395,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         let source = PaymentAddress::from_bytes(decoder.read_array_32()?);
         let destination = PaymentAddress::from_bytes(decoder.read_array_32()?);
         let amount = decoder.read_u64()?;
-        let expires_at = decoder.read_u64()?;
-
         if !payment_addresses.contains_key(&source) || !payment_addresses.contains_key(&destination)
         {
             return Err(PersistenceError::InvalidSnapshot);
@@ -410,7 +407,6 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
                     source,
                     destination,
                     amount,
-                    expires_at,
                 },
             )
             .is_some()
@@ -539,12 +535,7 @@ pub(super) fn validate_prepared_snapshot_links(
                 let execution = payment_executions
                     .get(&claim_id)
                     .ok_or(PersistenceError::InvalidSnapshot)?;
-                if !execution.matches(
-                    transfer.source,
-                    transfer.destination,
-                    transfer.amount,
-                    transfer.expires_at,
-                ) {
+                if !execution.matches(transfer.source, transfer.destination, transfer.amount) {
                     return Err(PersistenceError::InvalidSnapshot);
                 }
                 expected_transfer_claims.insert(claim_id);

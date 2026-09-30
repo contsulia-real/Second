@@ -116,7 +116,7 @@ fn expiring_task(
         LegalTaskPayload::new(
             support::task_id(task_id),
             CURRENT_PROTOCOL_VERSION,
-            expires_at,
+            Some(expires_at),
             operations,
         ),
         &signing,

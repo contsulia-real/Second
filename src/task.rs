@@ -31,7 +31,7 @@ pub enum Operation {
 pub struct LegalTaskPayload {
     task_id: TaskId,
     protocol_version: u32,
-    expires_at: u64,
+    expires_at: Option<u64>,
     operations: Vec<Operation>,
 }
 
@@ -39,7 +39,7 @@ impl LegalTaskPayload {
     pub fn new(
         task_id: TaskId,
         protocol_version: u32,
-        expires_at: u64,
+        expires_at: Option<u64>,
         operations: Vec<Operation>,
     ) -> Self {
         Self {
@@ -58,7 +58,7 @@ impl LegalTaskPayload {
         self.protocol_version
     }
 
-    pub const fn expires_at(&self) -> u64 {
+    pub const fn expires_at(&self) -> Option<u64> {
         self.expires_at
     }
 
@@ -97,7 +97,7 @@ impl LegalTaskPayload {
 
         push_array_len(&mut out, 3)?;
         push_unsigned(&mut out, u64::from(self.protocol_version));
-        push_unsigned(&mut out, self.expires_at);
+        push_optional_unsigned(&mut out, self.expires_at);
         push_array_len(&mut out, self.operations.len())?;
 
         for operation in &self.operations {
@@ -186,6 +186,13 @@ fn push_text(out: &mut Vec<u8>, value: &str) -> Result<(), TaskEncodingError> {
 
 fn push_unsigned(out: &mut Vec<u8>, value: u64) {
     push_major_value(out, 0, value);
+}
+
+fn push_optional_unsigned(out: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => push_unsigned(out, value),
+        None => out.push(0xf6),
+    }
 }
 
 fn push_major_value(out: &mut Vec<u8>, major: u8, value: u64) {

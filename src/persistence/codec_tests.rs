@@ -24,7 +24,6 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
         source_account,
         destination_account,
         amount: 1,
-        expires_at: 50,
     };
     let claim_id = OperationClaimId::new(task_id.clone(), 0);
 
@@ -57,7 +56,6 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             source,
             destination,
             amount: 1,
-            expires_at: 50,
         },
     )]);
     let prepared = BTreeMap::from([(
@@ -65,7 +63,6 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
         PreparedTask::new(
             task_id.clone(),
             request_digest,
-            50,
             1,
             vec![PreparedOperation::Transfer {
                 transfer,

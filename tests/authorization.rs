@@ -11,7 +11,7 @@ fn payload(amount: u64) -> LegalTaskPayload {
     LegalTaskPayload::new(
         support::task_id(42),
         CURRENT_PROTOCOL_VERSION,
-        100,
+        Some(100),
         vec![Operation::Transfer {
             source: support::payment(1),
             destination: support::payment(2),
@@ -25,7 +25,7 @@ fn canonical_signing_bytes_match_the_deterministic_cbor_protocol_vector() {
     let payload = LegalTaskPayload::new(
         second::TaskId::parse("a").unwrap(),
         CURRENT_PROTOCOL_VERSION,
-        10,
+        Some(10),
         Vec::new(),
     );
 
@@ -33,6 +33,19 @@ fn canonical_signing_bytes_match_the_deterministic_cbor_protocol_vector() {
     expected.extend_from_slice(&[0x82, 0x61, b'a', 0x83, 0x01, 0x0a, 0x80]);
 
     assert_eq!(payload.canonical_signing_bytes().unwrap(), expected);
+
+    let without_expiry = LegalTaskPayload::new(
+        second::TaskId::parse("a").unwrap(),
+        CURRENT_PROTOCOL_VERSION,
+        None,
+        Vec::new(),
+    );
+    let mut expected_without_expiry = b"Second/LegalTask/v1\0".to_vec();
+    expected_without_expiry.extend_from_slice(&[0x82, 0x61, b'a', 0x83, 0x01, 0xf6, 0x80]);
+    assert_eq!(
+        without_expiry.canonical_signing_bytes().unwrap(),
+        expected_without_expiry
+    );
 }
 
 #[test]
@@ -135,7 +148,7 @@ fn protocol_version_is_part_of_authorization_policy_and_signature_payload() {
     let payload = LegalTaskPayload::new(
         support::task_id(42),
         CURRENT_PROTOCOL_VERSION + 1,
-        u64::MAX,
+        None,
         vec![Operation::Issue {
             account: support::account(1),
             count: 1,
@@ -200,7 +213,7 @@ fn structurally_invalid_operations_never_become_verified_tasks() {
             LegalTaskPayload::new(
                 support::task_id(100 + index as u128),
                 CURRENT_PROTOCOL_VERSION,
-                100,
+                Some(100),
                 vec![operation],
             ),
             &key,
@@ -222,7 +235,7 @@ fn operation_order_changes_the_canonical_signed_message() {
         LegalTaskPayload::new(
             support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            u64::MAX,
+            None,
             vec![
                 Operation::Issue {
                     account: support::account(1),
@@ -243,7 +256,7 @@ fn operation_order_changes_the_canonical_signed_message() {
         LegalTaskPayload::new(
             support::task_id(1),
             CURRENT_PROTOCOL_VERSION,
-            u64::MAX,
+            None,
             vec![
                 Operation::Transfer {
                     source: support::payment(1),

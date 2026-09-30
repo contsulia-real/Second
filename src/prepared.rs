@@ -290,7 +290,7 @@ impl PreparedTaskBook {
             return Ok(BuildOutcome::AlreadySucceeded);
         }
 
-        if now > task.expires_at() {
+        if task.is_expired(now) {
             return Err(ExecutionError::TaskExpired.into());
         }
 
@@ -300,7 +300,6 @@ impl PreparedTaskBook {
         Ok(BuildOutcome::Prepared(PreparedTask::new(
             task.task_id(),
             task.request_digest(),
-            task.expires_at(),
             validator_set_version,
             operations,
         )))
@@ -335,13 +334,11 @@ impl PreparedTaskBook {
                     destination,
                     amount,
                 } => {
-                    let expires_at = task.expires_at();
                     let transfer = state.establish_transfer(
                         claim_id.clone(),
                         *source,
                         *destination,
                         *amount,
-                        expires_at,
                     )?;
 
                     state.validate_established_transfer_for_execution(working, transfer)?;

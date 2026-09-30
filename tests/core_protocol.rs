@@ -17,7 +17,7 @@ fn verified_task(
     let payload = LegalTaskPayload::new(
         support::task_id(task_id),
         CURRENT_PROTOCOL_VERSION,
-        expires_at.unwrap_or(u64::MAX),
+        expires_at,
         operations,
     );
 
@@ -69,7 +69,7 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
 
     let transfer = verified_task(
         2,
-        Some(u64::MAX),
+        None,
         vec![Operation::Transfer {
             source: payment_address(alice),
             destination: payment_address(bob),
@@ -115,7 +115,7 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
 
     let task = verified_task(
         77,
-        Some(u64::MAX),
+        None,
         vec![
             Operation::Issue {
                 account: alice,
@@ -153,7 +153,7 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
 
     let first = verified_task(
         9,
-        Some(u64::MAX),
+        None,
         vec![Operation::Transfer {
             source: payment_address(alice),
             destination: payment_address(bob),

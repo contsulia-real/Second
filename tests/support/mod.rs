@@ -51,7 +51,7 @@ pub fn verified_task_with_expiry(
     let payload = LegalTaskPayload::new(
         task_id(task_number),
         CURRENT_PROTOCOL_VERSION,
-        expires_at.unwrap_or(u64::MAX),
+        expires_at,
         operations,
     );
 

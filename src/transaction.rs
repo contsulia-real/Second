@@ -22,7 +22,7 @@ pub enum TransactionRequestParseError {
 struct RawTransactionRequest {
     request_id: String,
     version: u32,
-    expires_at: u64,
+    expires_at: Option<u64>,
     operations: Vec<RawOperation>,
     signature: String,
 }
