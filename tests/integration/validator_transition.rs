@@ -68,7 +68,6 @@ fn current_quorum_can_certify_complete_next_validator_set() {
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        9,
         &current,
         &registry(&current),
         next,
@@ -84,19 +83,16 @@ fn current_quorum_can_certify_complete_next_validator_set() {
         .collect();
 
     let certified = CertifiedValidatorSetTransition::new(transition, votes, &current).unwrap();
-
-    assert_eq!(certified.activation_epoch(), 10);
     assert_eq!(certified.next_validator_set().version(), 5);
     assert_eq!(certified.next_validator_set().len(), 5);
 }
 
 #[test]
-fn joining_validator_cannot_contribute_a_vote_before_activation() {
+fn joining_validator_cannot_contribute_a_vote_to_its_admission_transition() {
     let current = current_set();
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        9,
         &current,
         &registry(&current),
         next,
@@ -138,7 +134,6 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -168,7 +163,6 @@ fn retained_validator_recovery_key_cannot_be_rewritten() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -198,7 +192,6 @@ fn retained_validator_consensus_key_requires_rotation_request() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -230,7 +223,6 @@ fn identity_authorized_consensus_key_rotation_is_accepted() {
         ValidatorRotationAuthority::Identity,
         ValidatorId::new(1),
         4,
-        10,
         key(90).verifying_key().to_bytes(),
         &key(3),
     )
@@ -238,7 +230,6 @@ fn identity_authorized_consensus_key_rotation_is_accepted() {
 
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        9,
         &current,
         &registry(&current),
         next,
@@ -258,7 +249,7 @@ fn identity_authorized_consensus_key_rotation_is_accepted() {
 }
 
 #[test]
-fn consensus_key_rotation_is_bound_to_activation_epoch() {
+fn consensus_key_rotation_is_bound_to_current_validator_set_version() {
     let current = current_set();
 
     let mut next_credentials = (1..=4).map(credential).collect::<Vec<_>>();
@@ -275,8 +266,7 @@ fn consensus_key_rotation_is_bound_to_activation_epoch() {
         CURRENT_PROTOCOL_VERSION,
         ValidatorRotationAuthority::Recovery,
         ValidatorId::new(1),
-        4,
-        11,
+        6,
         key(90).verifying_key().to_bytes(),
         &key(5),
     )
@@ -285,7 +275,6 @@ fn consensus_key_rotation_is_bound_to_activation_epoch() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -293,10 +282,10 @@ fn consensus_key_rotation_is_bound_to_activation_epoch() {
             vec![rotation],
         ),
         Err(
-            ValidatorTransitionError::ConsensusKeyRotationEpochMismatch {
+            ValidatorTransitionError::ConsensusKeyRotationValidatorSetMismatch {
                 validator_id: ValidatorId::new(1),
-                expected: 10,
-                actual: 11,
+                expected: 4,
+                actual: 6,
             }
         )
     );
@@ -310,7 +299,6 @@ fn newly_added_validator_without_admission_proof_is_rejected() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -331,7 +319,6 @@ fn admission_for_validator_not_added_to_next_set_is_rejected() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -353,7 +340,6 @@ fn duplicate_admission_proof_is_rejected() {
     assert_eq!(
         ValidatorSetTransition::new(
             CURRENT_PROTOCOL_VERSION,
-            9,
             &current,
             &registry(&current),
             next,
@@ -367,12 +353,11 @@ fn duplicate_admission_proof_is_rejected() {
 }
 
 #[test]
-fn certified_transition_only_activates_at_its_declared_epoch() {
+fn certified_transition_activates_immediate_next_validator_set() {
     let current = current_set();
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        9,
         &current,
         &registry(&current),
         next,
@@ -388,15 +373,7 @@ fn certified_transition_only_activates_at_its_declared_epoch() {
     let certified = CertifiedValidatorSetTransition::new(transition, votes, &current).unwrap();
     let mut registry = registry(&current);
 
-    assert_eq!(
-        certified.clone().activate(9, &mut registry),
-        Err(ValidatorTransitionError::WrongActivationEpoch {
-            expected: 10,
-            actual: 9,
-        })
-    );
-
-    let activated = certified.activate(10, &mut registry).unwrap();
+    let activated = certified.activate(&mut registry).unwrap();
     assert_eq!(activated.version(), 5);
     assert_eq!(activated.len(), 5);
 }
@@ -407,7 +384,6 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
     let next = ValidatorSet::new(5, (1..=5).map(credential)).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        9,
         &current,
         &registry(&current),
         next,
@@ -430,7 +406,7 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
         CertifiedValidatorSetTransition::new(transition, transition_votes, &current).unwrap();
 
     let alice = support::account(1);
-    let store = StateStore::new(temp_base("prepared-cross-validator-epoch"));
+    let store = StateStore::new(temp_base("prepared-cross-validator-set"));
     let mut state = SecondState::genesis([alice], 1);
     let task = verified_task(
         900,
@@ -444,9 +420,7 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
         book.prepare(&mut state, &task, 1, &current).unwrap();
     }
 
-    store
-        .activate_validator_set_transition(&certified, 10)
-        .unwrap();
+    store.activate_validator_set_transition(&certified).unwrap();
 
     let activated_v5 = store.load().unwrap().unwrap();
     assert_eq!(activated_v5.validator_set.version(), 5);
@@ -456,7 +430,6 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
     let next_v6 = ValidatorSet::new(6, (1..=5).map(credential)).unwrap();
     let transition_v6 = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        10,
         &current_v5,
         &activated_v5.validator_registry,
         next_v6,
@@ -478,7 +451,7 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
     let certified_v6 =
         CertifiedValidatorSetTransition::new(transition_v6, votes_v6, &current_v5).unwrap();
     store
-        .activate_validator_set_transition(&certified_v6, 11)
+        .activate_validator_set_transition(&certified_v6)
         .unwrap();
 
     let activated = store.load().unwrap().unwrap();

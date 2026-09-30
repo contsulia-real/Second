@@ -115,7 +115,6 @@ impl StateStore {
     pub fn activate_validator_set_transition(
         &self,
         certified_transition: &CertifiedValidatorSetTransition,
-        epoch: u64,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self
@@ -132,7 +131,7 @@ impl StateStore {
         let mut validator_registry = latest.validator_registry.clone();
         let next_validator_set = certified_transition
             .clone()
-            .activate(epoch, &mut validator_registry)
+            .activate(&mut validator_registry)
             .map_err(PersistenceError::ValidatorTransition)?;
         let retained_validator_sets =
             retained_sets_for_prepared(Some(&latest), &next_validator_set, &latest.prepared_tasks)?;

@@ -117,7 +117,6 @@ pub fn certify_and_activate_validator_transition(
     transition: ValidatorSetTransition,
     signer_ids: impl IntoIterator<Item = u64>,
 ) -> ValidatorSet {
-    let activation_epoch = transition.activation_epoch();
     let statement = transition.finality_statement();
     let votes = signer_ids
         .into_iter()
@@ -133,7 +132,7 @@ pub fn certify_and_activate_validator_transition(
 
     CertifiedValidatorSetTransition::new(transition, votes, current)
         .unwrap()
-        .activate(activation_epoch, registry)
+        .activate(registry)
         .unwrap()
 }
 

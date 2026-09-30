@@ -776,11 +776,11 @@ ValidatorSet 有显式 version。
 
 Validator transition / admission / rotation 仍然必须经过既有验证逻辑，不能绕过 Registry 的永久历史约束。
 
-Validator admission 的治理来源固定为**当前 active ValidatorSet 的 finality**：候选 Validator 的 `ValidatorAdmissionRequest` 只证明候选方同时控制其声明的 identity / consensus / recovery 三把 key，并不自行授予 Validator 权限。新 Validator 只有在其 credential 被纳入 `next_validator_set`，整个 `ValidatorSetTransition` 又由当前 ValidatorSet 达到正常 finality quorum 后，才获得协议授权，并在声明的下一 activation epoch 生效。
+Validator admission 的治理来源固定为**当前 active ValidatorSet 的 finality**：候选 Validator 的 `ValidatorAdmissionRequest` 只证明候选方同时控制其声明的 identity / consensus / recovery 三把 key，并不自行授予 Validator 权限。新 Validator 只有在其 credential 被纳入 `next_validator_set`，整个 `ValidatorSetTransition` 又由当前 ValidatorSet 达到正常 finality quorum 后，才获得协议授权。
 
-因此，Validator membership 的授权链是：当前 ValidatorSet → 对 next ValidatorSet transition 的 QC → 下一 epoch 激活。Genesis 初始 ValidatorSet 是这条治理链的根；之后不引入持币量、算力、transport NodeId、单个管理员 key 或候选人的自签 admission 作为独立治理权。RecoverySet 的未来规则和现实世界“一人一 Validator”仍是独立未决问题，不改变当前协议内的 membership authorization source。
+ValidatorSet `version` 是当前唯一的 membership transition 序号。每次 transition 只能从当前 version 推进到严格相邻的 `current_version + 1`，不能跳过、倒退，也不存在另一套 membership 时间序号或基于本地时间的激活时钟。因此，Validator membership 的授权链是：当前 ValidatorSet → 对 next ValidatorSet transition 的 QC → 原子激活下一 version。Genesis 初始 ValidatorSet 是这条治理链的根；之后不引入持币量、算力、transport NodeId、单个管理员 key 或候选人的自签 admission 作为独立治理权。RecoverySet 的未来规则和现实世界“一人一 Validator”仍是独立未决问题，不改变当前协议内的 membership authorization source。
 
-`ValidatorRegistry::apply_next_set` 只是 Registry 内部状态转换 primitive，不是公开授权入口；公共 membership mutation 必须经 `CertifiedValidatorSetTransition` 验证当前 ValidatorSet 的 QC。节点通过 `StateStore::activate_validator_set_transition` 在声明的 activation epoch 原子持久化 next ValidatorSet、更新后的 Registry 以及仍被 active PreparedTask 引用的历史 ValidatorSet。
+`ValidatorRegistry::apply_next_set` 只是 Registry 内部状态转换 primitive，不是公开授权入口；公共 membership mutation 必须经 `CertifiedValidatorSetTransition` 验证当前 ValidatorSet 的 QC。节点通过 `StateStore::activate_validator_set_transition` 原子持久化 next ValidatorSet、更新后的 Registry 以及仍被 active PreparedTask 引用的历史 ValidatorSet。consensus-key rotation request 只绑定当前 ValidatorSet version；由于 next version 被协议固定为 `current_version + 1`，不再额外绑定任何时间序号。
 
 PreparedTask 永久绑定 prepare 时的 validator-set version。ValidatorSet 后续激活不要求清空旧 `Prepared` / `Voting` / `Finalized` task：节点只要仍有 active PreparedTask 引用某个旧 version，就必须在 snapshot 的 retained validator sets 中保留该 version 的完整 ValidatorSet，并用它完成该 task 的后续 vote / QC verify / commit。新 public checkpoint 和新的 ValidatorSet transition 始终只使用当前 active ValidatorSet。某个旧 validator-set version 不再被任何 active PreparedTask 引用时，下一次原子 snapshot 写入必须删除对应 retained set；历史 vote-lock 与 ValidatorRegistry 永久历史不因此删除。
 
@@ -1186,7 +1186,6 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 明确 ValidatorSet governance epoch 的权威来源与推进规则。当前 transition 会绑定 `current_epoch` / `activation_epoch = current_epoch + 1`，durable activation 也会校验调用方传入的 epoch 必须等于证书声明值，但 Second 目前没有独立持久化/共识化的“当前 Validator epoch”时钟，因此节点自身还不能证明某个 activation epoch 已实际到达。public checkpoint 的 epoch 已定义为公开状态 freshness 序号，不得默认与 Validator governance epoch 合并；除非后续明确决定两者关系，否则不能用 checkpoint epoch 或本地系统时间替代 Validator epoch authority；
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；

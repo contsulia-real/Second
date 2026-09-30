@@ -167,7 +167,6 @@ pub enum ValidatorTransitionError {
         actual: u64,
     },
     ValidatorSetVersionOverflow,
-    EpochOverflow,
     IdentityKeyChanged(ValidatorId),
     RecoveryKeyChanged(ValidatorId),
     Registry(ValidatorRegistryError),
@@ -180,19 +179,10 @@ pub enum ValidatorTransitionError {
         expected: u64,
         actual: u64,
     },
-    ConsensusKeyRotationEpochMismatch {
-        validator_id: ValidatorId,
-        expected: u64,
-        actual: u64,
-    },
     Rotation(ValidatorRotationError),
     MissingAdmission(ValidatorId),
     UnexpectedAdmission(ValidatorId),
     DuplicateAdmission(ValidatorId),
     AdmissionCredentialMismatch(ValidatorId),
-    WrongActivationEpoch {
-        expected: u64,
-        actual: u64,
-    },
     Finality(FinalityError),
 }

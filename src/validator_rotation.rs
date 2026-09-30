@@ -25,7 +25,6 @@ pub struct ValidatorConsensusKeyRotationRequest {
     authority: ValidatorRotationAuthority,
     validator_id: ValidatorId,
     current_validator_set_version: u64,
-    activation_epoch: u64,
     new_consensus_public_key: [u8; 32],
     signature: [u8; 64],
 }
@@ -36,7 +35,6 @@ impl ValidatorConsensusKeyRotationRequest {
         authority: ValidatorRotationAuthority,
         validator_id: ValidatorId,
         current_validator_set_version: u64,
-        activation_epoch: u64,
         new_consensus_public_key: [u8; 32],
         signing_key: &SigningKey,
     ) -> Result<Self, ValidatorRotationError> {
@@ -48,7 +46,6 @@ impl ValidatorConsensusKeyRotationRequest {
             authority,
             validator_id,
             current_validator_set_version,
-            activation_epoch,
             new_consensus_public_key,
         );
 
@@ -57,7 +54,6 @@ impl ValidatorConsensusKeyRotationRequest {
             authority,
             validator_id,
             current_validator_set_version,
-            activation_epoch,
             new_consensus_public_key,
             signature: signing_key.sign(&message).to_bytes(),
         })
@@ -77,10 +73,6 @@ impl ValidatorConsensusKeyRotationRequest {
 
     pub const fn current_validator_set_version(&self) -> u64 {
         self.current_validator_set_version
-    }
-
-    pub const fn activation_epoch(&self) -> u64 {
-        self.activation_epoch
     }
 
     pub const fn new_consensus_public_key(&self) -> [u8; 32] {
@@ -122,7 +114,6 @@ impl ValidatorConsensusKeyRotationRequest {
             self.authority,
             self.validator_id,
             self.current_validator_set_version,
-            self.activation_epoch,
             self.new_consensus_public_key,
         );
 
@@ -137,14 +128,13 @@ fn canonical_rotation_bytes(
     authority: ValidatorRotationAuthority,
     validator_id: ValidatorId,
     current_validator_set_version: u64,
-    activation_epoch: u64,
     new_consensus_public_key: [u8; 32],
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(
         ROTATION_DOMAIN.len()
             + size_of::<u32>()
             + 1
-            + size_of::<u64>() * 3
+            + size_of::<u64>() * 2
             + new_consensus_public_key.len(),
     );
     bytes.extend_from_slice(ROTATION_DOMAIN);
@@ -152,7 +142,6 @@ fn canonical_rotation_bytes(
     bytes.push(authority.tag());
     bytes.extend_from_slice(&validator_id.value().to_be_bytes());
     bytes.extend_from_slice(&current_validator_set_version.to_be_bytes());
-    bytes.extend_from_slice(&activation_epoch.to_be_bytes());
     bytes.extend_from_slice(&new_consensus_public_key);
     bytes
 }

@@ -18,7 +18,6 @@ fn retired_validator_id_can_never_rejoin() {
 
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        1,
         &current,
         &registry,
         without_four.clone(),
@@ -73,14 +72,12 @@ fn historical_consensus_key_can_never_be_reassigned() {
         ValidatorRotationAuthority::Identity,
         ValidatorId::new(1),
         current.version(),
-        2,
         key(100).verifying_key().to_bytes(),
         &key(3),
     )
     .unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        1,
         &current,
         &registry,
         rotated.clone(),
@@ -120,7 +117,6 @@ fn retired_identity_history_survives_snapshot_restart() {
     let mut registry = ValidatorRegistry::from_validator_set(&current).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        1,
         &current,
         &registry,
         without_four.clone(),

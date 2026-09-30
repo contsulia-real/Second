@@ -29,7 +29,6 @@ fn registry_with_retired_five(current: &ValidatorSet) -> ValidatorRegistry {
     let mut registry = ValidatorRegistry::from_validator_set(&previous).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        19,
         &previous,
         &registry,
         current.clone(),
@@ -44,7 +43,7 @@ fn registry_with_retired_five(current: &ValidatorSet) -> ValidatorRegistry {
         .collect();
     CertifiedValidatorSetTransition::new(transition, votes, &previous)
         .unwrap()
-        .activate(20, &mut registry)
+        .activate(&mut registry)
         .unwrap();
     registry
 }
@@ -82,7 +81,6 @@ fn transition_with_candidate(
 
     ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        20,
         current,
         registry,
         next,
@@ -401,7 +399,6 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
     let set_v8 = ValidatorSet::new(8, (1..=4).map(validator_credential)).unwrap();
     let transition = ValidatorSetTransition::new(
         CURRENT_PROTOCOL_VERSION,
-        20,
         &set_v7,
         &persisted.validator_registry,
         set_v8.clone(),
@@ -415,9 +412,7 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
         .map(|id| support::signed_vote(&transition_statement, ValidatorId::new(id), &key(id as u8)))
         .collect();
     let certified = CertifiedValidatorSetTransition::new(transition, votes, &set_v7).unwrap();
-    store
-        .activate_validator_set_transition(&certified, 21)
-        .unwrap();
+    store.activate_validator_set_transition(&certified).unwrap();
 
     let checkpoint_v8 = PublicCurrencyCheckpoint::new(
         CURRENT_PROTOCOL_VERSION,

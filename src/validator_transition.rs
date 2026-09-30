@@ -13,8 +13,6 @@ const TRANSITION_DOMAIN: &[u8] = b"SECOND_VALIDATOR_SET_TRANSITION_V1\0";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatorSetTransition {
     protocol_version: u32,
-    current_epoch: u64,
-    activation_epoch: u64,
     current_validator_set_version: u64,
     next_validator_set: ValidatorSet,
     admissions: Vec<VerifiedValidatorAdmission>,
@@ -25,7 +23,6 @@ pub struct ValidatorSetTransition {
 impl ValidatorSetTransition {
     pub fn new(
         protocol_version: u32,
-        current_epoch: u64,
         current_validator_set: &ValidatorSet,
         validator_registry: &ValidatorRegistry,
         next_validator_set: ValidatorSet,
@@ -50,10 +47,6 @@ impl ValidatorSetTransition {
             });
         }
 
-        let activation_epoch = current_epoch
-            .checked_add(1)
-            .ok_or(ValidatorTransitionError::EpochOverflow)?;
-
         validator_registry
             .validate_transition(current_validator_set, &next_validator_set)
             .map_err(map_registry_error)?;
@@ -62,23 +55,18 @@ impl ValidatorSetTransition {
         validate_consensus_key_rotations(
             current_validator_set,
             &next_validator_set,
-            activation_epoch,
             &consensus_key_rotations,
         )?;
 
         let current_validator_set_version = current_validator_set.version();
         let digest = transition_digest(
             protocol_version,
-            current_epoch,
-            activation_epoch,
             current_validator_set_version,
             &next_validator_set,
         );
 
         Ok(Self {
             protocol_version,
-            current_epoch,
-            activation_epoch,
             current_validator_set_version,
             next_validator_set,
             admissions,
@@ -89,14 +77,6 @@ impl ValidatorSetTransition {
 
     pub const fn protocol_version(&self) -> u32 {
         self.protocol_version
-    }
-
-    pub const fn current_epoch(&self) -> u64 {
-        self.current_epoch
-    }
-
-    pub const fn activation_epoch(&self) -> u64 {
-        self.activation_epoch
     }
 
     pub const fn current_validator_set_version(&self) -> u64 {
@@ -160,10 +140,6 @@ impl CertifiedValidatorSetTransition {
         })
     }
 
-    pub const fn activation_epoch(&self) -> u64 {
-        self.transition.activation_epoch()
-    }
-
     pub fn next_validator_set(&self) -> &ValidatorSet {
         self.transition.next_validator_set()
     }
@@ -174,16 +150,8 @@ impl CertifiedValidatorSetTransition {
 
     pub fn activate(
         self,
-        epoch: u64,
         validator_registry: &mut ValidatorRegistry,
     ) -> Result<ValidatorSet, ValidatorTransitionError> {
-        if epoch != self.transition.activation_epoch() {
-            return Err(ValidatorTransitionError::WrongActivationEpoch {
-                expected: self.transition.activation_epoch(),
-                actual: epoch,
-            });
-        }
-
         validator_registry
             .apply_next_set(&self.transition.next_validator_set)
             .map_err(ValidatorTransitionError::Registry)?;
@@ -244,7 +212,6 @@ fn validate_admissions(
 fn validate_consensus_key_rotations(
     current_validator_set: &ValidatorSet,
     next_validator_set: &ValidatorSet,
-    activation_epoch: u64,
     rotations: &[ValidatorConsensusKeyRotationRequest],
 ) -> Result<(), ValidatorTransitionError> {
     let mut by_id = BTreeMap::<ValidatorId, &ValidatorConsensusKeyRotationRequest>::new();
@@ -285,16 +252,6 @@ fn validate_consensus_key_rotations(
             );
         }
 
-        if rotation.activation_epoch() != activation_epoch {
-            return Err(
-                ValidatorTransitionError::ConsensusKeyRotationEpochMismatch {
-                    validator_id,
-                    expected: activation_epoch,
-                    actual: rotation.activation_epoch(),
-                },
-            );
-        }
-
         if rotation.new_consensus_public_key() != next.consensus_public_key() {
             return Err(
                 ValidatorTransitionError::ConsensusKeyRotationCredentialMismatch(validator_id),
@@ -321,16 +278,12 @@ fn validate_consensus_key_rotations(
 
 fn transition_digest(
     protocol_version: u32,
-    current_epoch: u64,
-    activation_epoch: u64,
     current_validator_set_version: u64,
     next_validator_set: &ValidatorSet,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(TRANSITION_DOMAIN);
     hasher.update(protocol_version.to_be_bytes());
-    hasher.update(current_epoch.to_be_bytes());
-    hasher.update(activation_epoch.to_be_bytes());
     hasher.update(current_validator_set_version.to_be_bytes());
     hasher.update(next_validator_set.version().to_be_bytes());
     hasher.update((next_validator_set.len() as u64).to_be_bytes());

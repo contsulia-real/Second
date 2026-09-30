@@ -16,7 +16,6 @@ pub(crate) enum FinalityScope {
     },
     ValidatorSetTransition {
         current_validator_set_version: u64,
-        activation_epoch: u64,
     },
 }
 
@@ -102,7 +101,6 @@ impl ValidatorSigner {
             validator_set,
             FinalityScope::ValidatorSetTransition {
                 current_validator_set_version: transition.current_validator_set_version(),
-                activation_epoch: transition.activation_epoch(),
             },
             |latest| {
                 latest
