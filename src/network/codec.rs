@@ -1,5 +1,3 @@
-use std::io::{Read, Write};
-
 use crate::{
     CurrencyAddress, CurrencyRole, PublicCurrencyCheckpointProof, PublicCurrencyState,
     PublicCurrencySummary, public_checkpoint::CheckpointProofCodecError,
@@ -12,12 +10,10 @@ use super::{
 
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
 const FRAME_HEADER_SIZE: usize = 12;
+pub(super) const MAX_NETWORK_MESSAGE_SIZE: usize = MAX_NETWORK_FRAME_SIZE + FRAME_HEADER_SIZE;
 const PUBLIC_CURRENCY_ENCODED_SIZE: usize = 10;
 
-pub fn write_network_message<W: Write>(
-    writer: &mut W,
-    message: &NetworkMessage,
-) -> Result<(), NetworkError> {
+pub fn encode_network_message(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {
     let payload = encode_message_payload(message)?;
 
     if payload.len() > MAX_NETWORK_FRAME_SIZE {
@@ -32,42 +28,32 @@ pub fn write_network_message<W: Write>(
         maximum: MAX_NETWORK_FRAME_SIZE,
     })?;
 
-    writer.write_all(&NETWORK_MAGIC)?;
-    writer.write_all(&CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes())?;
-    writer.write_all(&payload_len.to_be_bytes())?;
-    writer.write_all(&payload)?;
-    writer.flush()?;
-
-    Ok(())
+    let mut frame = Vec::with_capacity(FRAME_HEADER_SIZE + payload.len());
+    frame.extend_from_slice(&NETWORK_MAGIC);
+    frame.extend_from_slice(&CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
 }
 
-pub fn read_network_message<R: Read>(reader: &mut R) -> Result<NetworkMessage, NetworkError> {
-    read_network_message_optional(reader)?
-        .ok_or(NetworkError::Io(std::io::ErrorKind::UnexpectedEof))
-}
-
-pub(crate) fn read_network_message_optional<R: Read>(
-    reader: &mut R,
-) -> Result<Option<NetworkMessage>, NetworkError> {
-    let mut header = [0_u8; FRAME_HEADER_SIZE];
-
-    match reader.read_exact(&mut header[..1]) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(NetworkError::from(error)),
+pub fn decode_network_message(frame: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if frame.len() < FRAME_HEADER_SIZE {
+        return Err(NetworkError::InvalidMessageLength {
+            message_type: 0,
+            expected: FRAME_HEADER_SIZE,
+            actual: frame.len(),
+        });
     }
 
-    reader.read_exact(&mut header[1..])?;
-
-    if header[0..4] != NETWORK_MAGIC {
+    if frame[0..4] != NETWORK_MAGIC {
         return Err(NetworkError::InvalidMagic);
     }
 
-    let protocol_version = u32::from_be_bytes(header[4..8].try_into().map_err(|_| {
+    let protocol_version = u32::from_be_bytes(frame[4..8].try_into().map_err(|_| {
         NetworkError::InvalidMessageLength {
             message_type: 0,
             expected: FRAME_HEADER_SIZE,
-            actual: header.len(),
+            actual: frame.len(),
         }
     })?);
 
@@ -78,11 +64,11 @@ pub(crate) fn read_network_message_optional<R: Read>(
         });
     }
 
-    let announced = u32::from_be_bytes(header[8..12].try_into().map_err(|_| {
+    let announced = u32::from_be_bytes(frame[8..12].try_into().map_err(|_| {
         NetworkError::InvalidMessageLength {
             message_type: 0,
             expected: FRAME_HEADER_SIZE,
-            actual: header.len(),
+            actual: frame.len(),
         }
     })?) as usize;
 
@@ -93,10 +79,22 @@ pub(crate) fn read_network_message_optional<R: Read>(
         });
     }
 
-    let mut payload = vec![0_u8; announced];
-    reader.read_exact(&mut payload)?;
+    let expected_len =
+        FRAME_HEADER_SIZE
+            .checked_add(announced)
+            .ok_or(NetworkError::FrameTooLarge {
+                announced,
+                maximum: MAX_NETWORK_FRAME_SIZE,
+            })?;
+    if frame.len() != expected_len {
+        return Err(NetworkError::InvalidMessageLength {
+            message_type: 0,
+            expected: expected_len,
+            actual: frame.len(),
+        });
+    }
 
-    decode_message_payload(&payload).map(Some)
+    decode_message_payload(&frame[FRAME_HEADER_SIZE..])
 }
 
 fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {

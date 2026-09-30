@@ -164,33 +164,7 @@ async fn sync_public_currency_view_for_summary(
     PublicCurrencyView::new(summary, states).map_err(NetworkError::PublicState)
 }
 
-pub async fn serve_public_currency_session(
-    peer: &QuicPeer,
-    state: &SecondState,
-) -> Result<NodeId, NetworkError> {
-    let request = peer
-        .accept_request()
-        .await?
-        .ok_or_else(|| NetworkError::Transport("peer closed before public request".to_owned()))?;
-
-    match request.message() {
-        NetworkMessage::GetPublicCurrencies { start, limit } => {
-            let response = public_currency_page_response(state, *start, *limit)?;
-            request.respond(&response).await?;
-            Ok(peer.remote_node_id())
-        }
-        _ => Err(NetworkError::UnexpectedMessage),
-    }
-}
-
 pub async fn serve_public_currency_connection(
-    peer: &QuicPeer,
-    state: &SecondState,
-) -> Result<NodeId, NetworkError> {
-    serve_public_currency_connection_with_checkpoint(peer, state, None).await
-}
-
-pub async fn serve_public_currency_connection_with_checkpoint(
     peer: &QuicPeer,
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,

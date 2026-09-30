@@ -13,7 +13,7 @@ async fn one_quic_connection_supports_multiple_independent_request_streams() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection(&peer, &state)
+        serve_public_currency_connection(&peer, &state, None)
             .await
             .unwrap()
     });

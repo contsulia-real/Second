@@ -1,10 +1,8 @@
-use std::io::Cursor;
-
 mod support;
 
 use second::{
     MAX_NETWORK_FRAME_SIZE, NetworkError, NetworkMessage, NodeId, client_ping,
-    read_network_message, serve_ping_session, write_network_message,
+    decode_network_message, encode_network_message, serve_ping_session,
 };
 
 #[test]
@@ -18,10 +16,8 @@ fn network_frames_round_trip_without_json_or_platform_dependent_layout() {
     ];
 
     for message in messages {
-        let mut bytes = Vec::new();
-        write_network_message(&mut bytes, &message).unwrap();
-
-        let decoded = read_network_message(&mut Cursor::new(bytes)).unwrap();
+        let bytes = encode_network_message(&message).unwrap();
+        let decoded = decode_network_message(&bytes).unwrap();
         assert_eq!(decoded, message);
     }
 }
@@ -34,7 +30,7 @@ fn oversized_frames_are_rejected_before_payload_allocation() {
     frame.extend_from_slice(&((MAX_NETWORK_FRAME_SIZE as u32) + 1).to_be_bytes());
 
     assert_eq!(
-        read_network_message(&mut Cursor::new(frame)),
+        decode_network_message(&frame),
         Err(NetworkError::FrameTooLarge {
             announced: MAX_NETWORK_FRAME_SIZE + 1,
             maximum: MAX_NETWORK_FRAME_SIZE,
@@ -51,7 +47,7 @@ fn protocol_version_mismatch_is_rejected_during_frame_read() {
     frame.push(2);
 
     assert_eq!(
-        read_network_message(&mut Cursor::new(frame)),
+        decode_network_message(&frame),
         Err(NetworkError::UnsupportedProtocolVersion {
             expected: second::CURRENT_NETWORK_PROTOCOL_VERSION,
             actual: second::CURRENT_NETWORK_PROTOCOL_VERSION + 1,

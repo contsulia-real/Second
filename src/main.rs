@@ -9,7 +9,7 @@ use second::{
     CurrencyAddress, CurrencyRole, NodeId, QuicClient, QuicServer, QuicTransportIdentity,
     StateStore, client_ping, client_public_currency_page,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
-    serve_ping_session, serve_public_currency_connection_with_checkpoint,
+    serve_ping_session, serve_public_currency_connection,
 };
 
 #[tokio::main]
@@ -146,7 +146,7 @@ async fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> 
         .accept(NodeId::from_u64(node_id))
         .await
         .map_err(|error| format!("failed to accept QUIC peer: {error:?}"))?;
-    let remote = serve_public_currency_connection_with_checkpoint(
+    let remote = serve_public_currency_connection(
         &peer,
         &persisted.state,
         persisted.public_checkpoint_proof.as_ref(),

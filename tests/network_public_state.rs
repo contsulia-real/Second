@@ -2,7 +2,7 @@ mod support;
 
 use second::{
     CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,
-    SecondState, client_public_currency_page, serve_public_currency_session,
+    SecondState, client_public_currency_page, serve_public_currency_connection,
 };
 use support::{payment_address, register_payment_addresses, verified_task};
 
@@ -24,7 +24,9 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_session(&peer, &state).await.unwrap()
+        serve_public_currency_connection(&peer, &state, None)
+            .await
+            .unwrap()
     });
 
     let client = support::quic_client(&certificate);

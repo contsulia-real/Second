@@ -13,7 +13,7 @@ async fn real_quic_summary_matches_local_public_state_and_contains_no_owner_data
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection(&peer, &state)
+        serve_public_currency_connection(&peer, &state, None)
             .await
             .unwrap()
     });

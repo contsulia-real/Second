@@ -15,7 +15,7 @@ async fn one_connection_rebuilds_and_verifies_multi_page_public_view() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection(&peer, &state)
+        serve_public_currency_connection(&peer, &state, None)
             .await
             .unwrap()
     });

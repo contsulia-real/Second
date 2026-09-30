@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,13 +7,8 @@ use rcgen::CertifiedKey;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-use super::{
-    MAX_NETWORK_FRAME_SIZE, NetworkError, NetworkMessage, NodeId, read_network_message,
-    write_network_message,
-};
-
-const FRAME_HEADER_SIZE: usize = 12;
-const MAX_QUIC_STREAM_MESSAGE_SIZE: usize = MAX_NETWORK_FRAME_SIZE + FRAME_HEADER_SIZE;
+use super::codec::{MAX_NETWORK_MESSAGE_SIZE, decode_network_message, encode_network_message};
+use super::{NetworkError, NetworkMessage, NodeId};
 const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const SECOND_QUIC_SERVER_NAME: &str = "second.local";
@@ -235,8 +229,7 @@ async fn write_stream_message(
     send: &mut SendStream,
     message: &NetworkMessage,
 ) -> Result<(), NetworkError> {
-    let mut frame = Vec::new();
-    write_network_message(&mut frame, message)?;
+    let frame = encode_network_message(message)?;
     send.write_all(&frame).await.map_err(transport_error)?;
     send.finish().map_err(transport_error)?;
 
@@ -250,20 +243,10 @@ async fn write_stream_message(
 
 async fn read_stream_message(recv: &mut RecvStream) -> Result<NetworkMessage, NetworkError> {
     let frame = recv
-        .read_to_end(MAX_QUIC_STREAM_MESSAGE_SIZE)
+        .read_to_end(MAX_NETWORK_MESSAGE_SIZE)
         .await
         .map_err(transport_error)?;
-    let mut cursor = Cursor::new(frame.as_slice());
-    let message = read_network_message(&mut cursor)?;
-    let consumed = cursor.position() as usize;
-
-    if consumed != frame.len() {
-        return Err(NetworkError::TrailingFrameData {
-            extra: frame.len() - consumed,
-        });
-    }
-
-    Ok(message)
+    decode_network_message(&frame)
 }
 
 fn transport_error(error: impl std::fmt::Display) -> NetworkError {

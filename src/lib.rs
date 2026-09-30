@@ -43,9 +43,8 @@ pub use network::{
     SECOND_QUIC_SERVER_NAME, client_ping, client_public_currency_checkpoint_proof,
     client_public_currency_page, client_public_currency_summary,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
-    read_network_message, serve_ping_session, serve_public_currency_connection,
-    serve_public_currency_connection_with_checkpoint, serve_public_currency_session,
-    write_network_message,
+    decode_network_message, encode_network_message, serve_ping_session,
+    serve_public_currency_connection,
 };
 pub use payment::PaymentAddressStatus;
 pub use persistence::{PersistedNodeState, StateStore};

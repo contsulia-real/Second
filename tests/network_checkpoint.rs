@@ -1,12 +1,10 @@
-use std::io::Cursor;
-
 mod support;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, FinalityError, NetworkError, NetworkMessage, NodeId,
     PublicCheckpointError, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState,
     ValidatorId, ValidatorSet, ValidatorVote, client_sync_certified_public_currency_view,
-    read_network_message, serve_public_currency_connection_with_checkpoint, write_network_message,
+    decode_network_message, encode_network_message, serve_public_currency_connection,
 };
 use support::{key, signed_vote, validator_set};
 
@@ -48,9 +46,8 @@ fn checkpoint_proof_round_trips_as_unverified_network_data() {
         proof: proof.clone(),
     };
 
-    let mut bytes = Vec::new();
-    write_network_message(&mut bytes, &message).unwrap();
-    let decoded = read_network_message(&mut Cursor::new(bytes)).unwrap();
+    let bytes = encode_network_message(&message).unwrap();
+    let decoded = decode_network_message(&bytes).unwrap();
 
     assert_eq!(decoded, message);
     assert_eq!(
@@ -72,7 +69,7 @@ async fn real_quic_sync_returns_certified_view_only_after_local_quorum_verificat
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+        serve_public_currency_connection(&peer, &state, Some(&proof))
             .await
             .unwrap()
     });
@@ -107,7 +104,7 @@ async fn stale_but_valid_checkpoint_is_rejected_before_state_sync() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+        serve_public_currency_connection(&peer, &state, Some(&proof))
             .await
             .unwrap()
     });
@@ -149,7 +146,7 @@ async fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+        serve_public_currency_connection(&peer, &state, Some(&proof))
             .await
             .unwrap()
     });
@@ -180,7 +177,7 @@ async fn server_refuses_to_attach_checkpoint_for_a_different_public_state() {
 
     let server_task = tokio::spawn(async move {
         let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
-        serve_public_currency_connection_with_checkpoint(&peer, &served_state, Some(&proof)).await
+        serve_public_currency_connection(&peer, &served_state, Some(&proof)).await
     });
 
     let client = support::quic_client(&certificate);
