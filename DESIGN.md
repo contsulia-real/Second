@@ -1167,6 +1167,7 @@ ValidatorId + TaskId
 
 后续重点：
 
+- 明确 ValidatorSet activation 与旧 validator-set version 下尚未结束的 PreparedTask 的关系。PreparedTask plan/finality subject 已绑定其 prepare 时的 validator-set version，而 snapshot 当前只保存 active ValidatorSet；在决定旧 set 的 `Prepared` / `Voting` / `Finalized` task 是必须先清空、允许跨 epoch 并保留历史 ValidatorSet，还是采用其他明确规则前，不能把 `CertifiedValidatorSetTransition` 直接接成 durable activation，避免把已经进入投票或 finality 的任务变成无法验证/commit 的孤儿；
 - 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
