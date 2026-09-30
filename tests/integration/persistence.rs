@@ -232,6 +232,15 @@ fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoin
         })
     );
 
+    let stale_unverified = stale.to_unverified_proof();
+    assert_eq!(
+        store.save_with_checkpoint_proof(&state, &set, Some(&stale_unverified)),
+        Err(second::PersistenceError::StaleCheckpointEpoch {
+            minimum: 42,
+            actual: 41,
+        })
+    );
+
     store.remove_files().unwrap();
 }
 

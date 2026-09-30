@@ -54,6 +54,7 @@ pub(super) fn encode_snapshot(
         contents.state,
         contents.validator_set,
         contents.public_checkpoint_proof,
+        contents.checkpoint_floor_epoch,
     )?;
     contents
         .validator_registry
@@ -142,6 +143,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         &decoded.state,
         &decoded.validator_set,
         decoded.public_checkpoint_proof.as_ref(),
+        decoded.checkpoint_floor_epoch,
     )?;
     decoded
         .validator_registry
@@ -591,6 +593,7 @@ fn validate_checkpoint_attachment(
     state: &SecondState,
     validator_set: &ValidatorSet,
     public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    checkpoint_floor_epoch: u64,
 ) -> Result<(), PersistenceError> {
     let Some(proof) = public_checkpoint_proof else {
         return Ok(());
@@ -604,6 +607,14 @@ fn validate_checkpoint_attachment(
         return Err(PersistenceError::CheckpointValidatorSetMismatch {
             expected: validator_set.version(),
             actual: proof.validator_set_version(),
+        });
+    }
+
+    let actual_epoch = proof.checkpoint().epoch();
+    if actual_epoch < checkpoint_floor_epoch {
+        return Err(PersistenceError::StaleCheckpointEpoch {
+            minimum: checkpoint_floor_epoch,
+            actual: actual_epoch,
         });
     }
 
