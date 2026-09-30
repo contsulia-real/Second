@@ -607,7 +607,29 @@ Prepare 的作用：
 - 持久化必须保留的 protocol/prerequisite facts；
 - 不提前提交最终业务 owner 变化。
 
-### 12.1 Prepared plan
+### 12.1 Finality 是业务资产提交的唯一入口
+
+Genesis 初始化完成后，任何 LegalTask 引起的 Currency / BusinessState 变化都必须经过：
+
+~~~text
+VerifiedLegalTask
+  ↓
+prepare
+  ↓
+Validator vote
+  ↓
+FinalityCertificate
+  ↓
+commit
+~~~
+
+禁止存在可由正式节点调用的 direct executor 旁路。
+
+`prepare` 可以建立和持久化协议必须保留的事实（例如 TaskId binding、Transfer establishment、Currency identity reservation 和 claims），但不能直接提交最终业务资产变化。只有验证通过的 FinalityCertificate 才能进入 `PreparedTaskBook::commit()` 并提交 BusinessState。
+
+Genesis 本身的初始账户、地址起点和 Reserve 初始化不属于 LegalTask 执行，不要求经过 Finality。
+
+### 12.2 Prepared plan
 
 Prepared plan digest 绑定：
 
@@ -1094,7 +1116,7 @@ ValidatorId + TaskId
 后续重点：
 
 - 继续审核 TaskId first-request binding 的内部 request_digest 是否完全等价于“第一份 verified signed request”；
-- 继续审核 prepared / direct executor 在所有失败路径上的 protocol/business 边界；
+- 继续审核 prepare / finality / commit 在所有失败路径上的 protocol/business 边界；
 - 完成更完整的长期节点运行与 peer 管理；
 - 明确公共状态证明机制最终是否保留当前 checkpoint 形态；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；

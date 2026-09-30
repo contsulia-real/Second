@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{ExecutionError, Operation, PaymentAddressStatus, SecondState};
 use support::verified_task_with_expiry;
@@ -25,7 +26,7 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     );
 
     assert_eq!(
-        state.execute(&established, 1),
+        state.execute_finalized(&established, 1),
         Err(ExecutionError::InsufficientBalance {
             account: alice,
             required: 1,
@@ -35,7 +36,7 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
     assert_eq!(state.payment_execution_count(), 1);
 
     state
-        .execute(
+        .execute_finalized(
             &verified_task_with_expiry(
                 11,
                 None,
@@ -73,11 +74,11 @@ fn retiring_blocks_new_transfer_but_established_transfer_can_finish() {
         }],
     );
     assert_eq!(
-        state.execute(&new_transfer, 3),
+        state.execute_finalized(&new_transfer, 3),
         Err(ExecutionError::PaymentAddressUnavailable(alice_pay))
     );
 
-    state.execute(&established, 10).unwrap();
+    state.execute_finalized(&established, 10).unwrap();
 
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.balance(bob), 1);
@@ -126,7 +127,7 @@ fn later_transfer_is_not_established_when_an_earlier_operation_fails() {
     );
 
     assert_eq!(
-        state.execute(&task, 1),
+        state.execute_finalized(&task, 1),
         Err(ExecutionError::AccountNotFound(missing))
     );
     assert_eq!(state.payment_execution_count(), 0);

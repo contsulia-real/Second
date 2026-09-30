@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError, ExecutionOutcome,
@@ -42,7 +43,7 @@ fn issue_creates_distinct_currency_and_balance_is_derived() {
     );
 
     assert_eq!(
-        state.execute(&task, 10).unwrap(),
+        state.execute_finalized(&task, 10).unwrap(),
         ExecutionOutcome::Succeeded
     );
     assert_eq!(state.balance(alice), 3);
@@ -65,7 +66,7 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
             count: 4,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
 
     let transfer = verified_task(
         2,
@@ -76,7 +77,7 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
             amount: 2,
         }],
     );
-    state.execute(&transfer, 2).unwrap();
+    state.execute_finalized(&transfer, 2).unwrap();
 
     assert_eq!(state.balance(alice), 2);
     assert_eq!(state.balance(bob), 2);
@@ -96,7 +97,7 @@ fn public_currency_state_exposes_occupancy_but_not_owner() {
             count: 1,
         }],
     );
-    state.execute(&task, 1).unwrap();
+    state.execute_finalized(&task, 1).unwrap();
 
     let public = state.public_currency_state(10.into()).unwrap();
     assert!(public.occupied);
@@ -131,7 +132,7 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
     let request_digest = task.request_digest();
 
     assert!(matches!(
-        state.execute(&task, 10),
+        state.execute_finalized(&task, 10),
         Err(ExecutionError::InsufficientBalance { .. })
     ));
 
@@ -160,7 +161,7 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
             amount: 1,
         }],
     );
-    assert!(state.execute(&first, 1).is_err());
+    assert!(state.execute_finalized(&first, 1).is_err());
 
     let different = verified_task(
         9,
@@ -172,7 +173,7 @@ fn task_id_binding_survives_failure_and_rejects_different_request() {
     );
 
     assert_eq!(
-        state.execute(&different, 2),
+        state.execute_finalized(&different, 2),
         Err(ExecutionError::TaskIdAlreadyBound)
     );
 }
@@ -192,11 +193,11 @@ fn successful_task_replay_is_idempotent_even_after_expiry() {
     );
 
     assert_eq!(
-        state.execute(&task, 4).unwrap(),
+        state.execute_finalized(&task, 4).unwrap(),
         ExecutionOutcome::Succeeded
     );
     assert_eq!(
-        state.execute(&task, 100).unwrap(),
+        state.execute_finalized(&task, 100).unwrap(),
         ExecutionOutcome::AlreadySucceeded
     );
     assert_eq!(state.balance(alice), 1);
@@ -216,7 +217,7 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
             count: 1,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
 
     let leaked = 3.into();
     let before_supply = state.current_supply();
@@ -229,7 +230,7 @@ fn leak_repair_preserves_balance_supply_and_reserve_count() {
             leaked: vec![leaked],
         }],
     );
-    state.execute(&repair, 2).unwrap();
+    state.execute_finalized(&repair, 2).unwrap();
 
     assert_eq!(state.balance(alice), 1);
     assert_eq!(state.current_supply(), before_supply);
@@ -251,7 +252,7 @@ fn currency_sequence_allocator_reports_numeric_exhaustion() {
         }],
     );
     assert_eq!(
-        state.execute(&last, 1).unwrap(),
+        state.execute_finalized(&last, 1).unwrap(),
         ExecutionOutcome::Succeeded
     );
     assert!(state.currency_exists(second::CurrencyAddress::new(u64::MAX - 1)));
@@ -265,7 +266,7 @@ fn currency_sequence_allocator_reports_numeric_exhaustion() {
         }],
     );
     assert_eq!(
-        state.execute(&exhausted, 2),
+        state.execute_finalized(&exhausted, 2),
         Err(ExecutionError::CurrencySequenceSpaceExhausted)
     );
 }

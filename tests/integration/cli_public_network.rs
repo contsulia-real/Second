@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, Operation, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
@@ -217,7 +218,7 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     let alice = support::account(876543);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {

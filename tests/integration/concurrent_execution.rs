@@ -1,10 +1,11 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
-    AccountAddress, ClaimError, ConcurrentExecutionError, CurrencyClaimBook, ExecutionOutcome,
-    Operation, OperationClaimId, SecondState,
+    AccountAddress, ClaimError, ExecutionOutcome, Operation, PreparationError, PreparationOutcome,
+    SecondState,
 };
-use support::{payment_address, register_payment_addresses, verified_task};
+use support::{FinalityHarness, payment_address, register_payment_addresses, verified_task};
 
 fn state_with_balance(count: u64) -> (SecondState, AccountAddress, AccountAddress) {
     let alice = support::account(1);
@@ -12,7 +13,7 @@ fn state_with_balance(count: u64) -> (SecondState, AccountAddress, AccountAddres
     let mut state = SecondState::genesis([alice, bob], 1);
     register_payment_addresses(&mut state, [alice, bob]);
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -29,16 +30,20 @@ fn state_with_balance(count: u64) -> (SecondState, AccountAddress, AccountAddres
 #[test]
 fn in_flight_claim_turns_sufficient_balance_into_currency_contention() {
     let (mut state, alice, bob) = state_with_balance(3);
-    let mut claims = CurrencyClaimBook::new();
+    let mut finalized = FinalityHarness::new("currency-contention");
 
-    claims
-        .claim_transfer(
-            &state,
-            OperationClaimId::new(support::task_id(100), 0),
-            alice,
-            2,
-        )
-        .unwrap();
+    let blocker = verified_task(
+        100,
+        vec![Operation::Transfer {
+            source: payment_address(alice),
+            destination: payment_address(bob),
+            amount: 2,
+        }],
+    );
+    assert_eq!(
+        finalized.prepare(&mut state, &blocker, 2).unwrap(),
+        PreparationOutcome::Prepared
+    );
 
     let competing = verified_task(
         200,
@@ -48,17 +53,14 @@ fn in_flight_claim_turns_sufficient_balance_into_currency_contention() {
             amount: 2,
         }],
     );
-
     assert_eq!(
-        state.execute_with_claims(&competing, 2, &mut claims),
-        Err(ConcurrentExecutionError::Claim(
-            ClaimError::CurrencyContention {
-                account: alice,
-                required: 2,
-                available_unclaimed: 1,
-                claimed_elsewhere: 2,
-            }
-        ))
+        finalized.prepare(&mut state, &competing, 2),
+        Err(PreparationError::Claim(ClaimError::CurrencyContention {
+            account: alice,
+            required: 2,
+            available_unclaimed: 1,
+            claimed_elsewhere: 2,
+        }))
     );
 
     assert_eq!(state.balance(alice), 3);
@@ -68,13 +70,21 @@ fn in_flight_claim_turns_sufficient_balance_into_currency_contention() {
 #[test]
 fn transfer_succeeds_after_competing_task_releases_claims() {
     let (mut state, alice, bob) = state_with_balance(2);
-    let mut claims = CurrencyClaimBook::new();
-    let blocker = OperationClaimId::new(support::task_id(100), 0);
+    let mut finalized = FinalityHarness::new("released-claims");
 
-    claims
-        .claim_transfer(&state, blocker.clone(), alice, 2)
-        .unwrap();
-    claims.release(blocker);
+    let blocker = verified_task(
+        100,
+        vec![Operation::Transfer {
+            source: payment_address(alice),
+            destination: payment_address(bob),
+            amount: 2,
+        }],
+    );
+    assert_eq!(
+        finalized.prepare(&mut state, &blocker, 2).unwrap(),
+        PreparationOutcome::Prepared
+    );
+    finalized.cancel(blocker.task_id()).unwrap();
 
     let task = verified_task(
         200,
@@ -86,12 +96,12 @@ fn transfer_succeeds_after_competing_task_releases_claims() {
     );
 
     assert_eq!(
-        state.execute_with_claims(&task, 2, &mut claims).unwrap(),
+        finalized.execute(&mut state, &task, 2).unwrap(),
         ExecutionOutcome::Succeeded
     );
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.balance(bob), 2);
-    assert_eq!(claims.claimed_currency_count(), 0);
+    assert_eq!(finalized.claimed_currency_count(), 0);
 }
 
 #[test]
@@ -101,10 +111,8 @@ fn ordered_operations_in_one_task_can_reuse_the_same_claimed_currency() {
     let charlie = support::account(3);
     let mut state = SecondState::genesis([alice, bob, charlie], 1);
     register_payment_addresses(&mut state, [alice, bob, charlie]);
-    let mut claims = CurrencyClaimBook::new();
-
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -131,87 +139,92 @@ fn ordered_operations_in_one_task_can_reuse_the_same_claimed_currency() {
             },
         ],
     );
+    let mut finalized = FinalityHarness::new("same-task-claim-reuse");
 
     assert_eq!(
-        state.execute_with_claims(&task, 2, &mut claims).unwrap(),
+        finalized.execute(&mut state, &task, 2).unwrap(),
         ExecutionOutcome::Succeeded
     );
     assert_eq!(state.balance(alice), 0);
     assert_eq!(state.balance(bob), 0);
     assert_eq!(state.balance(charlie), 1);
-    assert_eq!(claims.claimed_currency_count(), 0);
+    assert_eq!(finalized.claimed_currency_count(), 0);
 }
 
 #[test]
 fn leak_repair_validates_leaked_currency_before_reserve_availability() {
     let mut state = SecondState::genesis([], 1);
-    let mut claims = CurrencyClaimBook::new();
     let task = verified_task(
         199,
         vec![Operation::LeakRepair {
             leaked: vec![999.into()],
         }],
     );
+    let mut finalized = FinalityHarness::new("leak-validation");
 
     assert_eq!(
-        state.execute_with_claims(&task, 2, &mut claims),
-        Err(ConcurrentExecutionError::Execution(
+        finalized.prepare(&mut state, &task, 2),
+        Err(PreparationError::Execution(
             second::ExecutionError::CurrencyNotFound(999.into())
         ))
     );
-    assert_eq!(claims.claimed_currency_count(), 0);
+    assert_eq!(finalized.claimed_currency_count(), 0);
 }
 
 #[test]
 fn leak_repair_reports_reserve_contention_when_reserve_is_claimed_elsewhere() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
-    let mut claims = CurrencyClaimBook::new();
-
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
                     account: alice,
-                    count: 1,
+                    count: 2,
                 }],
             ),
             1,
         )
         .unwrap();
 
-    claims
-        .claim_reserve(OperationClaimId::new(support::task_id(100), 0), &state, 1)
-        .unwrap();
-
-    let repair = verified_task(
-        200,
+    let mut finalized = FinalityHarness::new("reserve-contention");
+    let blocker = verified_task(
+        100,
         vec![Operation::LeakRepair {
             leaked: vec![2.into()],
         }],
     );
-
     assert_eq!(
-        state.execute_with_claims(&repair, 2, &mut claims),
-        Err(ConcurrentExecutionError::Claim(
-            ClaimError::ReserveContention {
-                required: 1,
-                available_unclaimed: 0,
-                claimed_elsewhere: 1,
-            }
-        ))
+        finalized.prepare(&mut state, &blocker, 2).unwrap(),
+        PreparationOutcome::Prepared
+    );
+
+    let repair = verified_task(
+        200,
+        vec![Operation::LeakRepair {
+            leaked: vec![3.into()],
+        }],
+    );
+    assert_eq!(
+        finalized.prepare(&mut state, &repair, 2),
+        Err(PreparationError::Claim(ClaimError::ReserveContention {
+            required: 1,
+            available_unclaimed: 0,
+            claimed_elsewhere: 1,
+        }))
     );
 
     assert!(state.currency_exists(2.into()));
+    assert!(state.currency_exists(3.into()));
     assert_eq!(state.reserve_count(), 1);
 }
 
 #[test]
-fn failed_claimed_execution_releases_its_earlier_operation_claims() {
+fn failed_prepare_releases_its_earlier_operation_claims() {
     let (mut state, alice, bob) = state_with_balance(1);
     let charlie = support::account(3);
-    let mut claims = CurrencyClaimBook::new();
+    let mut finalized = FinalityHarness::new("failed-prepare-claims");
 
     let task = verified_task(
         300,
@@ -230,10 +243,10 @@ fn failed_claimed_execution_releases_its_earlier_operation_claims() {
     );
 
     assert!(matches!(
-        state.execute_with_claims(&task, 2, &mut claims),
-        Err(ConcurrentExecutionError::Execution(_))
+        finalized.prepare(&mut state, &task, 2),
+        Err(PreparationError::Execution(_))
     ));
-    assert_eq!(claims.claimed_currency_count(), 0);
+    assert_eq!(finalized.claimed_currency_count(), 0);
     assert_eq!(state.balance(alice), 1);
     assert_eq!(state.balance(bob), 0);
 }

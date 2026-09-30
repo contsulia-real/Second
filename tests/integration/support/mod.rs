@@ -7,9 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, FinalityCertificate,
-    FinalityStatement, LegalTask, LegalTaskPayload, Operation, PaymentAddress, QuicClient,
-    QuicServer, QuicTransportIdentity, SecondState, TaskId, ValidatorCredential, ValidatorId,
+    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, ExecutionError, ExecutionOutcome,
+    FinalityCertificate, FinalityStatement, LegalTask, LegalTaskPayload, Operation, PaymentAddress,
+    PreparationError, PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer,
+    QuicTransportIdentity, SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId,
     ValidatorSet, ValidatorVote, VerifiedLegalTask,
 };
 
@@ -113,6 +114,122 @@ pub fn certificate_from_keys(
         .map(|(validator_id, signing_key)| signed_vote(&statement, validator_id, &signing_key))
         .collect();
     FinalityCertificate::new(statement, votes, validator_set).unwrap()
+}
+
+pub struct FinalityHarness {
+    pub book: PreparedTaskBook,
+    pub validators: ValidatorSet,
+    store: StateStore,
+}
+
+impl FinalityHarness {
+    pub fn new(name: &str) -> Self {
+        Self::with_validator_version(name, 7)
+    }
+
+    pub fn with_validator_version(name: &str, version: u64) -> Self {
+        let store = StateStore::new(temp_base(name));
+        Self {
+            book: PreparedTaskBook::new(store.clone()).unwrap(),
+            validators: validator_set(version, 1..=4),
+            store,
+        }
+    }
+
+    pub fn prepare(
+        &mut self,
+        state: &mut SecondState,
+        task: &VerifiedLegalTask,
+        now: u64,
+    ) -> Result<PreparationOutcome, PreparationError> {
+        self.book.prepare(state, task, now, &self.validators)
+    }
+
+    pub fn commit(
+        &mut self,
+        state: &mut SecondState,
+        task_id: TaskId,
+    ) -> Result<ExecutionOutcome, PreparationError> {
+        let statement = self
+            .book
+            .prepared_finality_statement(task_id.clone(), &self.validators)?;
+        let signers = [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8)));
+        let certificate = certificate_from_keys(statement, &self.validators, signers);
+        self.book
+            .commit(state, task_id, &certificate, &self.validators)
+    }
+
+    pub fn execute(
+        &mut self,
+        state: &mut SecondState,
+        task: &VerifiedLegalTask,
+        now: u64,
+    ) -> Result<ExecutionOutcome, PreparationError> {
+        match self.prepare(state, task, now)? {
+            PreparationOutcome::Prepared => self.commit(state, task.task_id()),
+            PreparationOutcome::AlreadySucceeded => Ok(ExecutionOutcome::AlreadySucceeded),
+        }
+    }
+
+    pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
+        self.book.cancel(task_id)
+    }
+    pub fn claimed_currency_count(&self) -> usize {
+        self.book.claimed_currency_count()
+    }
+
+    pub fn prepared_count(&self) -> usize {
+        self.book.prepared_count()
+    }
+}
+
+impl Drop for FinalityHarness {
+    fn drop(&mut self) {
+        let _ = self.store.remove_files();
+    }
+}
+
+pub trait FinalizedExecute {
+    fn execute_finalized(
+        &mut self,
+        task: &VerifiedLegalTask,
+        now: u64,
+    ) -> Result<ExecutionOutcome, ExecutionError>;
+}
+
+impl FinalizedExecute for SecondState {
+    fn execute_finalized(
+        &mut self,
+        task: &VerifiedLegalTask,
+        now: u64,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        let mut harness = FinalityHarness::new("finalized-execute");
+        match harness.execute(self, task, now) {
+            Ok(outcome) => Ok(outcome),
+            Err(PreparationError::Execution(error)) => Err(error),
+            Err(PreparationError::Claim(second::ClaimError::InsufficientBalance {
+                account,
+                required,
+                available,
+            })) => Err(ExecutionError::InsufficientBalance {
+                account,
+                required,
+                available,
+            }),
+            Err(PreparationError::Claim(second::ClaimError::ReserveUnavailable {
+                required,
+                available,
+            })) => Err(ExecutionError::ReserveUnavailable {
+                required,
+                available,
+            }),
+            Err(error) => {
+                panic!("finalized test execution failed outside domain error path: {error:?}")
+            }
+        }
+    }
 }
 
 pub fn quic_server() -> (QuicServer, Vec<u8>) {

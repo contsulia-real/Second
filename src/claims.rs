@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::BusinessState;
-use crate::{AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, SecondState, TaskId};
+use crate::{AccountAddress, CurrencyAddress, CurrencyRole, SecondState, TaskId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationClaimId {
@@ -23,25 +23,6 @@ impl OperationClaimId {
 
     pub const fn operation_index(&self) -> u64 {
         self.operation_index
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConcurrentExecutionError {
-    Execution(ExecutionError),
-    Claim(ClaimError),
-    OperationIndexOverflow,
-}
-
-impl From<ExecutionError> for ConcurrentExecutionError {
-    fn from(error: ExecutionError) -> Self {
-        Self::Execution(error)
-    }
-}
-
-impl From<ClaimError> for ConcurrentExecutionError {
-    fn from(error: ClaimError) -> Self {
-        Self::Claim(error)
     }
 }
 

@@ -23,7 +23,7 @@ mod validator_signer;
 mod validator_transition;
 
 pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
-pub use claims::{ClaimError, ConcurrentExecutionError, CurrencyClaimBook, OperationClaimId};
+pub use claims::{ClaimError, CurrencyClaimBook, OperationClaimId};
 pub use currency::{CurrencyRole, PublicCurrencyState};
 pub use error::{
     AuthorizationError, ExecutionError, FinalityError, PersistenceError, SignatureParseError,

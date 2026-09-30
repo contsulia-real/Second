@@ -2,6 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation, SecondState,
@@ -50,7 +51,7 @@ fn state_with_issue() -> SecondState {
     .unwrap();
 
     let mut state = SecondState::genesis([alice], 1);
-    state.execute(&task, 1).unwrap();
+    state.execute_finalized(&task, 1).unwrap();
     state
 }
 

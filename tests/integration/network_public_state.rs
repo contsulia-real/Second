@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NodeId, Operation,
@@ -17,7 +18,7 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
             count: 2,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
 
     let (server, certificate) = support::quic_server();
     let address = server.local_addr().unwrap();
@@ -73,7 +74,7 @@ fn address_gaps_are_skipped_without_empty_pages() {
             },
         ],
     );
-    assert!(state.execute(&failing, 1).is_err());
+    assert!(state.execute_finalized(&failing, 1).is_err());
 
     let issue = verified_task(
         2,
@@ -82,7 +83,7 @@ fn address_gaps_are_skipped_without_empty_pages() {
             count: 1,
         }],
     );
-    state.execute(&issue, 2).unwrap();
+    state.execute_finalized(&issue, 2).unwrap();
 
     let page = state
         .public_currency_page(CurrencyAddress::new(1), 1)
@@ -113,7 +114,7 @@ fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
             },
         ],
     );
-    assert!(state.execute(&failing, 1).is_err());
+    assert!(state.execute_finalized(&failing, 1).is_err());
 
     let issue = verified_task(
         11,
@@ -122,7 +123,7 @@ fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
             count: 2,
         }],
     );
-    state.execute(&issue, 2).unwrap();
+    state.execute_finalized(&issue, 2).unwrap();
 
     let page = state
         .public_currency_page(CurrencyAddress::new(1), 2)

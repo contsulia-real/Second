@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation,
@@ -94,7 +95,7 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
         let mut state = SecondState::genesis([alice, bob], 1);
         register_payment_addresses(&mut state, [alice, bob]);
         state
-            .execute(
+            .execute_finalized(
                 &verified_task(
                     1,
                     vec![Operation::Issue {

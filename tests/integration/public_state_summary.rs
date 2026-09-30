@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{Operation, SecondState};
 use support::{payment_address, register_payment_addresses, verified_task};
@@ -9,7 +10,7 @@ fn public_summary_is_identical_when_only_hidden_owner_differs() {
     let bob = support::account(2);
 
     let mut left = SecondState::genesis([alice, bob], 1);
-    left.execute(
+    left.execute_finalized(
         &verified_task(
             1,
             vec![Operation::Issue {
@@ -23,7 +24,7 @@ fn public_summary_is_identical_when_only_hidden_owner_differs() {
 
     let mut right = SecondState::genesis([alice, bob], 1);
     right
-        .execute(
+        .execute_finalized(
             &verified_task(
                 2,
                 vec![Operation::Issue {
@@ -54,7 +55,7 @@ fn transfer_between_owners_does_not_change_public_currency_digest() {
     register_payment_addresses(&mut state, [alice, bob]);
 
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -69,7 +70,7 @@ fn transfer_between_owners_does_not_change_public_currency_digest() {
     let before = state.public_currency_summary();
 
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 2,
                 vec![Operation::Transfer {
@@ -95,7 +96,7 @@ fn public_summary_changes_when_occupancy_or_role_changes() {
 
     let mut circulation = SecondState::genesis([alice], 1);
     circulation
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {

@@ -178,27 +178,6 @@ impl SecondState {
         })
     }
 
-    pub(crate) fn establish_transfer_for_execution(
-        &mut self,
-        working_prerequisite: &mut PrerequisiteState,
-        claim_id: OperationClaimId,
-        source: PaymentAddress,
-        destination: PaymentAddress,
-        amount: u64,
-    ) -> Result<EstablishedTransfer, ExecutionError> {
-        let transfer = self.establish_transfer(claim_id.clone(), source, destination, amount)?;
-        let execution = self
-            .prerequisite
-            .payment_executions
-            .get(&claim_id)
-            .cloned()
-            .ok_or(ExecutionError::TransferNotEstablished(claim_id.clone()))?;
-        working_prerequisite
-            .payment_executions
-            .insert(claim_id, execution);
-        Ok(transfer)
-    }
-
     pub(crate) fn apply_established_transfer(
         &self,
         working: &mut BusinessState,

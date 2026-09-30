@@ -1,6 +1,7 @@
 use std::fs;
 
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, Operation, PersistedNodeState, PublicCurrencyCheckpoint,
@@ -193,7 +194,7 @@ fn certified_checkpoint_floor_survives_state_advance_and_rejects_older_checkpoin
     assert!(restored.public_checkpoint_proof.is_some());
 
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -254,7 +255,7 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
         }],
     );
     let issue_request_digest = issue.request_digest();
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
 
     let transfer = verified_task(
         2,
@@ -264,7 +265,7 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
             amount: 1,
         }],
     );
-    state.execute(&transfer, 2).unwrap();
+    state.execute_finalized(&transfer, 2).unwrap();
 
     let generation = store.save(&state, &validators()).unwrap();
     assert_eq!(generation, 1);
@@ -313,7 +314,7 @@ fn newer_snapshot_wins_and_generation_increments() {
             count: 1,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
 
     assert_eq!(store.save(&state, &set).unwrap(), 2);
 
@@ -342,7 +343,7 @@ fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
             count: 1,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
     assert_eq!(store.save(&state, &set).unwrap(), 2);
 
     let newest = store.slot_path_for_generation(2);
@@ -369,7 +370,7 @@ fn same_generation_with_different_valid_contents_is_rejected() {
 
     let mut second_state = SecondState::genesis([alice], 1);
     second_state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -419,7 +420,7 @@ fn two_corrupted_slots_are_reported_and_save_refuses_to_reset_state() {
             count: 1,
         }],
     );
-    state.execute(&issue, 1).unwrap();
+    state.execute_finalized(&issue, 1).unwrap();
     store.save(&state, &set).unwrap();
 
     fs::write(store.slot_path_for_generation(1), b"broken-a").unwrap();

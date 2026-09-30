@@ -1,13 +1,15 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, ExecutionError,
     ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
     PreparationError, PreparationOutcome, PreparedTaskBook, SecondState, StateStore, TaskId,
-    ValidatorCredential, ValidatorId, ValidatorSet,
+    ValidatorId, ValidatorSet,
 };
 use support::{
-    key, payment_address, register_payment_addresses, signed_vote, temp_base, verified_task,
+    FinalityHarness, certificate_from_keys, key, payment_address, register_payment_addresses,
+    temp_base, verified_task,
 };
 
 fn validators() -> ValidatorSet {
@@ -15,73 +17,7 @@ fn validators() -> ValidatorSet {
 }
 
 fn validators_at(version: u64) -> ValidatorSet {
-    ValidatorSet::new(
-        version,
-        (1..=4).map(|id| {
-            ValidatorCredential::new(
-                ValidatorId::new(id),
-                key((id as u8).wrapping_add(40)).verifying_key().to_bytes(),
-                key(id as u8).verifying_key().to_bytes(),
-                key((id as u8).wrapping_add(80)).verifying_key().to_bytes(),
-            )
-            .unwrap()
-        }),
-    )
-    .unwrap()
-}
-
-struct Harness {
-    book: PreparedTaskBook,
-    validators: ValidatorSet,
-    store: StateStore,
-}
-
-impl Harness {
-    fn new(name: &str) -> Self {
-        let store = StateStore::new(temp_base(name));
-        Self {
-            book: PreparedTaskBook::new(store.clone()).unwrap(),
-            validators: validators(),
-            store,
-        }
-    }
-
-    fn prepare(
-        &mut self,
-        state: &mut SecondState,
-        task: &second::VerifiedLegalTask,
-        now: u64,
-    ) -> Result<PreparationOutcome, PreparationError> {
-        self.book.prepare(state, task, now, &self.validators)
-    }
-
-    fn commit(
-        &mut self,
-        state: &mut SecondState,
-        task_id: TaskId,
-    ) -> Result<ExecutionOutcome, PreparationError> {
-        let certificate = certify(&self.book, task_id.clone(), &self.validators);
-        self.book
-            .commit(state, task_id, &certificate, &self.validators)
-    }
-
-    fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
-        self.book.cancel(task_id)
-    }
-
-    fn claimed_currency_count(&self) -> usize {
-        self.book.claimed_currency_count()
-    }
-
-    fn prepared_count(&self) -> usize {
-        self.book.prepared_count()
-    }
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let _ = self.store.remove_files();
-    }
+    support::validator_set(version, 1..=4)
 }
 
 fn certify(
@@ -94,10 +30,9 @@ fn certify(
         .unwrap();
     let votes = [1_u64, 2, 3]
         .into_iter()
-        .map(|id| signed_vote(&statement, ValidatorId::new(id), &key(id as u8)))
-        .collect();
+        .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8)));
 
-    FinalityCertificate::new(statement, votes, validator_set).unwrap()
+    certificate_from_keys(statement, validator_set, votes)
 }
 
 fn expiring_task(
@@ -130,7 +65,7 @@ fn expiring_task(
 fn prepared_issue_reserves_addresses_without_exposing_currency_before_commit() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
     let task = verified_task(
         10,
         vec![Operation::Issue {
@@ -164,7 +99,7 @@ fn prepared_issue_reserves_addresses_without_exposing_currency_before_commit() {
 fn cancelling_prepared_issue_burns_reserved_addresses_forever() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
     let cancelled = verified_task(
         10,
         vec![Operation::Issue {
@@ -187,7 +122,7 @@ fn cancelling_prepared_issue_burns_reserved_addresses_forever() {
             count: 1,
         }],
     );
-    state.execute(&later, 2).unwrap();
+    state.execute_finalized(&later, 2).unwrap();
 
     assert_eq!(state.next_currency_address(), 4);
     assert!(!state.currency_exists(CurrencyAddress::new(1)));
@@ -200,7 +135,7 @@ fn cancelling_prepared_leak_repair_burns_replacement_reserve_addresses() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -220,7 +155,7 @@ fn cancelling_prepared_leak_repair_burns_replacement_reserve_addresses() {
             leaked: vec![CurrencyAddress::new(2)],
         }],
     );
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
 
     prepared.prepare(&mut state, &repair, 2).unwrap();
     assert_eq!(state.next_currency_address(), 4);
@@ -242,7 +177,7 @@ fn prepared_transfer_holds_claim_until_cancel_or_commit() {
     let mut state = SecondState::genesis([alice, bob], 1);
     register_payment_addresses(&mut state, [alice, bob]);
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -270,7 +205,7 @@ fn prepared_transfer_holds_claim_until_cancel_or_commit() {
             amount: 1,
         }],
     );
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
 
     prepared.prepare(&mut state, &first, 2).unwrap();
     assert_eq!(prepared.claimed_currency_count(), 2);
@@ -298,7 +233,7 @@ fn prepared_transfer_holds_claim_until_cancel_or_commit() {
 fn same_task_cannot_be_prepared_twice_at_the_same_time() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
     let task = verified_task(
         10,
         vec![Operation::Issue {
@@ -320,7 +255,7 @@ fn same_task_cannot_be_prepared_twice_at_the_same_time() {
 fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
     let task = verified_task(
         10,
         vec![Operation::Issue {
@@ -345,7 +280,7 @@ fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
 fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("stale-certificate");
+    let mut prepared = FinalityHarness::new("stale-certificate");
     let task = verified_task(
         10,
         vec![Operation::Issue {
@@ -400,7 +335,7 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
 fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("validator-set-binding");
+    let mut prepared = FinalityHarness::new("validator-set-binding");
     let task = verified_task(
         10,
         vec![Operation::Issue {
@@ -427,7 +362,7 @@ fn prepared_plan_is_bound_to_the_validator_set_version_that_created_it() {
 fn prepared_before_expiry_can_commit_after_expiry() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("prepared-crosses-expiry");
+    let mut prepared = FinalityHarness::new("prepared-crosses-expiry");
     let task = expiring_task(
         10,
         5,
@@ -456,7 +391,7 @@ fn failed_prepare_burns_addresses_allocated_by_earlier_operations() {
     let alice = support::account(1);
     let missing = support::account(99);
     let mut state = SecondState::genesis([alice], 1);
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
     let task = verified_task(
         10,
         vec![
@@ -566,7 +501,7 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
     assert!(restored.currency_exists(CurrencyAddress::new(2)));
 
     assert_eq!(
-        restored.execute(&task, 2).unwrap(),
+        restored.execute_finalized(&task, 2).unwrap(),
         ExecutionOutcome::AlreadySucceeded
     );
 
@@ -579,7 +514,7 @@ fn destroy_and_leak_repair_targets_are_claimed_during_preparation() {
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
     register_payment_addresses(&mut state, [alice]);
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
@@ -605,7 +540,7 @@ fn destroy_and_leak_repair_targets_are_claimed_during_preparation() {
             leaked: vec![CurrencyAddress::new(2)],
         }],
     );
-    let mut prepared = Harness::new("case");
+    let mut prepared = FinalityHarness::new("case");
 
     prepared.prepare(&mut state, &transfer, 2).unwrap();
 

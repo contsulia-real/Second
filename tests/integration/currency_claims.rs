@@ -1,4 +1,5 @@
 use crate::support;
+use support::FinalizedExecute as _;
 
 use second::{
     AccountAddress, ClaimError, CurrencyClaimBook, Operation, OperationClaimId, SecondState,
@@ -11,7 +12,7 @@ fn issued_state(count: u64) -> (SecondState, AccountAddress, AccountAddress) {
     let mut state = SecondState::genesis([alice, bob], 1);
 
     state
-        .execute(
+        .execute_finalized(
             &verified_task(
                 1,
                 vec![Operation::Issue {
