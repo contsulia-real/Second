@@ -865,6 +865,10 @@ transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应
 
 当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
+当前 public Node admission 是开放的：任何能够完成 authenticated Hello、证明持有其 NodeId 对应 transport private key 的 peer，都可以使用上述公开只读网络能力，前提是通过现有 connection / stream / sync resource guardrail 与 peer 去重规则。public admission 不维护 allowlist，也不要求 ValidatorCredential，因为这些数据本来就是公开状态。
+
+这不意味着 Second 的 Validator 层是 permissionless。transport-authenticated public peer 只获得公开网络访问权；Validator vote、ValidatorSet membership、未来任何私有 LegalTask 通道或其他 privileged protocol 都必须使用各自独立的授权规则。后续 peer trust / discovery 主要决定节点主动连接谁、如何找到长期 peer，以及未来 privileged peer role 如何绑定，不反向改变当前 public read service 的开放 admission。
+
 每个 stream 内仍使用统一的自定义二进制 frame：
 
 ~~~text
@@ -1157,7 +1161,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 peer trust/discovery/admission；如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
+- 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
