@@ -87,6 +87,7 @@ pub enum PersistenceError {
     GenerationOverflow,
     CheckpointDoesNotMatchState,
     CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
+    CheckpointFinality(FinalityError),
     StaleCheckpointEpoch { minimum: u64, actual: u64 },
 }
 

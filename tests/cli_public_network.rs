@@ -113,6 +113,11 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     assert!(client_stdout.contains("occupied=0"));
     assert!(client_stdout.contains("next_currency=310"));
 
+    let advanced_trust = trust_store.load().unwrap().unwrap();
+    assert_eq!(advanced_trust.checkpoint_floor_epoch, 77);
+    assert_eq!(advanced_trust.state.next_currency_address(), 999);
+    assert!(advanced_trust.public_checkpoint_proof.is_none());
+
     let lower = client_stdout.to_ascii_lowercase();
     assert!(!lower.contains("owner"));
     assert!(!lower.contains("balance"));

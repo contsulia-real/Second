@@ -133,6 +133,37 @@ impl StateStore {
         )
     }
 
+    pub fn advance_checkpoint_floor(
+        &self,
+        checkpoint: &CertifiedPublicCurrencyCheckpoint,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        checkpoint
+            .certificate()
+            .verify(&latest.validator_set)
+            .map_err(PersistenceError::CheckpointFinality)?;
+
+        let proof = checkpoint.to_unverified_proof();
+        let checkpoint_floor_epoch = checkpoint_floor_for_write(Some(&latest), Some(&proof))?;
+
+        self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state: &latest.state,
+                validator_set: &latest.validator_set,
+                public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                checkpoint_floor_epoch,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
+            },
+        )
+    }
+
     pub fn save_with_validator_registry(
         &self,
         state: &SecondState,

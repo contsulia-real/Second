@@ -171,7 +171,8 @@ fn sync_public_certified(
     node_id: u64,
     trust_snapshot_base: &str,
 ) -> Result<(), String> {
-    let trusted = StateStore::new(trust_snapshot_base)
+    let trust_store = StateStore::new(trust_snapshot_base);
+    let trusted = trust_store
         .load()
         .map_err(|error| format!("failed to load trust snapshot: {error:?}"))?
         .ok_or_else(|| format!("no trust snapshot found at {trust_snapshot_base}"))?;
@@ -189,6 +190,10 @@ fn sync_public_certified(
         minimum_checkpoint_epoch,
     )
     .map_err(|error| format!("certified public currency sync failed: {error:?}"))?;
+
+    trust_store
+        .advance_checkpoint_floor(&synced.checkpoint)
+        .map_err(|error| format!("failed to persist checkpoint floor: {error:?}"))?;
 
     let summary = &synced.view.summary;
     let checkpoint = synced.checkpoint.checkpoint();
