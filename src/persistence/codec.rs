@@ -395,7 +395,18 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         let source = PaymentAddress::from_bytes(decoder.read_array_32()?);
         let destination = PaymentAddress::from_bytes(decoder.read_array_32()?);
         let amount = decoder.read_u64()?;
-        if !payment_addresses.contains_key(&source) || !payment_addresses.contains_key(&destination)
+        if amount == 0 {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let source_record = payment_addresses
+            .get(&source)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        let destination_record = payment_addresses
+            .get(&destination)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        if source_record.status == PaymentAddressStatus::Retired
+            || destination_record.status == PaymentAddressStatus::Retired
         {
             return Err(PersistenceError::InvalidSnapshot);
         }
