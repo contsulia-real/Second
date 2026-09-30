@@ -121,6 +121,23 @@ impl QuicClient {
         client_handshake(connection, &self.identity).await
     }
 
+    pub async fn connect_expected(
+        &self,
+        address: SocketAddr,
+        expected_node_id: NodeId,
+    ) -> Result<QuicPeer, NetworkError> {
+        let peer = self.connect(address).await?;
+        let actual = peer.remote_node_id();
+        if actual != expected_node_id {
+            peer.close_with_reason(b"unexpected peer identity");
+            return Err(NetworkError::UnexpectedPeerIdentity {
+                expected: expected_node_id,
+                actual,
+            });
+        }
+        Ok(peer)
+    }
+
     pub async fn wait_idle(&self) {
         self.endpoint.wait_idle().await;
     }

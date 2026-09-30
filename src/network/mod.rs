@@ -14,7 +14,7 @@ use crate::{
 
 pub use codec::{decode_network_message, encode_network_message};
 pub use identity::QuicTransportIdentity;
-pub(crate) use peer_manager::{PeerManager, PeerRegistrationError};
+pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
 pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
 pub use session::{
     client_ping, client_public_currency_checkpoint_proof, client_public_currency_page,
@@ -117,6 +117,10 @@ pub enum NetworkError {
     TransportIdentity(String),
     InvalidTransportIdentity,
     PeerAuthenticationFailed(NodeId),
+    UnexpectedPeerIdentity {
+        expected: NodeId,
+        actual: NodeId,
+    },
     InvalidMagic,
     UnsupportedProtocolVersion {
         expected: u32,

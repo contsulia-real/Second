@@ -1,15 +1,15 @@
 use std::ffi::OsString;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 
-use crate::network::{PeerManager, PeerRegistrationError};
+use crate::network::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
 use crate::{
-    NetworkError, NodeId, PersistenceError, PublicCurrencyCheckpointProof, QuicServer,
-    QuicTransportIdentity, SecondState, StateStore, serve_public_currency_connection,
+    NetworkError, NodeId, PersistenceError, PublicCurrencyCheckpointProof, QuicClient, QuicPeer,
+    QuicServer, QuicTransportIdentity, SecondState, StateStore, serve_public_currency_connection,
 };
 
 #[derive(Debug)]
@@ -17,6 +17,9 @@ pub enum NodeRuntimeError {
     Persistence(PersistenceError),
     Network(NetworkError),
     SnapshotMissing,
+    ConnectionCapacityReached { maximum: usize },
+    SelfConnection,
+    DuplicatePeer(NodeId),
 }
 
 impl From<PersistenceError> for NodeRuntimeError {
@@ -36,6 +39,8 @@ pub struct NodeRuntime {
     transport_identity: QuicTransportIdentity,
     state: Arc<SecondState>,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
+    peer_manager: PeerManager,
+    active_connections: Arc<AtomicUsize>,
 }
 
 impl NodeRuntime {
@@ -47,12 +52,15 @@ impl NodeRuntime {
         let transport_identity =
             QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
+        let peer_manager = PeerManager::new(transport_identity.node_id());
 
         Ok(Self {
             server,
             transport_identity,
             state: Arc::new(persisted.state),
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
+            peer_manager,
+            active_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -68,27 +76,73 @@ impl NodeRuntime {
         self.transport_identity.certificate_der()
     }
 
-    pub async fn run(self) -> Result<(), NodeRuntimeError> {
-        let active_connections = Arc::new(AtomicUsize::new(0));
-        let peer_manager = PeerManager::new(self.node_id());
+    pub fn peer(&self, node_id: NodeId) -> Option<QuicPeer> {
+        self.peer_manager.peer(node_id)
+    }
 
+    pub async fn dial(
+        &self,
+        address: SocketAddr,
+        expected_node_id: NodeId,
+        trusted_server_certificate_der: &[u8],
+    ) -> Result<QuicPeer, NodeRuntimeError> {
+        let permit = ActiveConnectionPermit::try_acquire(&self.active_connections).ok_or(
+            NodeRuntimeError::ConnectionCapacityReached {
+                maximum: MAX_ACTIVE_CONNECTIONS,
+            },
+        )?;
+
+        let client = QuicClient::new(
+            outbound_bind_address(address),
+            trusted_server_certificate_der,
+            self.transport_identity.clone(),
+        )?;
+        let peer = client.connect_expected(address, expected_node_id).await?;
+        let peer_lease = match self.peer_manager.register(&peer, PeerDirection::Outbound) {
+            Ok(lease) => lease,
+            Err(PeerRegistrationError::Duplicate(node_id)) => {
+                peer.close_with_reason(b"duplicate peer");
+                return self
+                    .peer_manager
+                    .peer(node_id)
+                    .ok_or(NodeRuntimeError::DuplicatePeer(node_id));
+            }
+            Err(PeerRegistrationError::SelfConnection) => {
+                peer.close_with_reason(b"self connection");
+                return Err(NodeRuntimeError::SelfConnection);
+            }
+        };
+
+        let active_peer = peer.clone();
+        tokio::spawn(serve_managed_peer(
+            peer,
+            Arc::clone(&self.state),
+            self.public_checkpoint_proof.clone(),
+            peer_lease,
+            permit,
+            Some(client),
+        ));
+
+        Ok(active_peer)
+    }
+
+    pub async fn run(&self) -> Result<(), NodeRuntimeError> {
         loop {
             let incoming = self.server.accept_incoming().await?;
-            let Some(permit) = ActiveConnectionPermit::try_acquire(&active_connections) else {
+            let Some(permit) = ActiveConnectionPermit::try_acquire(&self.active_connections) else {
                 drop(incoming);
                 continue;
             };
 
             let state = Arc::clone(&self.state);
             let public_checkpoint_proof = self.public_checkpoint_proof.clone();
-            let peer_manager = peer_manager.clone();
+            let peer_manager = self.peer_manager.clone();
             tokio::spawn(async move {
-                let _permit = permit;
                 let Ok(peer) = incoming.handshake().await else {
                     return;
                 };
 
-                let peer_lease = match peer_manager.register(peer.remote_node_id()) {
+                let peer_lease = match peer_manager.register(&peer, PeerDirection::Inbound) {
                     Ok(lease) => lease,
                     Err(PeerRegistrationError::SelfConnection) => {
                         peer.close_with_reason(b"self connection");
@@ -99,17 +153,42 @@ impl NodeRuntime {
                         return;
                     }
                 };
-                let _peer_lease = peer_lease;
 
-                let _ = serve_public_currency_connection(
-                    &peer,
-                    &state,
-                    public_checkpoint_proof.as_deref(),
+                serve_managed_peer(
+                    peer,
+                    state,
+                    public_checkpoint_proof,
+                    peer_lease,
+                    permit,
+                    None,
                 )
                 .await;
             });
         }
     }
+}
+
+async fn serve_managed_peer(
+    peer: QuicPeer,
+    state: Arc<SecondState>,
+    public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
+    peer_lease: PeerLease,
+    permit: ActiveConnectionPermit,
+    outbound_client: Option<QuicClient>,
+) {
+    let _peer_lease = peer_lease;
+    let _permit = permit;
+    let _outbound_client = outbound_client;
+    let _ =
+        serve_public_currency_connection(&peer, &state, public_checkpoint_proof.as_deref()).await;
+}
+
+fn outbound_bind_address(remote: SocketAddr) -> SocketAddr {
+    let ip = match remote {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    SocketAddr::new(ip, 0)
 }
 
 struct ActiveConnectionPermit {

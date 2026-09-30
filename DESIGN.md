@@ -870,11 +870,13 @@ NodeId 的认证权威是 Hello peer-auth Ed25519 key：Hello signature 的签�
 
 transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；trust/discovery/admission 仍需要独立规则。
 
-当前 runtime 已有进程内 peer manager。peer 只有在 authenticated Hello 完成后才进入 registry；registry 以 NodeId 为唯一键，同一 NodeId 在同一节点上同时只允许一条 active connection，自连接（remote NodeId 等于 local NodeId）直接拒绝。当前 runtime 只有 inbound connection，因此重复连接采用 first-active-wins：已有连接继续服务，后到的重复连接关闭。connection task 结束时 lease 自动释放 NodeId，registry 不进入 snapshot，也不作为任何协议状态或共识状态持久化。
+当前 runtime 已有进程内 peer manager，并同时管理 inbound 与主动 outbound connection。peer 只有在 authenticated Hello 完成后才进入 registry；registry 以 NodeId 为唯一键，同一 NodeId 在同一节点上同时只保留一条 active connection，自连接（remote NodeId 等于 local NodeId）直接拒绝。没有重复连接时，任意方向的 authenticated connection 都可正常注册，因此 public read admission 仍保持开放。
 
-如果以后加入主动 outbound dialing，不能直接沿用当前 inbound-only first-active-wins 作为双向连接竞态规则；届时必须在同一个 peer manager 上定义确定性的 simultaneous-dial arbitration，避免双方各自保留不同 connection 或互相关闭导致无连接。该规则在 outbound runtime 真正实现前不提前冻结。
+当两个长期节点同时互拨形成两条连接时，peer manager 使用 NodeId 定义确定性仲裁：较小 NodeId 的节点保留 outbound，较大 NodeId 的节点保留对应的 inbound；反向连接被关闭。该规则只在同一 NodeId 已出现重复 active connection 时参与选择，不会因为连接方向“非首选”而拒绝一条原本唯一的连接。被替换连接的旧 lease 即使稍后释放，也不能删除新连接的 registry entry。
 
-节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 connection；超过该本地容量的新 `Incoming` 在握手前直接拒绝。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
+`NodeRuntime::dial` 复用节点自身持久 transport identity 发起 QUIC + authenticated Hello，并要求调用方同时提供目标 address、expected NodeId 与当前 self-signed server certificate pin；TLS endpoint 与 Hello NodeId 都必须匹配预期。outbound connection 注册后与 inbound 一样运行 public Currency serving session，因此保留下来的单条 QUIC connection 可由双方各自发起 public request。当前未引入自动 peer discovery、bootstrap/DHT 或长期 peer 选择策略。
+
+节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public Currency session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
 
 当前节点网络面只暴露 Ping/Pong 与 public Currency 查询/同步；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
@@ -1186,7 +1188,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 authenticated NodeId + inbound peer manager 基础上继续完成 outbound peer trust / discovery；public read service 已确定为 authenticated-open admission。如果引入 outbound dialing，再补确定性的 simultaneous-dial arbitration；transport identity 只证明 key ownership，不等于 Validator authority；
+- 在现有 authenticated inbound/outbound peer manager 基础上继续决定自动 peer discovery、bootstrap 与长期 outbound target selection；当前显式 dial 已要求 address + expected NodeId + certificate pin，但 transport identity 只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
