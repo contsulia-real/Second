@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use crate::PersistenceError;
 
 use super::PersistedNodeState;
-use super::codec::{MAX_SNAPSHOT_FILE_SIZE, decode_snapshot};
+use super::codec::{CHECKSUM_SIZE, MAX_SNAPSHOT_FILE_SIZE, decode_snapshot};
 
 type PathLockMap = BTreeMap<PathBuf, Weak<Mutex<()>>>;
 
@@ -66,6 +66,11 @@ pub(super) fn remove_slots(base_path: &Path) -> Result<(), PersistenceError> {
     Ok(())
 }
 
+struct ValidSlot {
+    snapshot: PersistedNodeState,
+    checksum: [u8; CHECKSUM_SIZE],
+}
+
 pub(super) fn load_latest(
     base_path: &Path,
 ) -> Result<Option<PersistedNodeState>, PersistenceError> {
@@ -90,8 +95,18 @@ pub(super) fn load_latest(
         }
     }
 
-    if let Some(latest) = valid.into_iter().max_by_key(|snapshot| snapshot.generation) {
-        return Ok(Some(latest));
+    if valid.len() == 2 && valid[0].snapshot.generation == valid[1].snapshot.generation {
+        let generation = valid[0].snapshot.generation;
+        if valid[0].checksum != valid[1].checksum {
+            return Err(PersistenceError::ConflictingSnapshotGeneration(generation));
+        }
+    }
+
+    if let Some(latest) = valid
+        .into_iter()
+        .max_by_key(|slot| slot.snapshot.generation)
+    {
+        return Ok(Some(latest.snapshot));
     }
 
     if any_file_exists {
@@ -148,7 +163,7 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn read_slot(path: &Path) -> Result<Option<PersistedNodeState>, PersistenceError> {
+fn read_slot(path: &Path) -> Result<Option<ValidSlot>, PersistenceError> {
     let mut file = File::open(path).map_err(PersistenceError::from_io)?;
     let file_len = file.metadata().map_err(PersistenceError::from_io)?.len();
     if file_len > MAX_SNAPSHOT_FILE_SIZE {
@@ -160,7 +175,13 @@ fn read_slot(path: &Path) -> Result<Option<PersistedNodeState>, PersistenceError
     file.read_to_end(&mut bytes)
         .map_err(PersistenceError::from_io)?;
 
-    decode_snapshot(&bytes).map(Some)
+    let snapshot = decode_snapshot(&bytes)?;
+    let checksum = bytes
+        .get(bytes.len().saturating_sub(CHECKSUM_SIZE)..)
+        .and_then(|checksum| checksum.try_into().ok())
+        .ok_or(PersistenceError::InvalidSnapshot)?;
+
+    Ok(Some(ValidSlot { snapshot, checksum }))
 }
 
 #[cfg(test)]

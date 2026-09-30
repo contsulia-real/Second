@@ -356,6 +356,45 @@ fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
 }
 
 #[test]
+fn same_generation_with_different_valid_contents_is_rejected() {
+    let first_base = temp_base("split-generation-first");
+    let second_base = temp_base("split-generation-second");
+    let first_store = StateStore::new(&first_base);
+    let second_store = StateStore::new(&second_base);
+    let alice = support::account(1);
+    let set = validators();
+
+    let first_state = SecondState::genesis([alice], 1);
+    first_store.save(&first_state, &set).unwrap();
+
+    let mut second_state = SecondState::genesis([alice], 1);
+    second_state
+        .execute(
+            &verified_task(
+                1,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+    second_store.save(&second_state, &set).unwrap();
+
+    let divergent = fs::read(second_store.slot_path_for_generation(1)).unwrap();
+    fs::write(first_store.slot_path_for_generation(2), divergent).unwrap();
+
+    assert_eq!(
+        first_store.load().err(),
+        Some(second::PersistenceError::ConflictingSnapshotGeneration(1))
+    );
+
+    first_store.remove_files().unwrap();
+    second_store.remove_files().unwrap();
+}
+
+#[test]
 fn no_snapshot_returns_none_instead_of_inventing_state() {
     let base = temp_base("empty");
     let store = StateStore::new(&base);

@@ -19,7 +19,7 @@ use super::validator_codec::{decode_validator_registry, encode_validator_registr
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
 const SNAPSHOT_VERSION: u32 = 7;
 const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V7\0";
-const CHECKSUM_SIZE: usize = 32;
+pub(super) const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
 

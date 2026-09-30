@@ -85,6 +85,7 @@ pub enum PersistenceError {
     StoreLockPoisoned,
     ValidatorRegistryMismatch,
     GenerationOverflow,
+    ConflictingSnapshotGeneration(u64),
     CheckpointDoesNotMatchState,
     CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
     CheckpointFinality(FinalityError),
