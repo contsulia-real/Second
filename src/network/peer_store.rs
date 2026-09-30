@@ -48,11 +48,15 @@ impl PeerStore {
             .collect()
     }
 
-    pub(crate) fn record_success(&self, record: &PeerRecord) -> Result<(), NetworkError> {
+    pub(crate) fn record_authenticated(&self, record: &PeerRecord) -> Result<(), NetworkError> {
         let mut records = self
             .records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if records.last() == Some(record) {
+            return Ok(());
+        }
 
         records.retain(|existing| existing.node_id() != record.node_id());
         records.push(record.clone());
@@ -60,11 +64,33 @@ impl PeerStore {
             records.remove(0);
         }
 
-        let encoded = encode_network_message(&NetworkMessage::Peers {
-            records: records.clone(),
-        })?;
-        write_store(&self.path, &encoded)
+        persist_records(&self.path, &records)
     }
+
+    pub(crate) fn record_failure(&self, record: &PeerRecord) -> Result<(), NetworkError> {
+        let mut records = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let Some(position) = records.iter().position(|existing| existing == record) else {
+            return Ok(());
+        };
+        if position == 0 {
+            return Ok(());
+        }
+
+        let failed = records.remove(position);
+        records.insert(0, failed);
+        persist_records(&self.path, &records)
+    }
+}
+
+fn persist_records(path: &Path, records: &[PeerRecord]) -> Result<(), NetworkError> {
+    let encoded = encode_network_message(&NetworkMessage::Peers {
+        records: records.to_vec(),
+    })?;
+    write_store(path, &encoded)
 }
 
 fn write_store(path: &Path, encoded: &[u8]) -> Result<(), NetworkError> {

@@ -302,12 +302,10 @@ pub fn node_runtime_fixture(prefix: &str) -> (Arc<NodeRuntime>, StateStore, Path
 }
 
 pub fn peer_record(runtime: &NodeRuntime) -> PeerRecord {
-    PeerRecord::new(
-        runtime.node_id(),
-        runtime.local_addr().unwrap(),
-        runtime.transport_certificate_der().to_vec(),
-    )
-    .unwrap()
+    runtime
+        .local_peer_record()
+        .cloned()
+        .expect("test runtime must have an advertisable peer record")
 }
 
 pub fn spawn_node_runtime(runtime: &Arc<NodeRuntime>) -> tokio::task::JoinHandle<()> {

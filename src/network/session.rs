@@ -210,7 +210,7 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
-    serve_public_connection(peer, state, checkpoint_proof, None, None).await
+    serve_public_connection(peer, state, checkpoint_proof, None, None, None).await
 }
 
 pub(crate) async fn serve_public_network_connection(
@@ -219,6 +219,7 @@ pub(crate) async fn serve_public_network_connection(
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
     peer_store: &PeerStore,
     local_node_id: NodeId,
+    local_peer_record: Option<&PeerRecord>,
 ) -> Result<NodeId, NetworkError> {
     serve_public_connection(
         peer,
@@ -226,6 +227,7 @@ pub(crate) async fn serve_public_network_connection(
         checkpoint_proof,
         Some(peer_store),
         Some(local_node_id),
+        local_peer_record,
     )
     .await
 }
@@ -236,6 +238,7 @@ async fn serve_public_connection(
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
     peer_store: Option<&PeerStore>,
     local_node_id: Option<NodeId>,
+    local_peer_record: Option<&PeerRecord>,
 ) -> Result<NodeId, NetworkError> {
     if checkpoint_proof
         .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
@@ -264,9 +267,16 @@ async fn serve_public_connection(
                 validate_peer_limit(*limit)?;
                 let store = peer_store.ok_or(NetworkError::UnexpectedMessage)?;
                 let local_node_id = local_node_id.ok_or(NetworkError::UnexpectedMessage)?;
-                NetworkMessage::Peers {
-                    records: store.recent(*limit, &[local_node_id, peer.remote_node_id()]),
+                let mut records = Vec::with_capacity(usize::from(*limit));
+                if let Some(record) = local_peer_record {
+                    records.push(record.clone());
                 }
+                let remaining = limit.saturating_sub(records.len() as u16);
+                if remaining > 0 {
+                    records
+                        .extend(store.recent(remaining, &[local_node_id, peer.remote_node_id()]));
+                }
+                NetworkMessage::Peers { records }
             }
             _ => return Err(NetworkError::UnexpectedMessage),
         };

@@ -47,6 +47,7 @@ struct PublicNetworkContext {
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_store: PeerStore,
     local_node_id: NodeId,
+    local_peer_record: Option<PeerRecord>,
 }
 
 pub struct NodeRuntime {
@@ -56,6 +57,7 @@ pub struct NodeRuntime {
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
     peer_store: PeerStore,
+    local_peer_record: Option<PeerRecord>,
     active_connections: Arc<AtomicUsize>,
 }
 
@@ -68,6 +70,16 @@ impl NodeRuntime {
         let transport_identity =
             QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
+        let local_address = server.local_addr()?;
+        let local_peer_record = if local_address.ip().is_unspecified() {
+            None
+        } else {
+            Some(PeerRecord::new(
+                transport_identity.node_id(),
+                local_address,
+                transport_identity.certificate_der().to_vec(),
+            )?)
+        };
         let peer_manager = PeerManager::new(transport_identity.node_id());
         let peer_store = PeerStore::load(peer_store_path(store))?;
 
@@ -78,6 +90,7 @@ impl NodeRuntime {
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
             peer_manager,
             peer_store,
+            local_peer_record,
             active_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -98,6 +111,10 @@ impl NodeRuntime {
         self.peer_manager.peer(node_id)
     }
 
+    pub fn local_peer_record(&self) -> Option<&PeerRecord> {
+        self.local_peer_record.as_ref()
+    }
+
     fn known_active_peer_count(&self) -> usize {
         self.peer_store
             .recent(MAX_PEER_RECORDS, &[self.node_id()])
@@ -112,6 +129,7 @@ impl NodeRuntime {
             public_checkpoint_proof: self.public_checkpoint_proof.clone(),
             peer_store: self.peer_store.clone(),
             local_node_id: self.node_id(),
+            local_peer_record: self.local_peer_record.clone(),
         }
     }
 
@@ -158,11 +176,13 @@ impl NodeRuntime {
             };
 
             if let Ok(records) = client_peer_records(&peer, MAX_PEER_RECORDS).await {
-                candidates.extend(
-                    records
-                        .into_iter()
-                        .filter(|record| record.node_id() != self.node_id()),
-                );
+                for record in records {
+                    if record.node_id() == peer.remote_node_id() {
+                        self.peer_store.record_authenticated(&record)?;
+                    } else if record.node_id() != self.node_id() {
+                        candidates.push_back(record);
+                    }
+                }
             }
         }
 
@@ -176,21 +196,30 @@ impl NodeRuntime {
             },
         )?;
 
-        let client = QuicClient::new(
+        let client = match QuicClient::new(
             outbound_bind_address(record.address()),
             record.certificate_der(),
             self.transport_identity.clone(),
-        )?;
-        let peer = client
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                self.peer_store.record_failure(record)?;
+                return Err(error.into());
+            }
+        };
+        let peer = match client
             .connect_expected(record.address(), record.node_id())
-            .await?;
+            .await
+        {
+            Ok(peer) => peer,
+            Err(error) => {
+                self.peer_store.record_failure(record)?;
+                return Err(error.into());
+            }
+        };
         let peer_lease = match self.peer_manager.register(&peer, PeerDirection::Outbound) {
             Ok(lease) => lease,
             Err(PeerRegistrationError::Duplicate(node_id)) => {
-                if let Err(error) = self.peer_store.record_success(record) {
-                    peer.close_with_reason(b"peer store failure");
-                    return Err(error.into());
-                }
                 peer.close_with_reason(b"duplicate peer");
                 return self
                     .peer_manager
@@ -203,7 +232,7 @@ impl NodeRuntime {
             }
         };
 
-        if let Err(error) = self.peer_store.record_success(record) {
+        if let Err(error) = self.peer_store.record_authenticated(record) {
             peer.close_with_reason(b"peer store failure");
             drop(peer_lease);
             return Err(error.into());
@@ -303,12 +332,27 @@ async fn serve_managed_peer(
     let _peer_lease = peer_lease;
     let _permit = permit;
     let _outbound_client = outbound_client;
+
+    let refresh_peer = peer.clone();
+    let refresh_store = context.peer_store.clone();
+    tokio::spawn(async move {
+        if let Ok(records) = client_peer_records(&refresh_peer, 1).await
+            && let Some(record) = records
+                .into_iter()
+                .find(|record| record.node_id() == refresh_peer.remote_node_id())
+            && refresh_store.record_authenticated(&record).is_err()
+        {
+            refresh_peer.close_with_reason(b"peer store failure");
+        }
+    });
+
     let _ = serve_public_network_connection(
         &peer,
         &context.state,
         context.public_checkpoint_proof.as_deref(),
         &context.peer_store,
         context.local_node_id,
+        context.local_peer_record.as_ref(),
     )
     .await;
 }
