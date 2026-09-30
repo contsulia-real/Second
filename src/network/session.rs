@@ -1,29 +1,19 @@
-use std::io::{Read, Write};
-
 use crate::{
     CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyView, SecondState, ValidatorSet,
 };
 
-use super::codec::{read_network_message, read_network_message_optional, write_network_message};
+use super::quic::QuicPeer;
 use super::{
     MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
     RemotePublicCurrencyView, validate_public_currency_limit,
 };
 
-pub fn client_ping<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
-    nonce: u64,
-) -> Result<NodeId, NetworkError> {
-    let remote_node_id = client_handshake(stream, local_node_id)?;
-
-    write_network_message(stream, &NetworkMessage::Ping { nonce })?;
-
-    match read_network_message(stream)? {
+pub async fn client_ping(peer: &QuicPeer, nonce: u64) -> Result<NodeId, NetworkError> {
+    match peer.exchange(&NetworkMessage::Ping { nonce }).await? {
         NetworkMessage::Pong {
             nonce: response_nonce,
-        } if response_nonce == nonce => Ok(remote_node_id),
+        } if response_nonce == nonce => Ok(peer.remote_node_id()),
         NetworkMessage::Pong {
             nonce: response_nonce,
         } => Err(NetworkError::NonceMismatch {
@@ -34,67 +24,60 @@ pub fn client_ping<S: Read + Write>(
     }
 }
 
-pub fn serve_ping_session<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
-) -> Result<NodeId, NetworkError> {
-    let remote_node_id = server_handshake(stream, local_node_id)?;
+pub async fn serve_ping_session(peer: &QuicPeer) -> Result<NodeId, NetworkError> {
+    let request = peer
+        .accept_request()
+        .await?
+        .ok_or_else(|| NetworkError::Transport("peer closed before ping request".to_owned()))?;
 
-    match read_network_message(stream)? {
-        NetworkMessage::Ping { nonce } => {
-            write_network_message(stream, &NetworkMessage::Pong { nonce })?;
-            Ok(remote_node_id)
-        }
-        _ => Err(NetworkError::UnexpectedMessage),
-    }
+    let response = match request.message() {
+        NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
+        _ => return Err(NetworkError::UnexpectedMessage),
+    };
+
+    request.respond(&response).await?;
+    Ok(peer.remote_node_id())
 }
 
-pub fn client_public_currency_page<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn client_public_currency_page(
+    peer: &QuicPeer,
     start: CurrencyAddress,
     limit: u16,
 ) -> Result<RemotePublicCurrencyPage, NetworkError> {
     validate_public_currency_limit(limit)?;
-    let remote_node_id = client_handshake(stream, local_node_id)?;
-    let (states, next_start) = request_public_currency_page(stream, start, limit)?;
+    let (states, next_start) = request_public_currency_page(peer, start, limit).await?;
 
     Ok(RemotePublicCurrencyPage {
-        remote_node_id,
+        remote_node_id: peer.remote_node_id(),
         states,
         next_start,
     })
 }
 
-pub fn client_public_currency_summary<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn client_public_currency_summary(
+    peer: &QuicPeer,
 ) -> Result<RemotePublicCurrencySummary, NetworkError> {
-    let remote_node_id = client_handshake(stream, local_node_id)?;
-    let summary = request_public_currency_summary(stream)?;
+    let summary = request_public_currency_summary(peer).await?;
 
     Ok(RemotePublicCurrencySummary {
-        remote_node_id,
+        remote_node_id: peer.remote_node_id(),
         summary,
     })
 }
 
-pub fn client_public_currency_checkpoint_proof<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn client_public_currency_checkpoint_proof(
+    peer: &QuicPeer,
 ) -> Result<Option<PublicCurrencyCheckpointProof>, NetworkError> {
-    let _remote_node_id = client_handshake(stream, local_node_id)?;
-    request_public_currency_checkpoint_proof(stream)
+    request_public_currency_checkpoint_proof(peer).await
 }
 
-pub fn client_sync_certified_public_currency_view<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn client_sync_certified_public_currency_view(
+    peer: &QuicPeer,
     validator_set: &ValidatorSet,
     minimum_checkpoint_epoch: u64,
 ) -> Result<RemoteCertifiedPublicCurrencyView, NetworkError> {
-    let remote_node_id = client_handshake(stream, local_node_id)?;
-    let proof = request_public_currency_checkpoint_proof(stream)?
+    let proof = request_public_currency_checkpoint_proof(peer)
+        .await?
         .ok_or(NetworkError::MissingPublicCurrencyCheckpoint)?;
 
     let actual_epoch = proof.checkpoint().epoch();
@@ -106,34 +89,32 @@ pub fn client_sync_certified_public_currency_view<S: Read + Write>(
     }
 
     let summary = proof.checkpoint().summary().clone();
-    let view = sync_public_currency_view_for_summary(stream, summary)?;
+    let view = sync_public_currency_view_for_summary(peer, summary).await?;
     let checkpoint = proof
         .verify(&view, validator_set)
         .map_err(NetworkError::PublicCheckpoint)?;
 
     Ok(RemoteCertifiedPublicCurrencyView {
-        remote_node_id,
+        remote_node_id: peer.remote_node_id(),
         view,
         checkpoint,
     })
 }
 
-pub fn client_sync_public_currency_view<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn client_sync_public_currency_view(
+    peer: &QuicPeer,
 ) -> Result<RemotePublicCurrencyView, NetworkError> {
-    let remote_node_id = client_handshake(stream, local_node_id)?;
-    let summary = request_public_currency_summary(stream)?;
-    let view = sync_public_currency_view_for_summary(stream, summary)?;
+    let summary = request_public_currency_summary(peer).await?;
+    let view = sync_public_currency_view_for_summary(peer, summary).await?;
 
     Ok(RemotePublicCurrencyView {
-        remote_node_id,
+        remote_node_id: peer.remote_node_id(),
         view,
     })
 }
 
-fn sync_public_currency_view_for_summary<S: Read + Write>(
-    stream: &mut S,
+async fn sync_public_currency_view_for_summary(
+    peer: &QuicPeer,
     summary: crate::PublicCurrencySummary,
 ) -> Result<PublicCurrencyView, NetworkError> {
     let mut states = Vec::new();
@@ -148,7 +129,8 @@ fn sync_public_currency_view_for_summary<S: Read + Write>(
             }
 
             let limit = remaining.min(u64::from(MAX_PUBLIC_CURRENCY_PAGE)) as u16;
-            let (page_states, next_start) = request_public_currency_page(stream, start, limit)?;
+            let (page_states, next_start) =
+                request_public_currency_page(peer, start, limit).await?;
 
             validate_synced_page(
                 start,
@@ -182,33 +164,34 @@ fn sync_public_currency_view_for_summary<S: Read + Write>(
     PublicCurrencyView::new(summary, states).map_err(NetworkError::PublicState)
 }
 
-pub fn serve_public_currency_session<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn serve_public_currency_session(
+    peer: &QuicPeer,
     state: &SecondState,
 ) -> Result<NodeId, NetworkError> {
-    let remote_node_id = server_handshake(stream, local_node_id)?;
+    let request = peer
+        .accept_request()
+        .await?
+        .ok_or_else(|| NetworkError::Transport("peer closed before public request".to_owned()))?;
 
-    match read_network_message(stream)? {
+    match request.message() {
         NetworkMessage::GetPublicCurrencies { start, limit } => {
-            write_public_currency_page(stream, state, start, limit)?;
-            Ok(remote_node_id)
+            let response = public_currency_page_response(state, *start, *limit)?;
+            request.respond(&response).await?;
+            Ok(peer.remote_node_id())
         }
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
 
-pub fn serve_public_currency_connection<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn serve_public_currency_connection(
+    peer: &QuicPeer,
     state: &SecondState,
 ) -> Result<NodeId, NetworkError> {
-    serve_public_currency_connection_with_checkpoint(stream, local_node_id, state, None)
+    serve_public_currency_connection_with_checkpoint(peer, state, None).await
 }
 
-pub fn serve_public_currency_connection_with_checkpoint<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
+pub async fn serve_public_currency_connection_with_checkpoint(
+    peer: &QuicPeer,
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
@@ -218,70 +201,66 @@ pub fn serve_public_currency_connection_with_checkpoint<S: Read + Write>(
         return Err(NetworkError::CheckpointDoesNotMatchServedState);
     }
 
-    let remote_node_id = server_handshake(stream, local_node_id)?;
-
     loop {
-        let Some(message) = read_network_message_optional(stream)? else {
-            return Ok(remote_node_id);
+        let Some(request) = peer.accept_request().await? else {
+            return Ok(peer.remote_node_id());
         };
 
-        match message {
-            NetworkMessage::Ping { nonce } => {
-                write_network_message(stream, &NetworkMessage::Pong { nonce })?;
-            }
+        let response = match request.message() {
+            NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
             NetworkMessage::GetPublicCurrencies { start, limit } => {
-                write_public_currency_page(stream, state, start, limit)?;
+                public_currency_page_response(state, *start, *limit)?
             }
-            NetworkMessage::GetPublicCurrencySummary => {
-                write_public_currency_summary(stream, state)?;
-            }
-            NetworkMessage::GetPublicCurrencyCheckpoint => {
-                let response = checkpoint_proof
-                    .cloned()
-                    .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
-                    .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint);
-                write_network_message(stream, &response)?;
-            }
+            NetworkMessage::GetPublicCurrencySummary => NetworkMessage::PublicCurrencySummary {
+                summary: state.public_currency_summary(),
+            },
+            NetworkMessage::GetPublicCurrencyCheckpoint => checkpoint_proof
+                .cloned()
+                .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
+                .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
             _ => return Err(NetworkError::UnexpectedMessage),
-        }
+        };
+
+        request.respond(&response).await?;
     }
 }
 
-fn request_public_currency_page<S: Read + Write>(
-    stream: &mut S,
+async fn request_public_currency_page(
+    peer: &QuicPeer,
     start: CurrencyAddress,
     limit: u16,
 ) -> Result<(Vec<crate::PublicCurrencyState>, Option<CurrencyAddress>), NetworkError> {
     validate_public_currency_limit(limit)?;
-    write_network_message(
-        stream,
-        &NetworkMessage::GetPublicCurrencies { start, limit },
-    )?;
 
-    match read_network_message(stream)? {
+    match peer
+        .exchange(&NetworkMessage::GetPublicCurrencies { start, limit })
+        .await?
+    {
         NetworkMessage::PublicCurrencies { states, next_start } => Ok((states, next_start)),
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
 
-fn request_public_currency_checkpoint_proof<S: Read + Write>(
-    stream: &mut S,
+async fn request_public_currency_checkpoint_proof(
+    peer: &QuicPeer,
 ) -> Result<Option<PublicCurrencyCheckpointProof>, NetworkError> {
-    write_network_message(stream, &NetworkMessage::GetPublicCurrencyCheckpoint)?;
-
-    match read_network_message(stream)? {
+    match peer
+        .exchange(&NetworkMessage::GetPublicCurrencyCheckpoint)
+        .await?
+    {
         NetworkMessage::PublicCurrencyCheckpointProof { proof } => Ok(Some(proof)),
         NetworkMessage::NoPublicCurrencyCheckpoint => Ok(None),
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
 
-fn request_public_currency_summary<S: Read + Write>(
-    stream: &mut S,
+async fn request_public_currency_summary(
+    peer: &QuicPeer,
 ) -> Result<crate::PublicCurrencySummary, NetworkError> {
-    write_network_message(stream, &NetworkMessage::GetPublicCurrencySummary)?;
-
-    match read_network_message(stream)? {
+    match peer
+        .exchange(&NetworkMessage::GetPublicCurrencySummary)
+        .await?
+    {
         NetworkMessage::PublicCurrencySummary { summary } => Ok(summary),
         _ => Err(NetworkError::UnexpectedMessage),
     }
@@ -328,66 +307,14 @@ fn validate_synced_page(
     Ok(())
 }
 
-fn write_public_currency_page<S: Write>(
-    stream: &mut S,
+fn public_currency_page_response(
     state: &SecondState,
     start: CurrencyAddress,
     limit: u16,
-) -> Result<(), NetworkError> {
+) -> Result<NetworkMessage, NetworkError> {
     let page = state.public_currency_page(start, limit)?;
-    write_network_message(
-        stream,
-        &NetworkMessage::PublicCurrencies {
-            states: page.states,
-            next_start: page.next_start,
-        },
-    )
-}
-
-fn write_public_currency_summary<S: Write>(
-    stream: &mut S,
-    state: &SecondState,
-) -> Result<(), NetworkError> {
-    write_network_message(
-        stream,
-        &NetworkMessage::PublicCurrencySummary {
-            summary: state.public_currency_summary(),
-        },
-    )
-}
-
-fn client_handshake<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
-) -> Result<NodeId, NetworkError> {
-    write_network_message(
-        stream,
-        &NetworkMessage::Hello {
-            node_id: local_node_id,
-        },
-    )?;
-
-    match read_network_message(stream)? {
-        NetworkMessage::Hello { node_id } => Ok(node_id),
-        _ => Err(NetworkError::UnexpectedMessage),
-    }
-}
-
-fn server_handshake<S: Read + Write>(
-    stream: &mut S,
-    local_node_id: NodeId,
-) -> Result<NodeId, NetworkError> {
-    let remote_node_id = match read_network_message(stream)? {
-        NetworkMessage::Hello { node_id } => node_id,
-        _ => return Err(NetworkError::UnexpectedMessage),
-    };
-
-    write_network_message(
-        stream,
-        &NetworkMessage::Hello {
-            node_id: local_node_id,
-        },
-    )?;
-
-    Ok(remote_node_id)
+    Ok(NetworkMessage::PublicCurrencies {
+        states: page.states,
+        next_start: page.next_start,
+    })
 }

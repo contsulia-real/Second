@@ -799,9 +799,11 @@ SecondState 也不能因为 Debug/序列化方便而无意泄露 owner mapping�
 
 ## 16. 网络设计
 
-当前网络层是自定义二进制 TCP 协议，不依赖 JSON 作为节点间 framing。
+当前网络层以 QUIC 作为节点传输层，不依赖 JSON 作为节点间 framing。QUIC 连接完成 TLS 1.3 握手后，应用层先使用一个可靠双向 stream 完成 NodeId Hello；后续每个请求/响应使用独立的可靠双向 stream。当前协议不使用 QUIC DATAGRAM，也不使用 0-RTT。
 
-frame 基础结构：
+QUIC 的 TLS transport identity 与 Validator consensus key 是不同职责：consensus key 只用于共识签名，不直接复用为 TLS 私钥。当前测试/一次性 CLI 通过显式 pin 的独立 transport certificate 建立信任；长期节点的 transport identity 分发/认证可以在节点身份方案确定后单独固化。
+
+每个 stream 内仍使用统一的自定义二进制 frame：
 
 ~~~text
 magic

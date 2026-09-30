@@ -1,7 +1,3 @@
-use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::Duration;
-
 mod support;
 
 use second::{
@@ -10,8 +6,8 @@ use second::{
 };
 use support::{payment_address, register_payment_addresses, verified_task};
 
-#[test]
-fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
+#[tokio::test]
+async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
     let alice = support::account(987654);
     let mut state = SecondState::genesis([alice], 1).with_reserve(2).unwrap();
     let issue = verified_task(
@@ -23,32 +19,20 @@ fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
     );
     state.execute(&issue, 1).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
 
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-
-        serve_public_currency_session(&mut stream, NodeId::from_u64(1), &state).unwrap()
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        serve_public_currency_session(&peer, &state).await.unwrap()
     });
 
-    let mut client = TcpStream::connect(address).unwrap();
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    client
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
 
-    let page =
-        client_public_currency_page(&mut client, NodeId::from_u64(2), CurrencyAddress::new(1), 4)
-            .unwrap();
+    let page = client_public_currency_page(&peer, CurrencyAddress::new(1), 4)
+        .await
+        .unwrap();
 
     assert_eq!(page.remote_node_id, NodeId::from_u64(1));
     assert_eq!(page.states.len(), 4);
@@ -62,7 +46,8 @@ fn real_tcp_query_returns_public_occupancy_and_role_without_owner() {
     assert!(!rendered.contains("AccountAddress"));
     assert!(!rendered.contains("987654"));
 
-    server.join().unwrap();
+    peer.close();
+    assert_eq!(server_task.await.unwrap(), NodeId::from_u64(2));
 }
 
 #[test]

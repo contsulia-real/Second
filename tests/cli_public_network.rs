@@ -44,6 +44,22 @@ fn checkpoint_proof(
     PublicCurrencyCheckpointProof::new(checkpoint, validators.version(), votes)
 }
 
+fn parse_listening(line: &str) -> (String, String) {
+    let mut fields = line.split_whitespace();
+    assert_eq!(fields.next(), Some("LISTENING"));
+    let address = fields
+        .next()
+        .expect("missing QUIC listening address")
+        .to_owned();
+    assert_eq!(fields.next(), Some("CERT"));
+    let certificate = fields
+        .next()
+        .expect("missing QUIC transport certificate")
+        .to_owned();
+    assert_eq!(fields.next(), None);
+    (address, certificate)
+}
+
 #[test]
 fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let server_base = temp_base("certified-server");
@@ -80,15 +96,15 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    assert!(listening.starts_with("LISTENING "));
-    let address = listening.trim().strip_prefix("LISTENING ").unwrap();
+    let (address, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
         .args([
             "sync-public-certified",
-            address,
+            address.as_str(),
             "2",
             trust_base.to_str().unwrap(),
+            server_certificate.as_str(),
         ])
         .output()
         .unwrap();
@@ -154,11 +170,15 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    assert!(listening.starts_with("LISTENING "));
-    let address = listening.trim().strip_prefix("LISTENING ").unwrap();
+    let (address, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
-        .args(["sync-public", address, "2"])
+        .args([
+            "sync-public",
+            address.as_str(),
+            "2",
+            server_certificate.as_str(),
+        ])
         .output()
         .unwrap();
 
@@ -228,11 +248,17 @@ fn two_real_processes_serve_and_query_public_currency_state_from_snapshot() {
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
 
-    assert!(listening.starts_with("LISTENING "));
-    let address = listening.trim().strip_prefix("LISTENING ").unwrap();
+    let (address, server_certificate) = parse_listening(&listening);
 
     let client = Command::new(executable)
-        .args(["query-public", address, "2", "1", "3"])
+        .args([
+            "query-public",
+            address.as_str(),
+            "2",
+            "1",
+            "3",
+            server_certificate.as_str(),
+        ])
         .output()
         .unwrap();
 

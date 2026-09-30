@@ -1,19 +1,20 @@
 use std::env;
 use std::io::{self, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::process::ExitCode;
-use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use second::{
-    CurrencyAddress, CurrencyRole, NodeId, StateStore, client_ping, client_public_currency_page,
+    CurrencyAddress, CurrencyRole, NodeId, QuicClient, QuicServer, QuicTransportIdentity,
+    StateStore, client_ping, client_public_currency_page,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     serve_ping_session, serve_public_currency_connection_with_checkpoint,
 };
 
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn main() -> ExitCode {
-    match run() {
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -22,28 +23,41 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
+async fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
 
     match args.as_slice() {
         [command, address, node_id] if command == "serve-once" => {
-            serve_once(address, parse_u64("node id", node_id)?)
+            serve_once(address, parse_u64("node id", node_id)?).await
         }
-        [command, address, node_id, nonce] if command == "ping" => ping(
-            address,
-            parse_u64("node id", node_id)?,
-            parse_u64("nonce", nonce)?,
-        ),
+        [command, address, node_id, nonce, server_certificate] if command == "ping" => {
+            ping(
+                address,
+                parse_u64("node id", node_id)?,
+                parse_u64("nonce", nonce)?,
+                server_certificate,
+            )
+            .await
+        }
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
-        [command, address, node_id] if command == "sync-public" => {
-            sync_public(address, parse_u64("node id", node_id)?)
+        [command, address, node_id, server_certificate] if command == "sync-public" => {
+            sync_public(
+                address,
+                parse_u64("node id", node_id)?,
+                server_certificate,
+            )
+            .await
         }
-        [command, address, node_id, trust_snapshot_base] if command == "sync-public-certified" => {
+        [command, address, node_id, trust_snapshot_base, server_certificate]
+            if command == "sync-public-certified" =>
+        {
             sync_public_certified(
                 address,
                 parse_u64("node id", node_id)?,
                 trust_snapshot_base,
+                server_certificate,
             )
+            .await
         }
         [command, address, node_id, snapshot_base] if command == "serve-public-once" => {
             serve_public_once(
@@ -51,106 +65,114 @@ fn run() -> Result<(), String> {
                 parse_u64("node id", node_id)?,
                 snapshot_base,
             )
+            .await
         }
-        [command, address, node_id, start, limit] if command == "query-public" => {
+        [command, address, node_id, start, limit, server_certificate]
+            if command == "query-public" =>
+        {
             query_public(
                 address,
                 parse_u64("node id", node_id)?,
                 parse_u64("currency start", start)?,
                 parse_u16("limit", limit)?,
+                server_certificate,
             )
+            .await
         }
         _ => Err(
-            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> | second sync-public <address> <node-id-u64> | second sync-public-certified <address> <node-id-u64> <trust-snapshot-base>"
+            "usage: second serve-once <listen-address> <node-id-u64> | second ping <address> <node-id-u64> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second serve-public-once <listen-address> <node-id-u64> <snapshot-base> | second query-public <address> <node-id-u64> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <node-id-u64> <server-cert-base64> | second sync-public-certified <address> <node-id-u64> <trust-snapshot-base> <server-cert-base64>"
                 .to_owned(),
         ),
     }
 }
 
-fn serve_once(address: &str, node_id: u64) -> Result<(), String> {
-    let listener =
-        TcpListener::bind(address).map_err(|error| format!("failed to bind {address}: {error}"))?;
-    let local_address = listener
-        .local_addr()
-        .map_err(|error| format!("failed to read listening address: {error}"))?;
+async fn serve_once(address: &str, node_id: u64) -> Result<(), String> {
+    let identity = QuicTransportIdentity::generate()
+        .map_err(|error| format!("failed to generate QUIC transport identity: {error:?}"))?;
+    let server = QuicServer::bind(parse_socket_address(address)?, &identity)
+        .map_err(|error| format!("failed to bind QUIC endpoint {address}: {error:?}"))?;
 
-    println!("LISTENING {local_address}");
-    io::stdout()
-        .flush()
-        .map_err(|error| format!("failed to flush listening address: {error}"))?;
+    print_listening(&server, &identity)?;
 
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|error| format!("failed to accept peer: {error}"))?;
-    configure_stream(&stream)?;
-
-    let peer = serve_ping_session(&mut stream, NodeId::from_u64(node_id))
+    let peer = server
+        .accept(NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to accept QUIC peer: {error:?}"))?;
+    let remote = serve_ping_session(&peer)
+        .await
         .map_err(|error| format!("network session failed: {error:?}"))?;
 
-    println!("PEER {peer}");
+    println!("PEER {remote}");
     Ok(())
 }
 
-fn ping(address: &str, node_id: u64, nonce: u64) -> Result<(), String> {
-    let mut stream = TcpStream::connect(address)
-        .map_err(|error| format!("failed to connect {address}: {error}"))?;
-    configure_stream(&stream)?;
+async fn ping(
+    address: &str,
+    node_id: u64,
+    nonce: u64,
+    server_certificate: &str,
+) -> Result<(), String> {
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
-    let peer = client_ping(&mut stream, NodeId::from_u64(node_id), nonce)
+    let remote = client_ping(&peer, nonce)
+        .await
         .map_err(|error| format!("network ping failed: {error:?}"))?;
+    peer.close();
+    client.wait_idle().await;
 
-    println!("PONG peer={peer} nonce={nonce}");
+    println!("PONG peer={remote} nonce={nonce}");
     Ok(())
 }
 
-fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> Result<(), String> {
+async fn serve_public_once(address: &str, node_id: u64, snapshot_base: &str) -> Result<(), String> {
     let store = StateStore::new(snapshot_base);
     let persisted = store
         .load()
         .map_err(|error| format!("failed to load snapshot: {error:?}"))?
         .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
 
-    let listener =
-        TcpListener::bind(address).map_err(|error| format!("failed to bind {address}: {error}"))?;
-    let local_address = listener
-        .local_addr()
-        .map_err(|error| format!("failed to read listening address: {error}"))?;
+    let identity = QuicTransportIdentity::generate()
+        .map_err(|error| format!("failed to generate QUIC transport identity: {error:?}"))?;
+    let server = QuicServer::bind(parse_socket_address(address)?, &identity)
+        .map_err(|error| format!("failed to bind QUIC endpoint {address}: {error:?}"))?;
 
-    println!("LISTENING {local_address}");
-    io::stdout()
-        .flush()
-        .map_err(|error| format!("failed to flush listening address: {error}"))?;
+    print_listening(&server, &identity)?;
 
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|error| format!("failed to accept peer: {error}"))?;
-    configure_stream(&stream)?;
-
-    let peer = serve_public_currency_connection_with_checkpoint(
-        &mut stream,
-        NodeId::from_u64(node_id),
+    let peer = server
+        .accept(NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to accept QUIC peer: {error:?}"))?;
+    let remote = serve_public_currency_connection_with_checkpoint(
+        &peer,
         &persisted.state,
         persisted.public_checkpoint_proof.as_ref(),
     )
+    .await
     .map_err(|error| format!("public currency connection failed: {error:?}"))?;
 
-    println!("PEER {peer}");
+    println!("PEER {remote}");
     Ok(())
 }
 
-fn sync_public(address: &str, node_id: u64) -> Result<(), String> {
-    let mut stream = TcpStream::connect(address)
-        .map_err(|error| format!("failed to connect {address}: {error}"))?;
-    configure_stream(&stream)?;
+async fn sync_public(address: &str, node_id: u64, server_certificate: &str) -> Result<(), String> {
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
-    let synced = client_sync_public_currency_view(&mut stream, NodeId::from_u64(node_id))
+    let synced = client_sync_public_currency_view(&peer)
+        .await
         .map_err(|error| format!("public currency sync failed: {error:?}"))?;
+    peer.close();
+    client.wait_idle().await;
+
     let summary = &synced.view.summary;
-    let digest = summary
-        .state_digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = hex_digest(&summary.state_digest);
 
     println!(
         "SYNCED peer={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
@@ -166,10 +188,11 @@ fn sync_public(address: &str, node_id: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_public_certified(
+async fn sync_public_certified(
     address: &str,
     node_id: u64,
     trust_snapshot_base: &str,
+    server_certificate: &str,
 ) -> Result<(), String> {
     let trust_store = StateStore::new(trust_snapshot_base);
     let trusted = trust_store
@@ -177,19 +200,21 @@ fn sync_public_certified(
         .map_err(|error| format!("failed to load trust snapshot: {error:?}"))?
         .ok_or_else(|| format!("no trust snapshot found at {trust_snapshot_base}"))?;
 
-    let minimum_checkpoint_epoch = trusted.checkpoint_floor_epoch;
-
-    let mut stream = TcpStream::connect(address)
-        .map_err(|error| format!("failed to connect {address}: {error}"))?;
-    configure_stream(&stream)?;
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
     let synced = client_sync_certified_public_currency_view(
-        &mut stream,
-        NodeId::from_u64(node_id),
+        &peer,
         &trusted.validator_set,
-        minimum_checkpoint_epoch,
+        trusted.checkpoint_floor_epoch,
     )
+    .await
     .map_err(|error| format!("certified public currency sync failed: {error:?}"))?;
+    peer.close();
+    client.wait_idle().await;
 
     trust_store
         .advance_checkpoint_floor(&synced.checkpoint)
@@ -197,11 +222,7 @@ fn sync_public_certified(
 
     let summary = &synced.view.summary;
     let checkpoint = synced.checkpoint.checkpoint();
-    let digest = summary
-        .state_digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = hex_digest(&summary.state_digest);
 
     println!(
         "CERTIFIED peer={} epoch={} validator_set={} votes={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
@@ -224,18 +245,24 @@ fn sync_public_certified(
     Ok(())
 }
 
-fn query_public(address: &str, node_id: u64, start: u64, limit: u16) -> Result<(), String> {
-    let mut stream = TcpStream::connect(address)
-        .map_err(|error| format!("failed to connect {address}: {error}"))?;
-    configure_stream(&stream)?;
+async fn query_public(
+    address: &str,
+    node_id: u64,
+    start: u64,
+    limit: u16,
+    server_certificate: &str,
+) -> Result<(), String> {
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?, NodeId::from_u64(node_id))
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
 
-    let page = client_public_currency_page(
-        &mut stream,
-        NodeId::from_u64(node_id),
-        CurrencyAddress::new(start),
-        limit,
-    )
-    .map_err(|error| format!("public currency query failed: {error:?}"))?;
+    let page = client_public_currency_page(&peer, CurrencyAddress::new(start), limit)
+        .await
+        .map_err(|error| format!("public currency query failed: {error:?}"))?;
+    peer.close();
+    client.wait_idle().await;
 
     let next = page
         .next_start
@@ -266,6 +293,27 @@ fn query_public(address: &str, node_id: u64, start: u64, limit: u16) -> Result<(
     Ok(())
 }
 
+fn quic_client(server_certificate: &str) -> Result<QuicClient, String> {
+    let certificate = STANDARD
+        .decode(server_certificate)
+        .map_err(|error| format!("invalid server certificate base64: {error}"))?;
+    QuicClient::new(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), &certificate)
+        .map_err(|error| format!("failed to configure QUIC client: {error:?}"))
+}
+
+fn print_listening(server: &QuicServer, identity: &QuicTransportIdentity) -> Result<(), String> {
+    let local_address = server
+        .local_addr()
+        .map_err(|error| format!("failed to read QUIC listening address: {error:?}"))?;
+    println!(
+        "LISTENING {local_address} CERT {}",
+        STANDARD.encode(identity.certificate_der())
+    );
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to flush listening address: {error}"))
+}
+
 fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
     let store = StateStore::new(snapshot_base);
     let persisted = store
@@ -287,14 +335,17 @@ fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn configure_stream(stream: &TcpStream) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("failed to set read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("failed to set write timeout: {error}"))?;
-    Ok(())
+fn parse_socket_address(value: &str) -> Result<SocketAddr, String> {
+    value
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid socket address {value:?}: {error}"))
+}
+
+fn hex_digest(digest: &[u8]) -> String {
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn parse_u64(label: &str, value: &str) -> Result<u64, String> {

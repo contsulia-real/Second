@@ -1,7 +1,4 @@
 use std::io::Cursor;
-use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::Duration;
 
 mod support;
 
@@ -65,48 +62,27 @@ fn checkpoint_proof_round_trips_as_unverified_network_data() {
     );
 }
 
-#[test]
-fn real_tcp_sync_returns_certified_view_only_after_local_quorum_verification() {
+#[tokio::test]
+async fn real_quic_sync_returns_certified_view_only_after_local_quorum_verification() {
     let validators = validators();
     let state = SecondState::genesis([], 10).with_reserve(300).unwrap();
     let proof = checkpoint_proof(&state, &validators, 12);
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-
-        serve_public_currency_connection_with_checkpoint(
-            &mut stream,
-            NodeId::from_u64(1),
-            &state,
-            Some(&proof),
-        )
-        .unwrap()
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+            .await
+            .unwrap()
     });
 
-    let mut client = TcpStream::connect(address).unwrap();
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    client
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
 
-    let synced = client_sync_certified_public_currency_view(
-        &mut client,
-        NodeId::from_u64(2),
-        &validators,
-        0,
-    )
-    .unwrap();
+    let synced = client_sync_certified_public_currency_view(&peer, &validators, 0)
+        .await
+        .unwrap();
 
     assert_eq!(synced.remote_node_id, NodeId::from_u64(1));
     assert_eq!(synced.view.states.len(), 300);
@@ -117,51 +93,42 @@ fn real_tcp_sync_returns_certified_view_only_after_local_quorum_verification() {
         Ok(())
     );
 
-    drop(client);
-    assert_eq!(server.join().unwrap(), NodeId::from_u64(2));
+    peer.close();
+    assert_eq!(server_task.await.unwrap(), NodeId::from_u64(2));
 }
 
-#[test]
-fn stale_but_valid_checkpoint_is_rejected_before_state_sync() {
+#[tokio::test]
+async fn stale_but_valid_checkpoint_is_rejected_before_state_sync() {
     let validators = validators();
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     let proof = checkpoint_proof(&state, &validators, 7);
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        serve_public_currency_connection_with_checkpoint(
-            &mut stream,
-            NodeId::from_u64(1),
-            &state,
-            Some(&proof),
-        )
-        .unwrap()
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+            .await
+            .unwrap()
     });
 
-    let mut client = TcpStream::connect(address).unwrap();
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
 
     assert_eq!(
-        client_sync_certified_public_currency_view(
-            &mut client,
-            NodeId::from_u64(2),
-            &validators,
-            8,
-        ),
+        client_sync_certified_public_currency_view(&peer, &validators, 8).await,
         Err(NetworkError::StalePublicCurrencyCheckpoint {
             minimum_epoch: 8,
             actual_epoch: 7,
         })
     );
 
-    drop(client);
-    let _ = server.join().unwrap();
+    peer.close();
+    let _ = server_task.await.unwrap();
 }
 
-#[test]
-fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
+#[tokio::test]
+async fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
     let validators = validators();
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     let checkpoint =
@@ -177,53 +144,51 @@ fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
         ],
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
 
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        serve_public_currency_connection_with_checkpoint(
-            &mut stream,
-            NodeId::from_u64(1),
-            &state,
-            Some(&proof),
-        )
-        .unwrap()
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        serve_public_currency_connection_with_checkpoint(&peer, &state, Some(&proof))
+            .await
+            .unwrap()
     });
 
-    let mut client = TcpStream::connect(address).unwrap();
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
 
     assert_eq!(
-        client_sync_certified_public_currency_view(
-            &mut client,
-            NodeId::from_u64(2),
-            &validators,
-            0
-        ),
+        client_sync_certified_public_currency_view(&peer, &validators, 0).await,
         Err(NetworkError::PublicCheckpoint(
             PublicCheckpointError::Finality(FinalityError::InvalidSignature(ValidatorId::new(1)))
         ))
     );
 
-    drop(client);
-    assert_eq!(server.join().unwrap(), NodeId::from_u64(2));
+    peer.close();
+    assert_eq!(server_task.await.unwrap(), NodeId::from_u64(2));
 }
 
-#[test]
-fn server_refuses_to_attach_checkpoint_for_a_different_public_state() {
+#[tokio::test]
+async fn server_refuses_to_attach_checkpoint_for_a_different_public_state() {
     let validators = validators();
     let served_state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     let other_state = SecondState::genesis([], 10).with_reserve(2).unwrap();
     let proof = checkpoint_proof(&other_state, &validators, 1);
-    let mut empty_stream = Cursor::new(Vec::<u8>::new());
+
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept(NodeId::from_u64(1)).await.unwrap();
+        serve_public_currency_connection_with_checkpoint(&peer, &served_state, Some(&proof)).await
+    });
+
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address, NodeId::from_u64(2)).await.unwrap();
 
     assert_eq!(
-        serve_public_currency_connection_with_checkpoint(
-            &mut empty_stream,
-            NodeId::from_u64(1),
-            &served_state,
-            Some(&proof),
-        ),
+        server_task.await.unwrap(),
         Err(NetworkError::CheckpointDoesNotMatchServedState)
     );
+    peer.close();
 }

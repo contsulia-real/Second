@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
     AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, FinalityCertificate,
-    FinalityStatement, LegalTask, LegalTaskPayload, Operation, PaymentAddress, SecondState, TaskId,
-    ValidatorCredential, ValidatorId, ValidatorSet, ValidatorVote, VerifiedLegalTask,
+    FinalityStatement, LegalTask, LegalTaskPayload, Operation, PaymentAddress, QuicClient,
+    QuicServer, QuicTransportIdentity, SecondState, TaskId, ValidatorCredential, ValidatorId,
+    ValidatorSet, ValidatorVote, VerifiedLegalTask,
 };
 
 pub fn key(byte: u8) -> SigningKey {
@@ -111,6 +113,21 @@ pub fn certificate_from_keys(
         .map(|(validator_id, signing_key)| signed_vote(&statement, validator_id, &signing_key))
         .collect();
     FinalityCertificate::new(statement, votes, validator_set).unwrap()
+}
+
+pub fn quic_server() -> (QuicServer, Vec<u8>) {
+    let identity = QuicTransportIdentity::generate().unwrap();
+    let certificate = identity.certificate_der().to_vec();
+    let server = QuicServer::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &identity).unwrap();
+    (server, certificate)
+}
+
+pub fn quic_client(server_certificate: &[u8]) -> QuicClient {
+    QuicClient::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        server_certificate,
+    )
+    .unwrap()
 }
 
 pub fn temp_base(prefix: &str) -> PathBuf {

@@ -37,13 +37,15 @@ pub use ids::{
 };
 pub use network::{
     CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PUBLIC_CURRENCY_PAGE,
-    NetworkError, NetworkMessage, NodeId, PublicCurrencyPage, RemoteCertifiedPublicCurrencyView,
-    RemotePublicCurrencyPage, RemotePublicCurrencySummary, RemotePublicCurrencyView, client_ping,
-    client_public_currency_checkpoint_proof, client_public_currency_page,
-    client_public_currency_summary, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view, read_network_message, serve_ping_session,
-    serve_public_currency_connection, serve_public_currency_connection_with_checkpoint,
-    serve_public_currency_session, write_network_message,
+    NetworkError, NetworkMessage, NodeId, PublicCurrencyPage, QuicClient, QuicPeer,
+    QuicRequestStream, QuicServer, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
+    RemotePublicCurrencyPage, RemotePublicCurrencySummary, RemotePublicCurrencyView,
+    SECOND_QUIC_SERVER_NAME, client_ping, client_public_currency_checkpoint_proof,
+    client_public_currency_page, client_public_currency_summary,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    read_network_message, serve_ping_session, serve_public_currency_connection,
+    serve_public_currency_connection_with_checkpoint, serve_public_currency_session,
+    write_network_message,
 };
 pub use payment::PaymentAddressStatus;
 pub use persistence::{PersistedNodeState, StateStore};
