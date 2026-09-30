@@ -15,7 +15,7 @@ pub enum ExecutionOutcome {
 
 #[derive(Clone, Debug)]
 pub(crate) struct TaskBinding {
-    pub(crate) legality_proof: [u8; 64],
+    pub(crate) request_digest: [u8; 32],
     pub(crate) succeeded: bool,
 }
 
@@ -144,16 +144,16 @@ impl SecondState {
     }
 
     pub(crate) fn bind_task(&mut self, task: &VerifiedLegalTask) -> Result<bool, ExecutionError> {
-        self.bind_task_legality_proof(task.task_id(), task.legality_proof())
+        self.bind_task_request_digest(task.task_id(), task.request_digest())
     }
 
-    pub(crate) fn bind_task_legality_proof(
+    pub(crate) fn bind_task_request_digest(
         &mut self,
         task_id: TaskId,
-        legality_proof: [u8; 64],
+        request_digest: [u8; 32],
     ) -> Result<bool, ExecutionError> {
         match self.protocol.task_bindings.get(&task_id) {
-            Some(binding) if binding.legality_proof != legality_proof => {
+            Some(binding) if binding.request_digest != request_digest => {
                 Err(ExecutionError::TaskIdAlreadyBound)
             }
             Some(binding) => Ok(binding.succeeded),
@@ -161,7 +161,7 @@ impl SecondState {
                 self.protocol.task_bindings.insert(
                     task_id,
                     TaskBinding {
-                        legality_proof,
+                        request_digest,
                         succeeded: false,
                     },
                 );
@@ -176,11 +176,11 @@ impl SecondState {
         }
     }
 
-    pub fn bound_legality_proof(&self, task_id: TaskId) -> Option<[u8; 64]> {
+    pub fn bound_request_digest(&self, task_id: TaskId) -> Option<[u8; 32]> {
         self.protocol
             .task_bindings
             .get(&task_id)
-            .map(|binding| binding.legality_proof)
+            .map(|binding| binding.request_digest)
     }
 
     pub(crate) fn allocate_currency_range(

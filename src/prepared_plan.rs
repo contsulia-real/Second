@@ -99,7 +99,7 @@ impl PreparedOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedTask {
     pub(crate) task_id: TaskId,
-    pub(crate) legality_proof: [u8; 64],
+    pub(crate) request_digest: [u8; 32],
     pub(crate) expires_at: u64,
     pub(crate) validator_set_version: u64,
     pub(crate) operations: Vec<PreparedOperation>,
@@ -108,14 +108,14 @@ pub(crate) struct PreparedTask {
 impl PreparedTask {
     pub(crate) fn new(
         task_id: TaskId,
-        legality_proof: [u8; 64],
+        request_digest: [u8; 32],
         expires_at: u64,
         validator_set_version: u64,
         operations: Vec<PreparedOperation>,
     ) -> Self {
         Self {
             task_id,
-            legality_proof,
+            request_digest,
             expires_at,
             validator_set_version,
             operations,
@@ -125,7 +125,7 @@ impl PreparedTask {
     pub(crate) fn plan_digest(&self) -> Result<[u8; 32], PreparationError> {
         let mut hasher = Sha256::new();
         hasher.update(PREPARED_TASK_DOMAIN);
-        hasher.update(self.legality_proof);
+        hasher.update(self.request_digest);
         hash_len(&mut hasher, self.task_id.len())?;
         hasher.update(self.task_id.as_bytes());
         hasher.update(self.validator_set_version.to_be_bytes());

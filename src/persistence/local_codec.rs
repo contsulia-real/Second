@@ -19,7 +19,7 @@ pub(super) fn encode_local_state(
     push_len(out, prepared_tasks.len())?;
     for prepared in prepared_tasks.values() {
         push_task_id(out, &prepared.task_id);
-        out.extend_from_slice(&prepared.legality_proof);
+        out.extend_from_slice(&prepared.request_digest);
         out.extend_from_slice(&prepared.expires_at.to_be_bytes());
         out.extend_from_slice(&prepared.validator_set_version.to_be_bytes());
 
@@ -43,7 +43,7 @@ pub(super) fn decode_local_state(
     decoder: &mut Decoder<'_>,
 ) -> Result<(BTreeMap<TaskId, PreparedTask>, VoteLocks), PersistenceError> {
     let task_count = decoder.read_len()?;
-    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 64 + 8 + 8 + 8;
+    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 8 + 8;
     if task_count > decoder.remaining() / MIN_PREPARED_TASK_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
@@ -51,7 +51,7 @@ pub(super) fn decode_local_state(
     let mut prepared_tasks = BTreeMap::new();
     for _ in 0..task_count {
         let task_id = decoder.read_task_id()?;
-        let legality_proof = decoder.read_array_64()?;
+        let request_digest = decoder.read_array_32()?;
         let expires_at = decoder.read_u64()?;
         let validator_set_version = decoder.read_u64()?;
         let operation_count = decoder.read_len()?;
@@ -70,7 +70,7 @@ pub(super) fn decode_local_state(
                 task_id.clone(),
                 PreparedTask::new(
                     task_id,
-                    legality_proof,
+                    request_digest,
                     expires_at,
                     validator_set_version,
                     operations,

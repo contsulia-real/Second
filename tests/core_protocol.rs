@@ -128,7 +128,7 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
             },
         ],
     );
-    let legality_proof = task.legality_proof();
+    let request_digest = task.request_digest();
 
     assert!(matches!(
         state.execute(&task, 10),
@@ -139,8 +139,8 @@ fn failed_task_rolls_back_business_state_but_consumes_allocated_identity_range()
     assert_eq!(state.current_supply(), 0);
     assert_eq!(state.next_currency_address(), 502);
     assert_eq!(
-        state.bound_legality_proof(support::task_id(77)),
-        Some(legality_proof)
+        state.bound_request_digest(support::task_id(77)),
+        Some(request_digest)
     );
 }
 

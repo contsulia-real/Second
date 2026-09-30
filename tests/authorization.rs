@@ -4,6 +4,7 @@ use second::{
     AuthorizationError, AuthorizerSet, CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload,
     Operation,
 };
+use sha2::{Digest, Sha256};
 use support::key as signing_key;
 
 fn payload(amount: u64) -> LegalTaskPayload {
@@ -69,7 +70,7 @@ fn signature_text_is_strict_canonical_base64url_without_padding() {
 }
 
 #[test]
-fn verified_task_preserves_the_exact_legality_proof() {
+fn verified_task_request_digest_binds_the_full_signed_request() {
     let key = signing_key(7);
     let authorizers =
         AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, [key.verifying_key().to_bytes()]).unwrap();
@@ -77,7 +78,14 @@ fn verified_task_preserves_the_exact_legality_proof() {
     let signed = LegalTask::sign(payload(3), &key).unwrap();
     let verified = signed.verify(&authorizers).unwrap();
 
-    assert_eq!(verified.legality_proof(), signed.signature_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(b"SECOND_SIGNED_LEGAL_TASK_V1\0");
+    hasher.update(signed.authorizer_public_key());
+    hasher.update(signed.signature_bytes());
+    hasher.update(signed.canonical_signing_bytes().unwrap());
+    let expected: [u8; 32] = hasher.finalize().into();
+
+    assert_eq!(verified.request_digest(), expected);
     assert_eq!(verified.signed_task(), &signed);
 }
 

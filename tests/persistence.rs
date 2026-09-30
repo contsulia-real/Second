@@ -253,7 +253,7 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
             count: 3,
         }],
     );
-    let issue_legality_proof = issue.legality_proof();
+    let issue_request_digest = issue.request_digest();
     state.execute(&issue, 1).unwrap();
 
     let transfer = verified_task(
@@ -285,8 +285,8 @@ fn snapshot_restores_private_business_state_protocol_state_and_validator_set() {
     assert_eq!(restored.reserve_count(), 2);
     assert_eq!(restored.next_currency_address(), 105);
     assert_eq!(
-        restored.bound_legality_proof(support::task_id(1)),
-        Some(issue_legality_proof)
+        restored.bound_request_digest(support::task_id(1)),
+        Some(issue_request_digest)
     );
     assert_eq!(validator_set.version(), 7);
     assert_eq!(validator_set.len(), 4);

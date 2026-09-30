@@ -109,13 +109,13 @@ impl PreparedTaskBook {
         }
 
         let before_frontier = state.next_currency_address();
-        let before_binding = state.bound_legality_proof(task.task_id());
+        let before_binding = state.bound_request_digest(task.task_id());
         let mut candidate = state.clone();
 
         let result = self.build_prepared(&mut candidate, task, now, validator_set.version());
         let durable_prerequisite_changed = candidate.prerequisite != state.prerequisite;
         let protocol_changed = candidate.next_currency_address() != before_frontier
-            || candidate.bound_legality_proof(task.task_id()) != before_binding;
+            || candidate.bound_request_digest(task.task_id()) != before_binding;
 
         match result {
             Ok(BuildOutcome::AlreadySucceeded) => Ok(PreparationOutcome::AlreadySucceeded),
@@ -299,7 +299,7 @@ impl PreparedTaskBook {
 
         Ok(BuildOutcome::Prepared(PreparedTask::new(
             task.task_id(),
-            task.legality_proof(),
+            task.request_digest(),
             task.expires_at(),
             validator_set_version,
             operations,
@@ -410,7 +410,7 @@ impl PreparedTaskBook {
         state: &mut SecondState,
         prepared: &PreparedTask,
     ) -> Result<ExecutionOutcome, PreparationError> {
-        if state.bind_task_legality_proof(prepared.task_id.clone(), prepared.legality_proof)? {
+        if state.bind_task_request_digest(prepared.task_id.clone(), prepared.request_digest)? {
             return Ok(ExecutionOutcome::AlreadySucceeded);
         }
 

@@ -224,7 +224,7 @@ fn encode_payload(
     push_len(&mut out, state.protocol.task_bindings.len())?;
     for (task_id, binding) in &state.protocol.task_bindings {
         push_task_id(&mut out, task_id);
-        out.extend_from_slice(&binding.legality_proof);
+        out.extend_from_slice(&binding.request_digest);
         out.push(u8::from(binding.succeeded));
     }
 
@@ -356,14 +356,14 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     }
 
     let task_count = decoder.read_len()?;
-    const MIN_TASK_BINDING_SIZE: usize = 1 + 1 + 64 + 1;
+    const MIN_TASK_BINDING_SIZE: usize = 1 + 1 + 32 + 1;
     if task_count > decoder.remaining() / MIN_TASK_BINDING_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
     let mut task_bindings = BTreeMap::new();
     for _ in 0..task_count {
         let task_id = decoder.read_task_id()?;
-        let legality_proof = decoder.read_array_64()?;
+        let request_digest = decoder.read_array_32()?;
         let succeeded = match decoder.read_u8()? {
             0 => false,
             1 => true,
@@ -374,7 +374,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
             .insert(
                 task_id,
                 TaskBinding {
-                    legality_proof,
+                    request_digest,
                     succeeded,
                 },
             )
@@ -564,12 +564,6 @@ impl<'a> Decoder<'a> {
 
     pub(super) fn read_array_32(&mut self) -> Result<[u8; 32], PersistenceError> {
         self.read_exact(32)?
-            .try_into()
-            .map_err(|_| PersistenceError::InvalidSnapshot)
-    }
-
-    pub(super) fn read_array_64(&mut self) -> Result<[u8; 64], PersistenceError> {
-        self.read_exact(64)?
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)
     }

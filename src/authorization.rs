@@ -6,6 +6,9 @@ use crate::{
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use sha2::{Digest, Sha256};
+
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"SECOND_SIGNED_LEGAL_TASK_V1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegalTask {
@@ -102,18 +105,29 @@ impl LegalTask {
             .verify_strict(&message, &signature)
             .map_err(|_| AuthorizationError::InvalidSignature)?;
 
-        Ok(VerifiedLegalTask { task: self.clone() })
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DIGEST_DOMAIN);
+        hasher.update(self.authorizer_public_key);
+        hasher.update(self.signature);
+        hasher.update(&message);
+        let request_digest = hasher.finalize().into();
+
+        Ok(VerifiedLegalTask {
+            task: self.clone(),
+            request_digest,
+        })
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedLegalTask {
     task: LegalTask,
+    request_digest: [u8; 32],
 }
 
 impl VerifiedLegalTask {
-    pub const fn legality_proof(&self) -> [u8; 64] {
-        self.task.signature_bytes()
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
     }
 
     pub fn payload(&self) -> &LegalTaskPayload {
