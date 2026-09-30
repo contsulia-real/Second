@@ -17,8 +17,8 @@ use super::local_codec::{decode_local_state, encode_local_state};
 use super::validator_codec::{decode_validator_registry, encode_validator_registry};
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 5;
-const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V5\0";
+const SNAPSHOT_VERSION: u32 = 6;
+const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V6\0";
 const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
 const MAX_SNAPSHOT_PAYLOAD_SIZE: u64 = 512 * 1024 * 1024;
