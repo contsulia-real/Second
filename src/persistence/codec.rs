@@ -570,11 +570,17 @@ pub(super) fn validate_prepared_snapshot_links(
         let FinalityScope::PreparedTask(task_id) = scope else {
             continue;
         };
+        let binding = task_bindings
+            .get(task_id)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
         let Some(prepared) = prepared_tasks.get(task_id) else {
+            if !binding.succeeded {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
             continue;
         };
 
-        if prepared.phase == PreparedTaskPhase::Prepared {
+        if prepared.phase == PreparedTaskPhase::Prepared || binding.succeeded {
             return Err(PersistenceError::InvalidSnapshot);
         }
 

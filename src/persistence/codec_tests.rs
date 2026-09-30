@@ -191,3 +191,65 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
         Err(PersistenceError::InvalidSnapshot)
     );
 }
+
+#[test]
+fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
+    let task_id = TaskId::parse("completed-vote-lock").unwrap();
+    let vote_locks = BTreeMap::from([(
+        (
+            ValidatorId::new(1),
+            FinalityScope::PreparedTask(task_id.clone()),
+        ),
+        [7; 32],
+    )]);
+    let prepared = BTreeMap::new();
+    let payment_addresses = BTreeMap::new();
+    let executions = BTreeMap::new();
+
+    assert_eq!(
+        validate_prepared_snapshot_links(
+            &BTreeMap::new(),
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &vote_locks,
+        ),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+
+    let unfinished = BTreeMap::from([(
+        task_id.clone(),
+        TaskBinding {
+            request_digest: [8; 32],
+            succeeded: false,
+        },
+    )]);
+    assert_eq!(
+        validate_prepared_snapshot_links(
+            &unfinished,
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &vote_locks,
+        ),
+        Err(PersistenceError::InvalidSnapshot)
+    );
+
+    let succeeded = BTreeMap::from([(
+        task_id,
+        TaskBinding {
+            request_digest: [8; 32],
+            succeeded: true,
+        },
+    )]);
+    assert_eq!(
+        validate_prepared_snapshot_links(
+            &succeeded,
+            &payment_addresses,
+            &executions,
+            &prepared,
+            &vote_locks,
+        ),
+        Ok(())
+    );
+}
