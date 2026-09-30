@@ -184,12 +184,9 @@ impl StateStore {
         validator_set: &ValidatorSet,
         validator_registry: &ValidatorRegistry,
     ) -> Result<u64, PersistenceError> {
-        validator_registry
-            .validate_current_set(validator_set)
-            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
-
         let _guard = self.lock()?;
         let latest = self.load_unlocked()?;
+        validate_registry_history_for_write(latest.as_ref(), validator_set, validator_registry)?;
         let checkpoint_floor_epoch = checkpoint_floor_for_write(latest.as_ref(), None)?;
         let checkpoint = latest
             .as_ref()
@@ -380,6 +377,36 @@ impl StateStore {
         write_slots(&self.base_path, generation, &bytes)?;
         Ok(generation)
     }
+}
+
+fn validate_registry_history_for_write(
+    latest: Option<&PersistedNodeState>,
+    validator_set: &ValidatorSet,
+    validator_registry: &ValidatorRegistry,
+) -> Result<(), PersistenceError> {
+    let Some(latest) = latest else {
+        return validator_registry
+            .validate_current_set(validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch);
+    };
+
+    if validator_set.version() == latest.validator_set.version() {
+        if validator_registry == &latest.validator_registry {
+            return Ok(());
+        }
+        return Err(PersistenceError::ValidatorRegistryMismatch);
+    }
+
+    let mut expected = latest.validator_registry.clone();
+    expected
+        .apply_next_set(validator_set)
+        .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+
+    if &expected != validator_registry {
+        return Err(PersistenceError::ValidatorRegistryMismatch);
+    }
+
+    Ok(())
 }
 
 fn registry_for_write(

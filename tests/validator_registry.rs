@@ -112,5 +112,11 @@ fn retired_identity_history_survives_snapshot_restart() {
         ))
     );
 
+    let forgotten = ValidatorRegistry::from_validator_set(&restored.validator_set).unwrap();
+    assert_eq!(
+        store.save_with_validator_registry(&restored.state, &restored.validator_set, &forgotten,),
+        Err(second::PersistenceError::ValidatorRegistryMismatch)
+    );
+
     store.remove_files().unwrap();
 }
