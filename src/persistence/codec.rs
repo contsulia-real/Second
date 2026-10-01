@@ -248,6 +248,7 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
         out.extend_from_slice(&validator_set_version.to_be_bytes());
         out.extend_from_slice(&floor.serial.to_be_bytes());
         out.extend_from_slice(&floor.checkpoint_digest);
+        out.push(u8::from(floor.certified));
     }
 
     match public_checkpoint_proof {
@@ -556,16 +557,24 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     let validator_registry = decode_validator_registry(&mut decoder)?;
     let checkpoint_floor_epoch = decoder.read_u64()?;
     let recovery_floor_count = decoder.read_len()?;
-    const RECOVERY_FLOOR_ENCODED_SIZE: usize = 8 + 8 + 32;
+    const RECOVERY_FLOOR_ENCODED_SIZE: usize = 8 + 8 + 32 + 1;
     if recovery_floor_count > decoder.remaining() / RECOVERY_FLOOR_ENCODED_SIZE {
         return Err(PersistenceError::InvalidSnapshot);
     }
     let mut recovery_checkpoint_floors = BTreeMap::new();
     for _ in 0..recovery_floor_count {
         let validator_set_version = decoder.read_u64()?;
+        let serial = decoder.read_u64()?;
+        let checkpoint_digest = decoder.read_array_32()?;
+        let certified = match decoder.read_u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
         let floor = RecoveryCheckpointFloor {
-            serial: decoder.read_u64()?,
-            checkpoint_digest: decoder.read_array_32()?,
+            serial,
+            checkpoint_digest,
+            certified,
         };
         if recovery_checkpoint_floors
             .insert(validator_set_version, floor)
@@ -636,10 +645,9 @@ fn validate_recovery_checkpoint_floors(
     validator_registry: &ValidatorRegistry,
     recovery_checkpoint_floors: &BTreeMap<u64, RecoveryCheckpointFloor>,
 ) -> Result<(), PersistenceError> {
-    if recovery_checkpoint_floors
-        .keys()
-        .any(|version| *version > validator_registry.active_validator_set_version())
-    {
+    if recovery_checkpoint_floors.iter().any(|(version, floor)| {
+        *version > validator_registry.active_validator_set_version() || floor.serial == 0
+    }) {
         return Err(PersistenceError::InvalidSnapshot);
     }
     Ok(())

@@ -8,8 +8,8 @@ use crate::validator_signer::FinalityScope;
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, PersistenceError, PublicCurrencyCheckpointProof, SecondState,
-    StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
-    ValidatorTransitionError,
+    StateRecoveryCheckpoint, StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry,
+    ValidatorSet, ValidatorTransitionError,
 };
 
 use super::codec::{SnapshotContents, encode_snapshot};
@@ -140,6 +140,7 @@ impl StateStore {
             RecoveryCheckpointFloor {
                 serial: checkpoint.checkpoint().serial(),
                 checkpoint_digest: checkpoint.checkpoint().digest(),
+                certified: true,
             },
         )]);
         let prepared_tasks = BTreeMap::new();
@@ -435,6 +436,34 @@ impl StateStore {
         )
     }
 
+    pub fn next_state_recovery_checkpoint(
+        &self,
+    ) -> Result<StateRecoveryCheckpoint, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        let validator_set_version = latest.validator_set.version();
+        let serial = match latest
+            .recovery_checkpoint_floors
+            .get(&validator_set_version)
+        {
+            None => 1,
+            Some(floor) if !floor.certified => {
+                return Err(PersistenceError::RecoveryCheckpointAwaitingFinality {
+                    validator_set_version,
+                    serial: floor.serial,
+                });
+            }
+            Some(floor) => floor.serial.checked_add(1).ok_or(
+                PersistenceError::RecoveryCheckpointSerialOverflow {
+                    validator_set_version,
+                },
+            )?,
+        };
+        StateRecoveryCheckpoint::from_persisted(serial, &latest)
+    }
+
     pub fn advance_recovery_checkpoint_floor(
         &self,
         checkpoint: &CertifiedStateRecoveryCheckpoint,
@@ -452,6 +481,7 @@ impl StateStore {
             checkpoint.checkpoint().validator_set_version(),
             checkpoint.checkpoint().serial(),
             checkpoint.checkpoint().digest(),
+            RecoveryCheckpointFloorUpdate::Certified,
         )?;
 
         self.write_next_unlocked(
@@ -679,6 +709,7 @@ impl StateStore {
                 *validator_set_version,
                 *serial,
                 digest,
+                RecoveryCheckpointFloorUpdate::Vote,
             )?;
         }
 
@@ -874,18 +905,41 @@ fn checkpoint_floor_for_write(
     Ok(actual)
 }
 
+#[derive(Clone, Copy)]
+enum RecoveryCheckpointFloorUpdate {
+    Vote,
+    Certified,
+}
+
 fn advance_recovery_checkpoint_floor_entry(
     recovery_checkpoint_floors: &mut BTreeMap<u64, RecoveryCheckpointFloor>,
     validator_set_version: u64,
     serial: u64,
     checkpoint_digest: [u8; 32],
+    update: RecoveryCheckpointFloorUpdate,
 ) -> Result<(), PersistenceError> {
+    if serial == 0 {
+        return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
+            validator_set_version,
+            expected: 1,
+            actual: 0,
+        });
+    }
+
     let Some(current) = recovery_checkpoint_floors.get_mut(&validator_set_version) else {
+        if matches!(update, RecoveryCheckpointFloorUpdate::Vote) && serial != 1 {
+            return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
+                validator_set_version,
+                expected: 1,
+                actual: serial,
+            });
+        }
         recovery_checkpoint_floors.insert(
             validator_set_version,
             RecoveryCheckpointFloor {
                 serial,
                 checkpoint_digest,
+                certified: matches!(update, RecoveryCheckpointFloorUpdate::Certified),
             },
         );
         return Ok(());
@@ -898,21 +952,57 @@ fn advance_recovery_checkpoint_floor_entry(
             actual: serial,
         });
     }
+
     if serial == current.serial {
-        if checkpoint_digest != current.checkpoint_digest {
-            return Err(PersistenceError::RecoveryCheckpointFloorConflict {
-                validator_set_version,
+        if checkpoint_digest == current.checkpoint_digest {
+            if matches!(update, RecoveryCheckpointFloorUpdate::Certified) {
+                current.certified = true;
+            }
+            return Ok(());
+        }
+
+        if matches!(update, RecoveryCheckpointFloorUpdate::Certified) && !current.certified {
+            *current = RecoveryCheckpointFloor {
                 serial,
-                locked_digest: current.checkpoint_digest,
-                attempted_digest: checkpoint_digest,
+                checkpoint_digest,
+                certified: true,
+            };
+            return Ok(());
+        }
+
+        return Err(PersistenceError::RecoveryCheckpointFloorConflict {
+            validator_set_version,
+            serial,
+            locked_digest: current.checkpoint_digest,
+            attempted_digest: checkpoint_digest,
+        });
+    }
+
+    if matches!(update, RecoveryCheckpointFloorUpdate::Vote) {
+        if !current.certified {
+            return Err(PersistenceError::RecoveryCheckpointAwaitingFinality {
+                validator_set_version,
+                serial: current.serial,
             });
         }
-        return Ok(());
+        let expected = current.serial.checked_add(1).ok_or(
+            PersistenceError::RecoveryCheckpointSerialOverflow {
+                validator_set_version,
+            },
+        )?;
+        if serial != expected {
+            return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
+                validator_set_version,
+                expected,
+                actual: serial,
+            });
+        }
     }
 
     *current = RecoveryCheckpointFloor {
         serial,
         checkpoint_digest,
+        certified: matches!(update, RecoveryCheckpointFloorUpdate::Certified),
     };
     Ok(())
 }

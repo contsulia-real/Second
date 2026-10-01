@@ -39,6 +39,7 @@ pub struct PersistedNodeState {
 pub(crate) struct RecoveryCheckpointFloor {
     pub(crate) serial: u64,
     pub(crate) checkpoint_digest: [u8; 32],
+    pub(crate) certified: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

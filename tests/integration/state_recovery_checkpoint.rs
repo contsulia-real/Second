@@ -16,15 +16,14 @@ fn shared_recovery_checkpoint_ignores_validator_local_vote_locks_and_forms_qc() 
     locked_store.initialize(&state, &validators).unwrap();
 
     let clean =
-        StateRecoveryCheckpoint::from_persisted(11, &clean_store.load().unwrap().unwrap()).unwrap();
+        StateRecoveryCheckpoint::from_persisted(1, &clean_store.load().unwrap().unwrap()).unwrap();
 
     ValidatorSigner::new(ValidatorId::new(1), key(4), locked_store.clone())
         .sign_state_recovery_checkpoint(&clean, &validators)
         .unwrap();
 
     let locked =
-        StateRecoveryCheckpoint::from_persisted(11, &locked_store.load().unwrap().unwrap())
-            .unwrap();
+        StateRecoveryCheckpoint::from_persisted(1, &locked_store.load().unwrap().unwrap()).unwrap();
     assert_eq!(clean, locked);
 
     let statement = clean.finality_statement();
@@ -43,6 +42,127 @@ fn shared_recovery_checkpoint_ignores_validator_local_vote_locks_and_forms_qc() 
 }
 
 #[test]
+fn recovery_serial_requires_certified_previous_checkpoint() {
+    let validators = validator_set(7, 1..=4);
+    let store = StateStore::new(temp_base("recovery-serial-sequence"));
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    store.initialize(&state, &validators).unwrap();
+    let signer = ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone());
+
+    let skipped_first =
+        StateRecoveryCheckpoint::from_persisted(2, &store.load().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        signer.sign_state_recovery_checkpoint(&skipped_first, &validators),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::UnexpectedRecoveryCheckpointSerial {
+                validator_set_version: 7,
+                expected: 1,
+                actual: 2,
+            }
+        ))
+    );
+
+    let first = store.next_state_recovery_checkpoint().unwrap();
+    assert_eq!(first.serial(), 1);
+    signer
+        .sign_state_recovery_checkpoint(&first, &validators)
+        .unwrap();
+
+    assert_eq!(
+        store.next_state_recovery_checkpoint(),
+        Err(
+            second::PersistenceError::RecoveryCheckpointAwaitingFinality {
+                validator_set_version: 7,
+                serial: 1,
+            }
+        )
+    );
+
+    let premature_second =
+        StateRecoveryCheckpoint::from_persisted(2, &store.load().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        signer.sign_state_recovery_checkpoint(&premature_second, &validators),
+        Err(ValidatorSigningError::Persistence(
+            second::PersistenceError::RecoveryCheckpointAwaitingFinality {
+                validator_set_version: 7,
+                serial: 1,
+            }
+        ))
+    );
+
+    let statement = first.finality_statement();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .collect();
+    let certified = CertifiedStateRecoveryCheckpoint::new(first, votes, &validators).unwrap();
+    store.advance_recovery_checkpoint_floor(&certified).unwrap();
+
+    let second = store.next_state_recovery_checkpoint().unwrap();
+    assert_eq!(second, premature_second);
+    signer
+        .sign_state_recovery_checkpoint(&second, &validators)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn certified_recovery_can_supersede_uncertified_local_vote_same_serial() {
+    let validators = validator_set(7, 1..=4);
+    let store = StateStore::new(temp_base("recovery-certified-supersedes-local-vote"));
+    let mut state = SecondState::genesis([support::account(1)], 1);
+    store.initialize(&state, &validators).unwrap();
+
+    let signer = ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone());
+    let local =
+        StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
+    signer
+        .sign_state_recovery_checkpoint(&local, &validators)
+        .unwrap();
+
+    let task = verified_task(
+        499,
+        vec![Operation::Issue {
+            account: support::account(1),
+            count: 1,
+        }],
+    );
+    let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+    book.prepare(&mut state, &task, 0, &validators).unwrap();
+    let statement = book.prepared_finality_statement(task.task_id()).unwrap();
+    let certificate = certificate_from_keys(
+        statement,
+        &validators,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+    book.commit(&mut state, task.task_id(), &certificate)
+        .unwrap();
+
+    let finalized =
+        StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
+    assert_ne!(local.digest(), finalized.digest());
+    let statement = finalized.finality_statement();
+    let votes = [2_u64, 3, 4]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .collect();
+    let certified = CertifiedStateRecoveryCheckpoint::new(finalized, votes, &validators).unwrap();
+
+    store.advance_recovery_checkpoint_floor(&certified).unwrap();
+
+    let next = store.next_state_recovery_checkpoint().unwrap();
+    assert_eq!(next.serial(), 2);
+    signer
+        .sign_state_recovery_checkpoint(&next, &validators)
+        .unwrap();
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn recovery_checkpoint_vote_lock_blocks_same_serial_after_committed_state_changes() {
     let validators = validator_set(7, 1..=4);
     let store = StateStore::new(temp_base("recovery-serial-lock"));
@@ -51,7 +171,7 @@ fn recovery_checkpoint_vote_lock_blocks_same_serial_after_committed_state_change
 
     let signer = ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone());
     let first =
-        StateRecoveryCheckpoint::from_persisted(20, &store.load().unwrap().unwrap()).unwrap();
+        StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
     signer
         .sign_state_recovery_checkpoint(&first, &validators)
         .unwrap();
@@ -77,7 +197,7 @@ fn recovery_checkpoint_vote_lock_blocks_same_serial_after_committed_state_change
         .unwrap();
 
     let conflicting =
-        StateRecoveryCheckpoint::from_persisted(20, &store.load().unwrap().unwrap()).unwrap();
+        StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
     assert_ne!(
         first.shared_state_digest(),
         conflicting.shared_state_digest()
@@ -102,11 +222,16 @@ fn recovery_checkpoint_serial_floor_survives_restart_and_rejects_lower_serial() 
     let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     store.initialize(&state, &validators).unwrap();
 
-    let first =
+    let accepted =
         StateRecoveryCheckpoint::from_persisted(20, &store.load().unwrap().unwrap()).unwrap();
-    ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
-        .sign_state_recovery_checkpoint(&first, &validators)
-        .unwrap();
+    let statement = accepted.finality_statement();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .collect();
+    let certified =
+        CertifiedStateRecoveryCheckpoint::new(accepted.clone(), votes, &validators).unwrap();
+    store.advance_recovery_checkpoint_floor(&certified).unwrap();
 
     let restarted_store = StateStore::new(&base);
     let restarted_signer =
@@ -133,9 +258,8 @@ fn recovery_checkpoint_serial_floor_survives_restart_and_rejects_lower_serial() 
         ))
     ));
 
-    let next =
-        StateRecoveryCheckpoint::from_persisted(21, &restarted_store.load().unwrap().unwrap())
-            .unwrap();
+    let next = restarted_store.next_state_recovery_checkpoint().unwrap();
+    assert_eq!(next.serial(), 21);
     restarted_signer
         .sign_state_recovery_checkpoint(&next, &validators)
         .unwrap();
@@ -217,8 +341,15 @@ fn recovery_checkpoint_floor_is_scoped_by_validator_set_version() {
 
     let v7_checkpoint =
         StateRecoveryCheckpoint::from_persisted(20, &store.load().unwrap().unwrap()).unwrap();
-    ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
-        .sign_state_recovery_checkpoint(&v7_checkpoint, &validators_v7)
+    let statement = v7_checkpoint.finality_statement();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .collect();
+    let v7_certified =
+        CertifiedStateRecoveryCheckpoint::new(v7_checkpoint, votes, &validators_v7).unwrap();
+    store
+        .advance_recovery_checkpoint_floor(&v7_certified)
         .unwrap();
 
     let registry = store.load().unwrap().unwrap().validator_registry;
@@ -240,8 +371,8 @@ fn recovery_checkpoint_floor_is_scoped_by_validator_set_version() {
         CertifiedValidatorSetTransition::new(transition, votes, &validators_v7).unwrap();
     store.activate_validator_set_transition(&certified).unwrap();
 
-    let v8_checkpoint =
-        StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
+    let v8_checkpoint = store.next_state_recovery_checkpoint().unwrap();
+    assert_eq!(v8_checkpoint.serial(), 1);
     ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
         .sign_state_recovery_checkpoint(&v8_checkpoint, &validators_v8)
         .unwrap();

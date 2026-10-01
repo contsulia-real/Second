@@ -108,6 +108,18 @@ pub enum PersistenceError {
         locked_digest: [u8; 32],
         attempted_digest: [u8; 32],
     },
+    UnexpectedRecoveryCheckpointSerial {
+        validator_set_version: u64,
+        expected: u64,
+        actual: u64,
+    },
+    RecoveryCheckpointAwaitingFinality {
+        validator_set_version: u64,
+        serial: u64,
+    },
+    RecoveryCheckpointSerialOverflow {
+        validator_set_version: u64,
+    },
     ValidatorSafetyStateUnavailable,
     SigningFenceViolation {
         minimum_validator_set_version: u64,

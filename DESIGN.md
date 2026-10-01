@@ -1018,9 +1018,13 @@ Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 author
 
 `StateRecoveryCheckpoint` 具有独立 `serial`，与 public checkpoint epoch、`ValidatorSet.version`、snapshot generation 均不是同一序列；checkpoint digest 使用独立 domain separation，并把 protocol version、serial、当前 validator-set version 与 shared-state digest 一起绑定。`ValidatorSigner` 只能用持久 `ValidatorRegistry` 认可的当前 active ValidatorSet 对它签票，vote-lock scope 为 `(validator_set_version, serial)`；同一 scope 重放同 digest 允许，同 scope 不同 shared state 永久拒绝。
 
-节点还为 recovery checkpoint 持久化独立的 freshness floor，按 `ValidatorSet.version` 分桶，每个桶保存已接受/签过的最高 `(serial, checkpoint_digest)`。第一次为 recovery checkpoint 建立 vote-lock 时，floor 与 vote-lock 在同一 snapshot 写入；节点显式接受/发布一个已经通过当前 active ValidatorSet QC 的 recovery checkpoint 时也推进同一 floor。低于当前 floor 的 serial 一律拒绝；等于 floor 的 serial 只允许完全相同的 checkpoint digest，防止“本机没有参与旧 QC”时又为同 serial 的另一份 shared state 签票；更高 serial 可以推进 floor。floor 跨重启保留，validator-set transition 不删除旧 set 的历史 floor，但新 `ValidatorSet.version` 使用自己的独立桶，因此不会把旧 set 的 serial 数字强加给新 set。空 store 通过 certified recovery 安装时，直接以所安装 checkpoint 的 `(set version, serial, digest)` 初始化该桶。
+节点还为 recovery checkpoint 持久化独立的 serial head，按 `ValidatorSet.version` 分桶。每个桶保存最高 `serial + checkpoint_digest + certified`：本地第一次为某个 recovery checkpoint 建立 vote-lock 时，serial head 与 vote-lock 在同一 snapshot 写入，但此时 `certified = false`；节点显式接受/发布一个已经通过当前 active ValidatorSet QC 的 recovery checkpoint 后，才把对应 head 标为 certified。低于当前 head 的 serial 一律拒绝；同 serial 的本地重复签名只允许同 digest；如果本地只投过某个未 finality 的候选，而同 serial 的另一 digest 后来取得合法 QC，则允许该 QC 覆盖未 certified 的本地 head，因为本机并未对新 digest 再次签票。若 head 已经 certified，则同 serial 不同 digest 永久拒绝。
 
-这里冻结的是**节点侧 freshness / anti-rollback 语义**，不是 serial 的全网发行器。谁提出下一个 serial、是否要求连续 `+1`、多节点如何协调 checkpoint 发布节奏，仍未定义；实现不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial 分配规则。
+recovery serial 的发行规则现已固定：**每个新的 `ValidatorSet.version` 从 serial 1 独立开始；Validator 只能为本 set 当前已 certified serial 的严格 `+1` 签票，不能跳号，也不能仅凭自己对前一号投过票就继续下一号。** `StateStore::next_state_recovery_checkpoint()` 是本地权威发行入口：没有本 set head 时生成 1；存在未 certified head 时返回 awaiting-finality；存在 certified head `S` 时只生成 `S+1`。serial 溢出直接 fail-closed。ValidatorSet transition 不删除旧 set 的历史 head，但新 set 使用独立桶，因此不会继承旧 set 的 serial 数字。
+
+已通过 QC 的 checkpoint 属于更强的网络事实：节点可以直接接受高于本地 head 的 certified serial 进行离线 catch-up，包括空 store 直接安装当前较新的 recovery checkpoint。这样不要求恢复节点下载从 1 开始的全部历史 QC；合法高 serial QC 的 quorum 中至少包含遵守签票规则的诚实 Validator，因此其存在意味着该 set 的连续 serial 前驱已经按协议推进。该 catch-up 只推进本地 certified head，不允许未经 QC 的任意跳号。
+
+这套规则解决的是 recovery checkpoint 的**编号、freshness 与 anti-equivocation 协调**，不选择 proposer，也不提供 round、timeout、leader election 或 view-change。多个节点若在同一 next serial 提出不同 shared state，vote-lock + quorum intersection 负责 safety，但在缺少完整 BFT state machine 时仍可能因分票失去 liveness；这部分继续归属于未来完整 Byzantine consensus 设计。实现仍不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial。
 
 `CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。
 
@@ -1231,7 +1235,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、durable recovery freshness floor，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；当前仍需冻结 recovery serial 的全网发行/协调规则。若 identity/recovery authority 本身丢失，则走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
+- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器。若未来需要在冲突 proposal 下保证 liveness，统一放进完整 BFT round / leader / view-change 设计；identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；

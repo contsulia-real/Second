@@ -96,6 +96,14 @@ impl StateRecoveryCheckpoint {
         serial: u64,
         payload: &StateRecoveryPayload,
     ) -> Result<Self, PersistenceError> {
+        if serial == 0 {
+            return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
+                validator_set_version: payload.validator_set.version(),
+                expected: 1,
+                actual: 0,
+            });
+        }
+
         let encoded = payload.encode_bytes()?;
         let mut hasher = Sha256::new();
         hasher.update(SHARED_RECOVERY_STATE_DOMAIN);
