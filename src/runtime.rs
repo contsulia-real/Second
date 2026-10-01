@@ -16,9 +16,10 @@ const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
-    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
-    QuicRequestStream, QuicServer, QuicTransportIdentity, StateRecoveryProvider,
-    StateRecoveryProviderHandle, client_peer_records, client_public_currency_checkpoint_proof,
+    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, PublicNetworkSnapshot,
+    QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
+    StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
+    client_public_currency_checkpoint_proof,
     client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
     outbound_bind_address, serve_public_network_connection,
     serve_public_network_connection_from_request,
@@ -26,7 +27,7 @@ use crate::network::{
 use crate::runtime_bft::{ValidatorBftRuntime, ValidatorBftRuntimeError};
 use crate::{
     BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint, PersistenceError,
-    PublicCurrencyCheckpointProof, RemoteCertifiedPublicCurrencyView, SecondState, StateStore,
+    RemoteCertifiedPublicCurrencyView, StateStore,
 };
 
 #[derive(Debug)]
@@ -77,8 +78,7 @@ impl From<BftConsensusRuntimeError> for NodeRuntimeError {
 
 #[derive(Clone)]
 struct PublicNetworkContext {
-    state: Arc<SecondState>,
-    public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
+    store: StateStore,
     peer_store: PeerStore,
     local_node_id: NodeId,
     local_peer_record: Option<PeerRecord>,
@@ -89,8 +89,6 @@ pub struct NodeRuntime {
     server: QuicServer,
     pub(crate) transport_identity: QuicTransportIdentity,
     pub(crate) store: StateStore,
-    state: Arc<SecondState>,
-    public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
     pub(crate) peer_store: PeerStore,
     local_peer_record: Option<PeerRecord>,
@@ -104,7 +102,7 @@ impl NodeRuntime {
         listen_address: SocketAddr,
         store: &StateStore,
     ) -> Result<Self, NodeRuntimeError> {
-        let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+        store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
         let transport_identity =
             QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
@@ -124,8 +122,6 @@ impl NodeRuntime {
             server,
             transport_identity,
             store: store.clone(),
-            state: Arc::new(persisted.state),
-            public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
             peer_manager,
             peer_store,
             local_peer_record,
@@ -218,8 +214,7 @@ impl NodeRuntime {
 
     fn public_network_context(&self) -> PublicNetworkContext {
         PublicNetworkContext {
-            state: Arc::clone(&self.state),
-            public_checkpoint_proof: self.public_checkpoint_proof.clone(),
+            store: self.store.clone(),
             peer_store: self.peer_store.clone(),
             local_node_id: self.node_id(),
             local_peer_record: self.local_peer_record.clone(),
@@ -485,32 +480,29 @@ async fn serve_managed_peer(
         }
     });
 
+    let load_public_snapshot = || {
+        let persisted = context
+            .store
+            .load()
+            .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
+            .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
+        Ok(PublicNetworkSnapshot {
+            state: persisted.state,
+            checkpoint_proof: persisted.public_checkpoint_proof,
+        })
+    };
     let services = PublicNetworkServices::new(
         &context.peer_store,
         context.local_node_id,
         context.local_peer_record.as_ref(),
         &context.state_recovery_provider,
+        &load_public_snapshot,
     );
     let result = match first_request {
         Some(first_request) => {
-            serve_public_network_connection_from_request(
-                &peer,
-                &context.state,
-                context.public_checkpoint_proof.as_deref(),
-                services,
-                first_request,
-            )
-            .await
+            serve_public_network_connection_from_request(&peer, services, first_request).await
         }
-        None => {
-            serve_public_network_connection(
-                &peer,
-                &context.state,
-                context.public_checkpoint_proof.as_deref(),
-                services,
-            )
-            .await
-        }
+        None => serve_public_network_connection(&peer, services).await,
     };
     let _ = result;
 }

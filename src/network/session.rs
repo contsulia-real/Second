@@ -7,12 +7,21 @@ use super::quic::{QuicPeer, QuicRequestStream};
 
 const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) struct PublicNetworkSnapshot {
+    pub(crate) state: SecondState,
+    pub(crate) checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+}
+
+type PublicNetworkSnapshotLoader<'a> =
+    &'a (dyn Fn() -> Result<PublicNetworkSnapshot, NetworkError> + Send + Sync);
+
 #[derive(Clone, Copy)]
 pub(crate) struct PublicNetworkServices<'a> {
     peer_store: &'a PeerStore,
     local_node_id: NodeId,
     local_peer_record: Option<&'a PeerRecord>,
     state_recovery_provider: &'a StateRecoveryProviderHandle,
+    public_snapshot_loader: PublicNetworkSnapshotLoader<'a>,
 }
 
 impl<'a> PublicNetworkServices<'a> {
@@ -21,12 +30,14 @@ impl<'a> PublicNetworkServices<'a> {
         local_node_id: NodeId,
         local_peer_record: Option<&'a PeerRecord>,
         state_recovery_provider: &'a StateRecoveryProviderHandle,
+        public_snapshot_loader: PublicNetworkSnapshotLoader<'a>,
     ) -> Self {
         Self {
             peer_store,
             local_node_id,
             local_peer_record,
             state_recovery_provider,
+            public_snapshot_loader,
         }
     }
 }
@@ -249,48 +260,35 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
-    serve_public_connection(peer, state, checkpoint_proof, None, None).await
-}
-
-pub(crate) async fn serve_public_network_connection(
-    peer: &QuicPeer,
-    state: &SecondState,
-    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    services: PublicNetworkServices<'_>,
-) -> Result<NodeId, NetworkError> {
-    serve_public_connection(peer, state, checkpoint_proof, Some(services), None).await
-}
-
-pub(crate) async fn serve_public_network_connection_from_request(
-    peer: &QuicPeer,
-    state: &SecondState,
-    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    services: PublicNetworkServices<'_>,
-    first_request: QuicRequestStream,
-) -> Result<NodeId, NetworkError> {
-    serve_public_connection(
-        peer,
-        state,
-        checkpoint_proof,
-        Some(services),
-        Some(first_request),
-    )
-    .await
-}
-
-async fn serve_public_connection(
-    peer: &QuicPeer,
-    state: &SecondState,
-    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    services: Option<PublicNetworkServices<'_>>,
-    mut first_request: Option<QuicRequestStream>,
-) -> Result<NodeId, NetworkError> {
     if checkpoint_proof
         .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
     {
         return Err(NetworkError::CheckpointDoesNotMatchServedState);
     }
+    serve_public_connection(peer, Some((state, checkpoint_proof)), None, None).await
+}
 
+pub(crate) async fn serve_public_network_connection(
+    peer: &QuicPeer,
+    services: PublicNetworkServices<'_>,
+) -> Result<NodeId, NetworkError> {
+    serve_public_connection(peer, None, Some(services), None).await
+}
+
+pub(crate) async fn serve_public_network_connection_from_request(
+    peer: &QuicPeer,
+    services: PublicNetworkServices<'_>,
+    first_request: QuicRequestStream,
+) -> Result<NodeId, NetworkError> {
+    serve_public_connection(peer, None, Some(services), Some(first_request)).await
+}
+
+async fn serve_public_connection(
+    peer: &QuicPeer,
+    static_public_state: Option<(&SecondState, Option<&PublicCurrencyCheckpointProof>)>,
+    services: Option<PublicNetworkServices<'_>>,
+    mut first_request: Option<QuicRequestStream>,
+) -> Result<NodeId, NetworkError> {
     loop {
         let request = match first_request.take() {
             Some(request) => request,
@@ -307,42 +305,94 @@ async fn serve_public_connection(
         });
         let response = match recovery_response {
             Some(response) => response?,
-            None => match request.message() {
-                NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
-                NetworkMessage::GetPublicCurrencies { start, limit } => {
-                    public_currency_page_response(state, *start, *limit)?
-                }
-                NetworkMessage::GetPublicCurrencySummary => NetworkMessage::PublicCurrencySummary {
-                    summary: state.public_currency_summary(),
-                },
-                NetworkMessage::GetPublicCurrencyCheckpoint => checkpoint_proof
-                    .cloned()
-                    .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
-                    .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
-                NetworkMessage::GetPeers { limit } => {
-                    validate_peer_limit(*limit)?;
-                    let services = services.as_ref().ok_or(NetworkError::UnexpectedMessage)?;
-                    let mut records = Vec::with_capacity(usize::from(*limit));
-                    if let Some(record) = services.local_peer_record {
-                        records.push(record.clone());
-                    }
-                    let remaining = limit.saturating_sub(records.len() as u16);
-                    if remaining > 0 {
-                        records.extend(
-                            services.peer_store.recent(
+            None if is_public_currency_request(request.message()) => {
+                public_currency_response(request.message(), static_public_state, services.as_ref())?
+            }
+            None => {
+                match request.message() {
+                    NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
+                    NetworkMessage::GetPeers { limit } => {
+                        validate_peer_limit(*limit)?;
+                        let services = services.as_ref().ok_or(NetworkError::UnexpectedMessage)?;
+                        let mut records = Vec::with_capacity(usize::from(*limit));
+                        if let Some(record) = services.local_peer_record {
+                            records.push(record.clone());
+                        }
+                        let remaining = limit.saturating_sub(records.len() as u16);
+                        if remaining > 0 {
+                            records.extend(services.peer_store.recent(
                                 remaining,
                                 &[services.local_node_id, peer.remote_node_id()],
-                            ),
-                        );
+                            ));
+                        }
+                        NetworkMessage::Peers { records }
                     }
-                    NetworkMessage::Peers { records }
+                    _ => return Err(NetworkError::UnexpectedMessage),
                 }
-                _ => return Err(NetworkError::UnexpectedMessage),
-            },
+            }
         };
 
         request.respond(&response).await?;
     }
+}
+
+fn is_public_currency_request(message: &NetworkMessage) -> bool {
+    matches!(
+        message,
+        NetworkMessage::GetPublicCurrencies { .. }
+            | NetworkMessage::GetPublicCurrencySummary
+            | NetworkMessage::GetPublicCurrencyCheckpoint
+    )
+}
+
+fn public_currency_response(
+    message: &NetworkMessage,
+    static_public_state: Option<(&SecondState, Option<&PublicCurrencyCheckpointProof>)>,
+    services: Option<&PublicNetworkServices<'_>>,
+) -> Result<NetworkMessage, NetworkError> {
+    if let Some(services) = services {
+        let snapshot = load_runtime_public_snapshot(services)?;
+        return public_currency_response_for_snapshot(
+            message,
+            &snapshot.state,
+            snapshot.checkpoint_proof.as_ref(),
+        );
+    }
+
+    let (state, checkpoint_proof) = static_public_state.ok_or(NetworkError::UnexpectedMessage)?;
+    public_currency_response_for_snapshot(message, state, checkpoint_proof)
+}
+
+fn public_currency_response_for_snapshot(
+    message: &NetworkMessage,
+    state: &SecondState,
+    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+) -> Result<NetworkMessage, NetworkError> {
+    match message {
+        NetworkMessage::GetPublicCurrencies { start, limit } => {
+            public_currency_page_response(state, *start, *limit)
+        }
+        NetworkMessage::GetPublicCurrencySummary => Ok(NetworkMessage::PublicCurrencySummary {
+            summary: state.public_currency_summary(),
+        }),
+        NetworkMessage::GetPublicCurrencyCheckpoint => Ok(checkpoint_proof
+            .cloned()
+            .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
+            .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint)),
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
+fn load_runtime_public_snapshot(
+    services: &PublicNetworkServices<'_>,
+) -> Result<PublicNetworkSnapshot, NetworkError> {
+    let snapshot = (services.public_snapshot_loader)()?;
+    if snapshot.checkpoint_proof.as_ref().is_some_and(|proof| {
+        proof.checkpoint().summary() != &snapshot.state.public_currency_summary()
+    }) {
+        return Err(NetworkError::CheckpointDoesNotMatchServedState);
+    }
+    Ok(snapshot)
 }
 
 async fn request_public_currency_page(

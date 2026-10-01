@@ -38,8 +38,9 @@ pub(crate) use recovery::{
     state_recovery_response, validate_chunk_limit,
 };
 pub(crate) use session::{
-    PublicNetworkServices, client_sync_certified_public_currency_view_from_checkpoint,
-    serve_public_network_connection, serve_public_network_connection_from_request,
+    PublicNetworkServices, PublicNetworkSnapshot,
+    client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
+    serve_public_network_connection_from_request,
 };
 pub use session::{
     client_peer_records, client_ping, client_public_currency_checkpoint_proof,
@@ -258,6 +259,7 @@ pub enum NetworkError {
         actual_epoch: u64,
     },
     CheckpointDoesNotMatchServedState,
+    PublicStateSource(String),
     StateRecoveryUnauthorized,
     MissingStateRecoveryCheckpoint,
     InvalidStateRecoveryProof,

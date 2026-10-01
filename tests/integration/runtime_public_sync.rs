@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use crate::support;
 use second::{
-    CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, NodeRuntime,
-    PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState, StateStore, ValidatorId,
-    ValidatorSet, ValidatorVote,
+    CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, NodeRuntime, Operation,
+    PreparedTaskBook, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState,
+    StateStore, ValidatorId, ValidatorSet, ValidatorVote, client_public_currency_checkpoint_proof,
+    client_public_currency_page, client_public_currency_summary,
 };
-use support::{key, signed_vote, validator_set};
+use support::{certificate_from_keys, key, signed_vote, validator_set, verified_task};
 
 fn valid_votes(
     checkpoint: &PublicCurrencyCheckpoint,
@@ -217,4 +218,78 @@ async fn runtime_public_sync_uses_durable_validator_set_after_online_transition(
     drop(remote);
     support::cleanup_node_runtime(local_store, local_base);
     support::cleanup_node_runtime(remote_store, remote_base);
+}
+
+#[tokio::test]
+async fn runtime_public_connection_reads_current_durable_state_and_checkpoint_without_reconnect() {
+    let validators = validator_set(1, 1..=4);
+    let account = support::account(1);
+    let mut state = SecondState::genesis([account], 1);
+    let base = support::temp_base("runtime-public-live-snapshot");
+    let store = StateStore::new(&base);
+    store.initialize(&state, &validators).unwrap();
+
+    let initial_checkpoint = certified_checkpoint(&state, &validators, 1);
+    store
+        .attach_certified_checkpoint(&initial_checkpoint)
+        .unwrap();
+
+    let runtime = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
+    );
+    let runtime_task = support::spawn_node_runtime(&runtime);
+
+    let client = support::quic_client(runtime.transport_certificate_der());
+    let peer = client.connect(runtime.local_addr().unwrap()).await.unwrap();
+
+    let initial_summary = client_public_currency_summary(&peer).await.unwrap();
+    let initial_proof = client_public_currency_checkpoint_proof(&peer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial_summary.summary, state.public_currency_summary());
+    assert_eq!(initial_proof.checkpoint().epoch(), 1);
+
+    let task = verified_task(91, vec![Operation::Issue { account, count: 2 }]);
+    let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    prepared.prepare(&mut state, &task, 2, &validators).unwrap();
+    let statement = prepared
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
+    let certificate = certificate_from_keys(
+        statement,
+        &validators,
+        (1_u64..=3).map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+    prepared
+        .commit(&mut state, task.task_id(), &certificate)
+        .unwrap();
+
+    let updated_checkpoint = certified_checkpoint(&state, &validators, 2);
+    store
+        .attach_certified_checkpoint(&updated_checkpoint)
+        .unwrap();
+
+    let updated_summary = client_public_currency_summary(&peer).await.unwrap();
+    let updated_page = client_public_currency_page(&peer, second::CurrencyAddress::new(0), 3)
+        .await
+        .unwrap();
+    let updated_proof = client_public_currency_checkpoint_proof(&peer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_summary.summary, state.public_currency_summary());
+    assert_eq!(updated_page.states, state.public_currency_states());
+    assert_ne!(updated_summary.summary, initial_summary.summary);
+    assert_eq!(updated_proof.checkpoint().epoch(), 2);
+    assert_eq!(
+        updated_proof.checkpoint().summary(),
+        &state.public_currency_summary()
+    );
+
+    peer.close();
+    runtime_task.abort();
+    let _ = runtime_task.await;
+    drop(runtime);
+    support::cleanup_node_runtime(store, base);
 }
