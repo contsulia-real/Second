@@ -623,7 +623,9 @@ VerifiedLegalTask
   ↓
 prepare
   ↓
-Validator vote
+per-scope BFT rounds (prevote / precommit)
+  ↓ valid precommit QC for exact subject digest
+irreversible Validator finality vote
   ↓
 FinalityCertificate
   ↓
@@ -650,7 +652,7 @@ Finalized
 Committed
 ~~~
 
-只有 `Prepared` phase 允许 cancel。第一次通过 `sign_prepared_vote()` 打开投票路径时，必须先把 `Prepared → Voting` 持久化，再尝试产生 Validator vote；该转换不可逆。`commit()` 验证到有效 FinalityCertificate 后，必须先把 phase 持久化为 `Finalized`，再尝试 apply，因此即使本地 apply 暂时失败，任务也不能再 cancel。`Voting` / `Finalized` 都必须跨重启恢复。
+只有 `Prepared` phase 允许 cancel。第一次为 PreparedTask 本地签 BFT prevote/precommit，或本地接受该 scope 的有效 precommit QC 时，必须在同一 durable snapshot 中把 `Prepared → Voting` 打开；该转换不可逆，因此真正的 BFT 投票一开始就不能再 cancel，而不是等到最后不可逆 `FinalityVote` 才关闭取消窗口。`sign_prepared_vote()` 面对已经处于 `Voting` 的 task 只继续既有 finality path。`commit()` 验证到有效 FinalityCertificate 后，必须先把 phase 持久化为 `Finalized`，再尝试 apply，因此即使本地 apply 暂时失败，任务也不能再 cancel。`Voting` / `Finalized` 都必须跨重启恢复。
 
 phase 是本地 lifecycle / recovery 元数据，不属于 prepared plan 本身，也不得进入 plan digest；否则 `Prepared → Voting` 会改变 Validator 已经要签名的 finality subject。
 
@@ -678,6 +680,20 @@ subject_digest
 ~~~
 
 PreparedTask 使用其 plan digest 作为 subject digest。
+
+### 12.4 Per-scope BFT coordination
+
+不可逆 `ValidatorVote` 之前增加独立的 per-scope Byzantine agreement 层。Second 不建立 block、高度链或全局 transaction total order；`ConsensusScope` 直接复用最终 vote-lock 的权威 scope：PreparedTask、PublicCheckpoint、ValidatorSetTransition、StateRecoveryCheckpoint 各自是独立 consensus instance。
+
+BFT vote 使用独立 `SECOND_BFT_V1` signing domain，绑定 `protocol_version + validator_set_version + ConsensusScope + round + phase + value`。phase 当前固定为 `Prevote` / `Precommit`，value 为具体 subject digest 或 `Nil`。BFT vote/QC 与最终 `FinalityStatement` / `ValidatorVote` 是不同签名语义，不能互换。
+
+每个 Validator、每个 scope 的 `BftLocalState` 持久保存当前 round、本 round 已投 prevote/precommit、locked round/digest，以及已经观察到的 precommit QC 对应 finality-ready digest。该状态属于本地 signing safety metadata，不进入 shared recovery digest；shared-state recovery 不恢复它，并继续受 `validator_safety_ready` / signing fence 约束。PreparedTask scope 的 BFT state 必须绑定该 task 的 exact active/retained ValidatorSet；PublicCheckpoint、ValidatorSetTransition、StateRecoveryCheckpoint 的 BFT state 只允许绑定当前 active ValidatorSet。membership 激活后旧的非-Prepared BFT state 会被丢弃，PreparedTask 完成/取消后其 BFT state 也会被清理。
+
+锁规则当前冻结为：对 digest 的 precommit 必须附带同 scope、同 round、同 digest 的有效 prevote QC，并在本地形成 durable lock；已锁 A 后，后续 round 不能直接 prevote B，只有附带一个 `locked_round < proof_round < current_round`、且对 B 达到 quorum 的 prevote QC 才允许迁移。`Nil` 不建立 value lock。每个 round 的 prevote/precommit 各只能签一次，同 phase 同 round 冲突值永久拒绝；round 只能严格 `+1` 前进。
+
+只有节点已经验证并持久接受 exact scope/digest 的有效 **precommit QC**，现有永久 `FinalityVote` 入口才被打开；成功写入不可逆 vote-lock 后，对应 transient BFT local state 被移除。已经存在的同 digest finality vote-lock 仍允许确定性 replay，不要求重新跑 BFT。
+
+这一层当前只实现 core safety state machine、BFT vote/QC 校验和 durable lock；**尚未**定义 proposer selection、网络消息、timeout、自动 round advancement 或 view-change 驱动。timeout 未来只能作为本地 liveness 触发器，不能成为协议事实。也没有因此引入全局区块、全局序号、stake 权重或新 authority。
 
 Finality certificate 必须：
 
@@ -996,7 +1012,7 @@ Second 不默认要求：
 - ValidatorRegistry 历史；
 - Validator vote-lock。
 
-不能因进程重启让“永久事实”消失或让 Validator 获得改票机会。
+不能因进程重启让“永久事实”消失或让 Validator 获得改票机会。BFT 的 current round、当轮 prevote/precommit、value lock 与 finality-ready 标记同样属于必须跨重启连续保存的本地 safety state；snapshot 写入/恢复还必须校验其 ValidatorId 与 exact active/retained ValidatorSet authority。
 
 snapshot 中的 active PreparedTask 不能只满足字节格式正确：写入与恢复都必须验证 frozen plan 与 durable `SecondState` 的跨字段一致性。校验复用正式 `PreparedTask::apply()` / claim restore 语义，不在 persistence 层复制一套执行规则；Transfer 的 frozen Currency 数量必须等于 frozen amount，Issue / LeakRepair 的预分配 Currency identity 必须已经落在持久 allocator frontier 之下，并且 active prepared plans 之间不能重复占用同一预分配 identity 或产生互相冲突的 Currency claims。任何不可按当前 durable prerequisite/business state 验证的 active frozen plan 都视为无效 snapshot。
 
@@ -1014,7 +1030,7 @@ Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 author
 
 完整恢复分成“网络可共同认证的 shared state”和“Validator 自己必须连续保存的 local safety state”，二者不得混成一个 digest。`StateRecoveryCheckpoint` 当前承诺的 shared state 只包含：完整 `SecondState`（因此包括 committed TaskId bindings、PaymentAddress/ownership、payment execution prerequisite 等协议/业务事实）、当前 active `ValidatorSet`、永久 `ValidatorRegistry`。canonical bytes 复用 persistence 当前权威字段编码器；persistence codec 与 recovery commitment 不分别维护两套 `SecondState`/Validator 编码规则。
 
-以下字段明确**不进入** shared recovery digest：snapshot slot `generation`、attached public checkpoint proof、`checkpoint_floor_epoch`、recovery checkpoint freshness floor、active/retained PreparedTask 本地 lifecycle、`retained_validator_sets`、Validator vote-lock。`retained_validator_sets` 只为本节点仍活跃并绑定旧 set 的 PreparedTask 服务；recovery floor、vote-lock 与 PreparedTask phase 都是 Validator/节点本地 safety/recovery metadata，不保证不同节点相同。把这些字段塞进 quorum shared digest 会导致诚实 Validator 因各自本地签票/观察历史不同而无法形成同一 QC，并且“签 recovery checkpoint 本身新增本地 safety metadata”会造成自引用 digest 循环。
+以下字段明确**不进入** shared recovery digest：snapshot slot `generation`、attached public checkpoint proof、`checkpoint_floor_epoch`、recovery checkpoint freshness floor、active/retained PreparedTask 本地 lifecycle、`retained_validator_sets`、BFT round/prevote/precommit/lock/finality-ready state、Validator finality vote-lock。`retained_validator_sets` 只为本节点仍活跃并绑定旧 set 的 PreparedTask 服务；recovery floor、BFT local state、finality vote-lock 与 PreparedTask phase 都是 Validator/节点本地 safety/recovery metadata，不保证不同节点相同。把这些字段塞进 quorum shared digest 会导致诚实 Validator 因各自本地签票/观察历史不同而无法形成同一 QC，并且“签 recovery checkpoint 本身新增本地 safety metadata”会造成自引用 digest 循环。
 
 `StateRecoveryCheckpoint` 具有独立 `serial`，与 public checkpoint epoch、`ValidatorSet.version`、snapshot generation 均不是同一序列；checkpoint digest 使用独立 domain separation，并把 protocol version、serial、当前 validator-set version 与 shared-state digest 一起绑定。`ValidatorSigner` 只能用持久 `ValidatorRegistry` 认可的当前 active ValidatorSet 对它签票，vote-lock scope 为 `(validator_set_version, serial)`；同一 scope 重放同 digest 允许，同 scope 不同 shared state 永久拒绝。
 
@@ -1024,7 +1040,7 @@ recovery serial 的发行规则现已固定：**每个新的 `ValidatorSet.versi
 
 已通过 QC 的 checkpoint 属于更强的网络事实：节点可以直接接受高于本地 head 的 certified serial 进行离线 catch-up，包括空 store 直接安装当前较新的 recovery checkpoint。这样不要求恢复节点下载从 1 开始的全部历史 QC；合法高 serial QC 的 quorum 中至少包含遵守签票规则的诚实 Validator，因此其存在意味着该 set 的连续 serial 前驱已经按协议推进。该 catch-up 只推进本地 certified head，不允许未经 QC 的任意跳号。
 
-这套规则解决的是 recovery checkpoint 的**编号、freshness 与 anti-equivocation 协调**，不选择 proposer，也不提供 round、timeout、leader election 或 view-change。多个节点若在同一 next serial 提出不同 shared state，vote-lock + quorum intersection 负责 safety，但在缺少完整 BFT state machine 时仍可能因分票失去 liveness；这部分继续归属于未来完整 Byzantine consensus 设计。实现仍不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial。
+这套规则解决的是 recovery checkpoint 的**编号、freshness 与 anti-equivocation 协调**。当前 per-scope BFT safety core 已提供 round/prevote/precommit/locking 与 precommit-QC→FinalityVote gate，但仍没有 proposer selection、BFT 网络传播、timeout 驱动或 view-change orchestration；多个节点若在同一 next serial 提出不同 shared state，现有 locking + quorum intersection 负责 safety，但仍可能因缺少 liveness driver 而分票停滞。实现仍不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial。
 
 `CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。
 
@@ -1058,13 +1074,15 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | claims.rs | Currency / reserve claim 与 contention |
 | prepared_plan.rs | 确定 prepared execution plan |
 | prepared.rs | prepare / vote / finality commit 生命周期 |
-| finality.rs | FinalityStatement、ValidatorVote、certificate 验证 |
+| bft.rs | per-scope BFT statement / prevote / precommit / QC / local lock state |
+| finality.rs | 不可逆 FinalityStatement、ValidatorVote、certificate 验证 |
 | validator.rs | ValidatorCredential / ValidatorSet / quorum |
 | validator_registry.rs | Validator 永久历史与 key reuse 防护 |
 | validator_admission.rs | Validator admission request |
 | validator_rotation.rs | consensus-key rotation |
 | validator_transition.rs | ValidatorSet transition |
-| validator_signer.rs | 永久 vote-lock 后的签票入口 |
+| validator_signer.rs | BFT 签票与 precommit-QC gated 的不可逆 finality 签票入口 |
+| persistence/bft_store.rs | durable per-Validator/per-scope BFT round/lock/finality-ready state |
 | public_state.rs | 公开 Currency summary / view |
 | public_checkpoint.rs | 公共 checkpoint 与 finality proof |
 | state_recovery_checkpoint.rs | shared recovery payload/checkpoint/QC commitment |
@@ -1235,9 +1253,9 @@ ValidatorId + TaskId
 
 后续重点：
 
-- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器。若未来需要在冲突 proposal 下保证 liveness，统一放进完整 BFT round / leader / view-change 设计；identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
+- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器。per-scope BFT core 的 round/prevote/precommit/durable locking 与 precommit-QC→FinalityVote gate 也已具备；下一步若继续共识方向，应接 proposer、Validator-only network transport、timeout 驱动和 view-change，而不是另造第二套 consensus；identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
-- 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
+- BFT safety core 已落地，但完整 liveness/orchestration 仍未完成：proposer selection、BFT 网络传播、timeout、自动 round advancement / view-change 仍需继续实现；当前不能把本地 core state machine 宣称成完整运行中的 Byzantine consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
 - 持续检查 persistence / network / executor 等大模块是否开始职责混杂，避免形成 God File。
 

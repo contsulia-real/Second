@@ -148,6 +148,34 @@ pub fn signed_vote(
     ValidatorVote::from_untrusted_parts(validator_id, signature)
 }
 
+pub fn mark_bft_finality_ready(
+    store: &StateStore,
+    validator_id: ValidatorId,
+    scope: second::ConsensusScope,
+    digest: [u8; 32],
+    validator_set: &ValidatorSet,
+    signers: impl IntoIterator<Item = (ValidatorId, SigningKey)>,
+) {
+    let statement = second::BftStatement::new(
+        validator_set.version(),
+        scope,
+        0,
+        second::BftPhase::Precommit,
+        second::BftValue::Digest(digest),
+    );
+    let message = statement.canonical_signing_bytes();
+    let votes = signers
+        .into_iter()
+        .map(|(signer_id, signing_key)| {
+            second::BftVote::from_untrusted_parts(signer_id, signing_key.sign(&message).to_bytes())
+        })
+        .collect();
+    let certificate = second::BftQuorumCertificate::new(statement, votes, validator_set).unwrap();
+    store
+        .accept_bft_precommit_qc(validator_id, &certificate, validator_set)
+        .unwrap();
+}
+
 pub fn certificate_from_keys(
     statement: FinalityStatement,
     validator_set: &ValidatorSet,

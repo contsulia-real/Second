@@ -3,8 +3,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::ConsensusScope;
 use crate::prepared_plan::PreparedTask;
-use crate::validator_signer::FinalityScope;
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, PersistenceError, PublicCurrencyCheckpointProof, SecondState,
@@ -12,6 +12,9 @@ use crate::{
     ValidatorSet, ValidatorTransitionError,
 };
 
+use super::bft_store::{
+    retain_active_prepared_bft_states, retain_bft_states_for_validator_transition,
+};
 use super::codec::{SnapshotContents, encode_snapshot};
 use super::slot::{
     load_latest, lock_store_file, remove_slots, shared_path_lock, slot_path, write_slots,
@@ -19,7 +22,7 @@ use super::slot::{
 use super::snapshot_validation::resolve_validator_set;
 use super::{PersistedNodeState, RecoveryCheckpointFloor, VoteLockStatus};
 
-struct StateStoreGuard<'a> {
+pub(super) struct StateStoreGuard<'a> {
     _process_guard: MutexGuard<'a, ()>,
     file: File,
 }
@@ -63,6 +66,7 @@ impl StateStore {
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
+        let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
 
@@ -80,6 +84,7 @@ impl StateStore {
                 validator_registry: &validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -100,6 +105,7 @@ impl StateStore {
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
+        let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
 
@@ -117,6 +123,7 @@ impl StateStore {
                 validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -145,6 +152,7 @@ impl StateStore {
         )]);
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
+        let bft_local_states = BTreeMap::new();
         self.write_next_unlocked(
             None,
             SnapshotContents {
@@ -159,6 +167,7 @@ impl StateStore {
                 validator_registry: payload.validator_registry(),
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -267,6 +276,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }
@@ -294,6 +304,11 @@ impl StateStore {
             .map_err(PersistenceError::ValidatorTransition)?;
         let retained_validator_sets =
             retained_sets_for_prepared(Some(&latest), &next_validator_set, &latest.prepared_tasks)?;
+        let mut bft_local_states = latest.bft_local_states.clone();
+        retain_bft_states_for_validator_transition(
+            &mut bft_local_states,
+            next_validator_set.version(),
+        );
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -309,6 +324,7 @@ impl StateStore {
                 validator_registry: &validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -362,6 +378,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }
@@ -397,6 +414,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }
@@ -432,6 +450,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }
@@ -498,6 +517,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }
@@ -538,6 +558,10 @@ impl StateStore {
             .as_ref()
             .map(|snapshot| snapshot.recovery_checkpoint_floors.clone())
             .unwrap_or_default();
+        let bft_local_states = latest
+            .as_ref()
+            .map(|snapshot| snapshot.bft_local_states.clone())
+            .unwrap_or_default();
 
         self.write_next_unlocked(
             latest.as_ref().map(|snapshot| snapshot.generation),
@@ -559,6 +583,7 @@ impl StateStore {
                 validator_registry: &registry,
                 prepared_tasks,
                 validator_vote_locks: &vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -588,6 +613,8 @@ impl StateStore {
             .public_checkpoint_proof
             .as_ref()
             .filter(|proof| checkpoint_matches(proof, state, &latest.validator_set));
+        let mut bft_local_states = latest.bft_local_states.clone();
+        retain_active_prepared_bft_states(&mut bft_local_states, prepared_tasks);
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -603,6 +630,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -622,6 +650,8 @@ impl StateStore {
         }
         let retained_validator_sets =
             retained_sets_for_prepared(Some(&latest), &latest.validator_set, prepared_tasks)?;
+        let mut bft_local_states = latest.bft_local_states.clone();
+        retain_active_prepared_bft_states(&mut bft_local_states, prepared_tasks);
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -637,6 +667,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &bft_local_states,
             },
         )
     }
@@ -653,7 +684,7 @@ impl StateStore {
     pub(crate) fn finality_vote_lock(
         &self,
         validator_id: ValidatorId,
-        scope: FinalityScope,
+        scope: ConsensusScope,
     ) -> Result<Option<[u8; 32]>, PersistenceError> {
         Ok(self.load()?.and_then(|snapshot| {
             snapshot
@@ -666,7 +697,7 @@ impl StateStore {
     pub(crate) fn lock_finality_vote<F>(
         &self,
         validator_id: ValidatorId,
-        scope: FinalityScope,
+        scope: ConsensusScope,
         digest: [u8; 32],
         validator_set: &ValidatorSet,
         validate_latest: F,
@@ -699,7 +730,7 @@ impl StateStore {
             None => {}
         }
 
-        if let FinalityScope::StateRecoveryCheckpoint {
+        if let ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version,
             serial,
         } = &scope
@@ -714,10 +745,12 @@ impl StateStore {
         }
 
         validate_latest(&latest)?;
+        self.require_bft_finality_ready(&latest, validator_id, &scope, digest)?;
 
         latest
             .validator_vote_locks
-            .insert((validator_id, scope), digest);
+            .insert((validator_id, scope.clone()), digest);
+        latest.bft_local_states.remove(&(validator_id, scope));
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -733,6 +766,7 @@ impl StateStore {
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )?;
 
@@ -753,7 +787,7 @@ impl StateStore {
         remove_slots(&self.base_path)
     }
 
-    fn lock(&self) -> Result<StateStoreGuard<'_>, PersistenceError> {
+    pub(super) fn lock(&self) -> Result<StateStoreGuard<'_>, PersistenceError> {
         let process_guard = self
             .write_lock
             .lock()
@@ -765,11 +799,11 @@ impl StateStore {
         })
     }
 
-    fn load_unlocked(&self) -> Result<Option<PersistedNodeState>, PersistenceError> {
+    pub(super) fn load_unlocked(&self) -> Result<Option<PersistedNodeState>, PersistenceError> {
         load_latest(&self.base_path)
     }
 
-    fn write_next_unlocked(
+    pub(super) fn write_next_unlocked(
         &self,
         latest_generation: Option<u64>,
         contents: SnapshotContents<'_>,
@@ -816,13 +850,13 @@ fn retained_sets_for_prepared(
     Ok(retained)
 }
 
-fn validate_vote_validator_set(
+pub(super) fn validate_vote_validator_set(
     snapshot: &PersistedNodeState,
-    scope: &FinalityScope,
+    scope: &ConsensusScope,
     validator_set: &ValidatorSet,
 ) -> Result<(), PersistenceError> {
     match scope {
-        FinalityScope::PreparedTask(task_id) => {
+        ConsensusScope::PreparedTask(task_id) => {
             let prepared = snapshot
                 .prepared_tasks
                 .get(task_id)
@@ -837,9 +871,9 @@ fn validate_vote_validator_set(
                 return Err(PersistenceError::ValidatorRegistryMismatch);
             }
         }
-        FinalityScope::PublicCheckpoint { .. }
-        | FinalityScope::ValidatorSetTransition { .. }
-        | FinalityScope::StateRecoveryCheckpoint { .. } => {
+        ConsensusScope::PublicCheckpoint { .. }
+        | ConsensusScope::ValidatorSetTransition { .. }
+        | ConsensusScope::StateRecoveryCheckpoint { .. } => {
             snapshot
                 .validator_registry
                 .validate_current_set(validator_set)

@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::ConsensusScope;
 use crate::payment::{PaymentAddressRecord, PaymentAddressStatus, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
-use crate::validator_signer::FinalityScope;
 use crate::{
-    CurrencyClaimBook, OperationClaimId, PaymentAddress, PersistenceError, SecondState, TaskId,
-    ValidatorId, ValidatorRegistry, ValidatorSet,
+    BftLocalState, CurrencyClaimBook, OperationClaimId, PaymentAddress, PersistenceError,
+    SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
 pub(super) fn resolve_validator_set<'a>(
@@ -25,10 +25,10 @@ pub(super) fn validate_active_prepared_vote_lock_membership(
     active_validator_set: &ValidatorSet,
     retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
-    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
 ) -> Result<(), PersistenceError> {
     for (validator_id, scope) in validator_vote_locks.keys() {
-        let FinalityScope::PreparedTask(task_id) = scope else {
+        let ConsensusScope::PreparedTask(task_id) = scope else {
             continue;
         };
         let Some(prepared) = prepared_tasks.get(task_id) else {
@@ -86,13 +86,74 @@ pub(super) fn validate_retained_validator_sets(
 
 pub(super) fn validate_vote_lock_registry(
     validator_registry: &ValidatorRegistry,
-    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
 ) -> Result<(), PersistenceError> {
     if validator_vote_locks
         .keys()
         .any(|(validator_id, _)| !validator_registry.contains(*validator_id))
     {
         return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_bft_local_state_registry(
+    validator_registry: &ValidatorRegistry,
+    active_validator_set: &ValidatorSet,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    bft_local_states: &BTreeMap<(ValidatorId, ConsensusScope), BftLocalState>,
+) -> Result<(), PersistenceError> {
+    for ((validator_id, scope), state) in bft_local_states {
+        if !validator_registry.contains(*validator_id) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        match scope {
+            ConsensusScope::PreparedTask(task_id) => {
+                let prepared = prepared_tasks
+                    .get(task_id)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                if prepared.validator_set_version != state.validator_set_version() {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+                let validator_set = resolve_validator_set(
+                    active_validator_set,
+                    retained_validator_sets,
+                    state.validator_set_version(),
+                )
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+                if !validator_set.contains(*validator_id) {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+            ConsensusScope::PublicCheckpoint {
+                validator_set_version,
+                ..
+            }
+            | ConsensusScope::StateRecoveryCheckpoint {
+                validator_set_version,
+                ..
+            } => {
+                if *validator_set_version != active_validator_set.version()
+                    || state.validator_set_version() != active_validator_set.version()
+                    || !active_validator_set.contains(*validator_id)
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+            ConsensusScope::ValidatorSetTransition {
+                current_validator_set_version,
+            } => {
+                if *current_validator_set_version != active_validator_set.version()
+                    || state.validator_set_version() != active_validator_set.version()
+                    || !active_validator_set.contains(*validator_id)
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -152,7 +213,7 @@ pub(super) fn validate_prepared_snapshot_links(
     payment_addresses: &BTreeMap<PaymentAddress, PaymentAddressRecord>,
     payment_executions: &BTreeMap<OperationClaimId, PaymentExecution>,
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
-    validator_vote_locks: &BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    validator_vote_locks: &BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
 ) -> Result<(), PersistenceError> {
     let mut active_transfer_claims = BTreeSet::new();
 
@@ -210,7 +271,7 @@ pub(super) fn validate_prepared_snapshot_links(
     }
 
     for ((_, scope), locked_digest) in validator_vote_locks {
-        let FinalityScope::PreparedTask(task_id) = scope else {
+        let ConsensusScope::PreparedTask(task_id) = scope else {
             continue;
         };
         let binding = task_bindings

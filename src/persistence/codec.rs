@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
+use crate::ConsensusScope;
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::prepared_plan::PreparedTask;
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
-use crate::validator_signer::FinalityScope;
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
+    AccountAddress, BftLocalState, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
     PaymentAddressStatus, PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof,
     SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
@@ -16,9 +16,9 @@ use crate::{
 use super::RecoveryCheckpointFloor;
 use super::local_codec::{decode_local_state, encode_local_state};
 use super::snapshot_validation::{
-    validate_active_prepared_vote_lock_membership, validate_prepared_plans_against_state,
-    validate_prepared_snapshot_links, validate_retained_validator_sets,
-    validate_vote_lock_registry,
+    validate_active_prepared_vote_lock_membership, validate_bft_local_state_registry,
+    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
+    validate_retained_validator_sets, validate_vote_lock_registry,
 };
 use super::validator_codec::{
     decode_validator_registry, decode_validator_set, encode_validator_registry,
@@ -46,7 +46,8 @@ pub(super) struct SnapshotContents<'a> {
     pub(super) minimum_signing_validator_set_version: u64,
     pub(super) validator_registry: &'a ValidatorRegistry,
     pub(super) prepared_tasks: &'a BTreeMap<TaskId, PreparedTask>,
-    pub(super) validator_vote_locks: &'a BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    pub(super) validator_vote_locks: &'a BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
+    pub(super) bft_local_states: &'a BTreeMap<(ValidatorId, ConsensusScope), BftLocalState>,
 }
 
 struct DecodedSnapshotPayload {
@@ -60,7 +61,8 @@ struct DecodedSnapshotPayload {
     minimum_signing_validator_set_version: u64,
     validator_registry: ValidatorRegistry,
     prepared_tasks: BTreeMap<TaskId, PreparedTask>,
-    validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    validator_vote_locks: BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
+    bft_local_states: BTreeMap<(ValidatorId, ConsensusScope), BftLocalState>,
 }
 
 pub(super) fn encode_snapshot(
@@ -91,6 +93,13 @@ pub(super) fn encode_snapshot(
         contents.prepared_tasks,
     )?;
     validate_vote_lock_registry(contents.validator_registry, contents.validator_vote_locks)?;
+    validate_bft_local_state_registry(
+        contents.validator_registry,
+        contents.validator_set,
+        contents.retained_validator_sets,
+        contents.prepared_tasks,
+        contents.bft_local_states,
+    )?;
     validate_active_prepared_vote_lock_membership(
         contents.validator_set,
         contents.retained_validator_sets,
@@ -210,6 +219,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         generation,
         prepared_tasks: decoded.prepared_tasks,
         validator_vote_locks: decoded.validator_vote_locks,
+        bft_local_states: decoded.bft_local_states,
     })
 }
 
@@ -265,7 +275,12 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
 
     out.push(u8::from(validator_safety_ready));
     out.extend_from_slice(&minimum_signing_validator_set_version.to_be_bytes());
-    encode_local_state(&mut out, prepared_tasks, validator_vote_locks)?;
+    encode_local_state(
+        &mut out,
+        prepared_tasks,
+        validator_vote_locks,
+        contents.bft_local_states,
+    )?;
 
     Ok(out)
 }
@@ -606,11 +621,19 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
     if minimum_signing_validator_set_version > validator_set.version() {
         return Err(PersistenceError::InvalidSnapshot);
     }
-    let (prepared_tasks, validator_vote_locks) = decode_local_state(&mut decoder)?;
+    let (prepared_tasks, validator_vote_locks, bft_local_states) =
+        decode_local_state(&mut decoder)?;
 
     decoder.finish()?;
 
     validate_vote_lock_registry(&validator_registry, &validator_vote_locks)?;
+    validate_bft_local_state_registry(
+        &validator_registry,
+        &validator_set,
+        &retained_validator_sets,
+        &prepared_tasks,
+        &bft_local_states,
+    )?;
     validate_active_prepared_vote_lock_membership(
         &validator_set,
         &retained_validator_sets,
@@ -638,6 +661,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         validator_registry,
         prepared_tasks,
         validator_vote_locks,
+        bft_local_states,
     })
 }
 

@@ -1,8 +1,9 @@
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedStateRecoveryCheckpoint, CertifiedValidatorSetTransition,
-    PersistenceError, PublicCurrencyCheckpoint, SecondState, StateRecoveryCheckpoint,
-    StateRecoveryPayload, StateStore, ValidatorConsensusKeyRotationRequest, ValidatorCredential,
-    ValidatorId, ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
+    ConsensusScope, PersistenceError, PublicCurrencyCheckpoint, SecondState,
+    StateRecoveryCheckpoint, StateRecoveryPayload, StateStore,
+    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId,
+    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
     ValidatorSigningError,
 };
 
@@ -131,6 +132,21 @@ fn recovered_validator_reenters_only_after_independent_key_rotation_quorum_and_s
 
     let current_checkpoint =
         PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 1, state.public_currency_summary());
+    crate::support::mark_bft_finality_ready(
+        &restarted_store,
+        ValidatorId::new(1),
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: validators_v5.version(),
+            epoch: current_checkpoint.epoch(),
+        },
+        current_checkpoint
+            .finality_statement(validators_v5.version())
+            .subject_digest(),
+        &validators_v5,
+        [2_u64, 3, 4]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
     ValidatorSigner::new(ValidatorId::new(1), key(90), restarted_store.clone())
         .sign_public_checkpoint(&current_checkpoint, &validators_v5)
         .unwrap();

@@ -1,4 +1,5 @@
 mod authorization;
+mod bft;
 mod claims;
 mod currency;
 mod error;
@@ -25,12 +26,15 @@ mod validator_signer;
 mod validator_transition;
 
 pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
+pub use bft::{
+    BftLocalState, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
+};
 pub use claims::{ClaimError, CurrencyClaimBook, OperationClaimId};
 pub use currency::{CurrencyRole, PublicCurrencyState};
 pub use error::{
-    AuthorizationError, ExecutionError, FinalityError, PersistenceError, SignatureParseError,
-    TaskEncodingError, TaskValidationError, ValidatorAdmissionError, ValidatorRegistryError,
-    ValidatorRotationError, ValidatorSetError, ValidatorTransitionError,
+    AuthorizationError, BftError, ExecutionError, FinalityError, PersistenceError,
+    SignatureParseError, TaskEncodingError, TaskValidationError, ValidatorAdmissionError,
+    ValidatorRegistryError, ValidatorRotationError, ValidatorSetError, ValidatorTransitionError,
 };
 pub use finality::{FinalityCertificate, FinalityStatement, ValidatorVote};
 pub use ids::{

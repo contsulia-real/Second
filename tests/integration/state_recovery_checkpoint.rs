@@ -1,9 +1,30 @@
 use crate::support::{self, certificate_from_keys, key, temp_base, validator_set, verified_task};
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedStateRecoveryCheckpoint, CertifiedValidatorSetTransition,
-    Operation, PreparedTaskBook, SecondState, StateRecoveryCheckpoint, StateStore, ValidatorId,
-    ValidatorSetTransition, ValidatorSigner, ValidatorSigningError,
+    ConsensusScope, Operation, PreparedTaskBook, SecondState, StateRecoveryCheckpoint, StateStore,
+    ValidatorId, ValidatorSet, ValidatorSetTransition, ValidatorSigner, ValidatorSigningError,
 };
+
+fn mark_recovery_finality_ready(
+    store: &StateStore,
+    validator_id: ValidatorId,
+    checkpoint: &StateRecoveryCheckpoint,
+    validators: &ValidatorSet,
+) {
+    support::mark_bft_finality_ready(
+        store,
+        validator_id,
+        ConsensusScope::StateRecoveryCheckpoint {
+            validator_set_version: checkpoint.validator_set_version(),
+            serial: checkpoint.serial(),
+        },
+        checkpoint.digest(),
+        validators,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+}
 
 #[test]
 fn shared_recovery_checkpoint_ignores_validator_local_vote_locks_and_forms_qc() {
@@ -18,6 +39,7 @@ fn shared_recovery_checkpoint_ignores_validator_local_vote_locks_and_forms_qc() 
     let clean =
         StateRecoveryCheckpoint::from_persisted(1, &clean_store.load().unwrap().unwrap()).unwrap();
 
+    mark_recovery_finality_ready(&locked_store, ValidatorId::new(1), &clean, &validators);
     ValidatorSigner::new(ValidatorId::new(1), key(4), locked_store.clone())
         .sign_state_recovery_checkpoint(&clean, &validators)
         .unwrap();
@@ -64,6 +86,7 @@ fn recovery_serial_requires_certified_previous_checkpoint() {
 
     let first = store.next_state_recovery_checkpoint().unwrap();
     assert_eq!(first.serial(), 1);
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &first, &validators);
     signer
         .sign_state_recovery_checkpoint(&first, &validators)
         .unwrap();
@@ -100,6 +123,7 @@ fn recovery_serial_requires_certified_previous_checkpoint() {
 
     let second = store.next_state_recovery_checkpoint().unwrap();
     assert_eq!(second, premature_second);
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &second, &validators);
     signer
         .sign_state_recovery_checkpoint(&second, &validators)
         .unwrap();
@@ -117,6 +141,7 @@ fn certified_recovery_can_supersede_uncertified_local_vote_same_serial() {
     let signer = ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone());
     let local =
         StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &local, &validators);
     signer
         .sign_state_recovery_checkpoint(&local, &validators)
         .unwrap();
@@ -155,6 +180,7 @@ fn certified_recovery_can_supersede_uncertified_local_vote_same_serial() {
 
     let next = store.next_state_recovery_checkpoint().unwrap();
     assert_eq!(next.serial(), 2);
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &next, &validators);
     signer
         .sign_state_recovery_checkpoint(&next, &validators)
         .unwrap();
@@ -172,6 +198,7 @@ fn recovery_checkpoint_vote_lock_blocks_same_serial_after_committed_state_change
     let signer = ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone());
     let first =
         StateRecoveryCheckpoint::from_persisted(1, &store.load().unwrap().unwrap()).unwrap();
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &first, &validators);
     signer
         .sign_state_recovery_checkpoint(&first, &validators)
         .unwrap();
@@ -240,6 +267,7 @@ fn recovery_checkpoint_serial_floor_survives_restart_and_rejects_lower_serial() 
     let replay =
         StateRecoveryCheckpoint::from_persisted(20, &restarted_store.load().unwrap().unwrap())
             .unwrap();
+    mark_recovery_finality_ready(&restarted_store, ValidatorId::new(1), &replay, &validators);
     restarted_signer
         .sign_state_recovery_checkpoint(&replay, &validators)
         .unwrap();
@@ -260,6 +288,7 @@ fn recovery_checkpoint_serial_floor_survives_restart_and_rejects_lower_serial() 
 
     let next = restarted_store.next_state_recovery_checkpoint().unwrap();
     assert_eq!(next.serial(), 21);
+    mark_recovery_finality_ready(&restarted_store, ValidatorId::new(1), &next, &validators);
     restarted_signer
         .sign_state_recovery_checkpoint(&next, &validators)
         .unwrap();
@@ -373,6 +402,7 @@ fn recovery_checkpoint_floor_is_scoped_by_validator_set_version() {
 
     let v8_checkpoint = store.next_state_recovery_checkpoint().unwrap();
     assert_eq!(v8_checkpoint.serial(), 1);
+    mark_recovery_finality_ready(&store, ValidatorId::new(1), &v8_checkpoint, &validators_v8);
     ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
         .sign_state_recovery_checkpoint(&v8_checkpoint, &validators_v8)
         .unwrap();

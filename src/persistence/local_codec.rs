@@ -1,20 +1,23 @@
 use std::collections::BTreeMap;
 
+use crate::ConsensusScope;
 use crate::payment::EstablishedTransfer;
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
-use crate::validator_signer::FinalityScope;
 use crate::{
-    AccountAddress, CurrencyAddress, PaymentAddress, PersistenceError, TaskId, ValidatorId,
+    AccountAddress, BftLocalState, BftValue, CurrencyAddress, PaymentAddress, PersistenceError,
+    TaskId, ValidatorId,
 };
 
 use super::codec::{Decoder, push_len, push_task_id};
 
-pub(super) type VoteLocks = BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>;
+pub(super) type VoteLocks = BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>;
+pub(super) type BftStates = BTreeMap<(ValidatorId, ConsensusScope), BftLocalState>;
 
 pub(super) fn encode_local_state(
     out: &mut Vec<u8>,
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
     vote_locks: &VoteLocks,
+    bft_states: &BftStates,
 ) -> Result<(), PersistenceError> {
     push_len(out, prepared_tasks.len())?;
     for prepared in prepared_tasks.values() {
@@ -40,12 +43,28 @@ pub(super) fn encode_local_state(
         out.extend_from_slice(digest);
     }
 
+    push_len(out, bft_states.len())?;
+    for ((validator_id, scope), state) in bft_states {
+        out.extend_from_slice(&validator_id.value().to_be_bytes());
+        encode_scope(out, scope);
+        out.extend_from_slice(&state.validator_set_version().to_be_bytes());
+        out.extend_from_slice(&state.round().to_be_bytes());
+        encode_optional_lock(out, state.locked_round(), state.locked_digest());
+        encode_optional_bft_value(out, state.prevote());
+        encode_optional_bft_value(out, state.precommit());
+        encode_optional_lock(
+            out,
+            state.finality_ready_round(),
+            state.finality_ready_digest(),
+        );
+    }
+
     Ok(())
 }
 
 pub(super) fn decode_local_state(
     decoder: &mut Decoder<'_>,
-) -> Result<(BTreeMap<TaskId, PreparedTask>, VoteLocks), PersistenceError> {
+) -> Result<(BTreeMap<TaskId, PreparedTask>, VoteLocks, BftStates), PersistenceError> {
     let task_count = decoder.read_len()?;
     const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 1 + 8;
     if task_count > decoder.remaining() / MIN_PREPARED_TASK_SIZE {
@@ -107,7 +126,89 @@ pub(super) fn decode_local_state(
         }
     }
 
-    Ok((prepared_tasks, vote_locks))
+    let bft_count = decoder.read_len()?;
+    const MIN_BFT_STATE_SIZE: usize = 8 + 1 + 8 + 8 + 1 + 1 + 1 + 1;
+    if bft_count > decoder.remaining() / MIN_BFT_STATE_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    let mut bft_states = BTreeMap::new();
+    for _ in 0..bft_count {
+        let validator_id = ValidatorId::new(decoder.read_u64()?);
+        let scope = decode_scope(decoder)?;
+        let validator_set_version = decoder.read_u64()?;
+        let round = decoder.read_u64()?;
+        let (locked_round, locked_digest) = decode_optional_lock(decoder)?;
+        if locked_round.is_some_and(|locked| locked > round) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        let prevote = decode_optional_bft_value(decoder)?;
+        let precommit = decode_optional_bft_value(decoder)?;
+        let (finality_ready_round, finality_ready_digest) = decode_optional_lock(decoder)?;
+        if finality_ready_round.is_some_and(|ready| ready > round) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let state = BftLocalState::from_persisted(
+            validator_set_version,
+            round,
+            locked_round,
+            locked_digest,
+            prevote,
+            precommit,
+            finality_ready_round,
+            finality_ready_digest,
+        );
+        if bft_states.insert((validator_id, scope), state).is_some() {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    Ok((prepared_tasks, vote_locks, bft_states))
+}
+
+fn encode_optional_lock(out: &mut Vec<u8>, round: Option<u64>, digest: Option<[u8; 32]>) {
+    match (round, digest) {
+        (None, None) => out.push(0),
+        (Some(round), Some(digest)) => {
+            out.push(1);
+            out.extend_from_slice(&round.to_be_bytes());
+            out.extend_from_slice(&digest);
+        }
+        _ => unreachable!("BFT local state keeps round/digest pairs aligned"),
+    }
+}
+
+fn decode_optional_lock(
+    decoder: &mut Decoder<'_>,
+) -> Result<(Option<u64>, Option<[u8; 32]>), PersistenceError> {
+    match decoder.read_u8()? {
+        0 => Ok((None, None)),
+        1 => Ok((Some(decoder.read_u64()?), Some(decoder.read_array_32()?))),
+        _ => Err(PersistenceError::InvalidSnapshot),
+    }
+}
+
+fn encode_optional_bft_value(out: &mut Vec<u8>, value: Option<BftValue>) {
+    match value {
+        None => out.push(0),
+        Some(BftValue::Nil) => out.push(1),
+        Some(BftValue::Digest(digest)) => {
+            out.push(2);
+            out.extend_from_slice(&digest);
+        }
+    }
+}
+
+fn decode_optional_bft_value(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<BftValue>, PersistenceError> {
+    match decoder.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(BftValue::Nil)),
+        2 => Ok(Some(BftValue::Digest(decoder.read_array_32()?))),
+        _ => Err(PersistenceError::InvalidSnapshot),
+    }
 }
 
 fn encode_prepared_operation(
@@ -245,13 +346,13 @@ fn decode_addresses(decoder: &mut Decoder<'_>) -> Result<Vec<CurrencyAddress>, P
     Ok(addresses)
 }
 
-fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
+fn encode_scope(out: &mut Vec<u8>, scope: &ConsensusScope) {
     match scope {
-        FinalityScope::PreparedTask(task_id) => {
+        ConsensusScope::PreparedTask(task_id) => {
             out.push(1);
             push_task_id(out, task_id);
         }
-        FinalityScope::PublicCheckpoint {
+        ConsensusScope::PublicCheckpoint {
             validator_set_version,
             epoch,
         } => {
@@ -259,13 +360,13 @@ fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
             out.extend_from_slice(&validator_set_version.to_be_bytes());
             out.extend_from_slice(&epoch.to_be_bytes());
         }
-        FinalityScope::ValidatorSetTransition {
+        ConsensusScope::ValidatorSetTransition {
             current_validator_set_version,
         } => {
             out.push(3);
             out.extend_from_slice(&current_validator_set_version.to_be_bytes());
         }
-        FinalityScope::StateRecoveryCheckpoint {
+        ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version,
             serial,
         } => {
@@ -276,17 +377,17 @@ fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
     }
 }
 
-fn decode_scope(decoder: &mut Decoder<'_>) -> Result<FinalityScope, PersistenceError> {
+fn decode_scope(decoder: &mut Decoder<'_>) -> Result<ConsensusScope, PersistenceError> {
     match decoder.read_u8()? {
-        1 => Ok(FinalityScope::PreparedTask(decoder.read_task_id()?)),
-        2 => Ok(FinalityScope::PublicCheckpoint {
+        1 => Ok(ConsensusScope::PreparedTask(decoder.read_task_id()?)),
+        2 => Ok(ConsensusScope::PublicCheckpoint {
             validator_set_version: decoder.read_u64()?,
             epoch: decoder.read_u64()?,
         }),
-        3 => Ok(FinalityScope::ValidatorSetTransition {
+        3 => Ok(ConsensusScope::ValidatorSetTransition {
             current_validator_set_version: decoder.read_u64()?,
         }),
-        4 => Ok(FinalityScope::StateRecoveryCheckpoint {
+        4 => Ok(ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version: decoder.read_u64()?,
             serial: decoder.read_u64()?,
         }),

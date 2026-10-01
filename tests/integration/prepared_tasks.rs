@@ -2,10 +2,10 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    AuthorizerSet, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, ExecutionError,
-    ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
+    AuthorizerSet, BftValue, CURRENT_PROTOCOL_VERSION, ClaimError, ConsensusScope, CurrencyAddress,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
     PersistenceError, PreparationError, PreparationOutcome, PreparedTaskBook, SecondState,
-    StateStore, TaskId, ValidatorId, ValidatorSet,
+    StateStore, TaskId, ValidatorId, ValidatorSet, ValidatorSigner,
 };
 use support::{
     FinalityHarness, certificate_from_keys, key, payment_address, register_payment_addresses,
@@ -683,9 +683,16 @@ fn stale_book_cannot_cancel_task_after_another_book_begins_voting() {
     original.prepare(&mut state, &task, 1, &set).unwrap();
 
     let mut stale = PreparedTaskBook::new(store.clone()).unwrap();
-    let mut voting = PreparedTaskBook::new(store.clone()).unwrap();
-    voting
-        .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4))
+    let voting = PreparedTaskBook::new(store.clone()).unwrap();
+    let digest = voting.prepared_plan_digest(task.task_id()).unwrap();
+    ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone())
+        .sign_bft_prevote(
+            ConsensusScope::PreparedTask(task.task_id()),
+            0,
+            BftValue::Digest(digest),
+            &set,
+            None,
+        )
         .unwrap();
 
     assert_eq!(

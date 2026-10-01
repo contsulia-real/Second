@@ -2,6 +2,7 @@ mod support;
 
 mod address_format;
 mod authorization;
+mod bft_core;
 mod cli_network_observe;
 mod cli_public_network;
 mod cli_snapshot;

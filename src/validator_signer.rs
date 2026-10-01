@@ -2,30 +2,16 @@ use ed25519_dalek::SigningKey;
 
 use crate::persistence::VoteLockStatus;
 use crate::{
-    CURRENT_PROTOCOL_VERSION, FinalityError, FinalityStatement, PersistenceError,
+    BftError, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote,
+    CURRENT_PROTOCOL_VERSION, ConsensusScope, FinalityError, FinalityStatement, PersistenceError,
     PublicCurrencyCheckpoint, StateRecoveryCheckpoint, StateStore, TaskId, ValidatorId,
     ValidatorSet, ValidatorSetTransition, ValidatorVote,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum FinalityScope {
-    PreparedTask(TaskId),
-    PublicCheckpoint {
-        validator_set_version: u64,
-        epoch: u64,
-    },
-    ValidatorSetTransition {
-        current_validator_set_version: u64,
-    },
-    StateRecoveryCheckpoint {
-        validator_set_version: u64,
-        serial: u64,
-    },
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValidatorSigningError {
     Persistence(PersistenceError),
+    Bft(BftError),
     Finality(FinalityError),
     ConsensusSigningKeyMismatch(ValidatorId),
     LocalSafetyStateUnavailable,
@@ -39,6 +25,12 @@ pub enum ValidatorSigningError {
 impl From<PersistenceError> for ValidatorSigningError {
     fn from(value: PersistenceError) -> Self {
         Self::Persistence(value)
+    }
+}
+
+impl From<BftError> for ValidatorSigningError {
+    fn from(value: BftError) -> Self {
+        Self::Bft(value)
     }
 }
 
@@ -77,7 +69,7 @@ impl ValidatorSigner {
         self.sign_locked(
             &statement,
             validator_set,
-            FinalityScope::PublicCheckpoint {
+            ConsensusScope::PublicCheckpoint {
                 validator_set_version: validator_set.version(),
                 epoch: checkpoint.epoch(),
             },
@@ -104,7 +96,7 @@ impl ValidatorSigner {
         self.sign_locked(
             &checkpoint.finality_statement(),
             validator_set,
-            FinalityScope::StateRecoveryCheckpoint {
+            ConsensusScope::StateRecoveryCheckpoint {
                 validator_set_version: checkpoint.validator_set_version(),
                 serial: checkpoint.serial(),
             },
@@ -125,7 +117,7 @@ impl ValidatorSigner {
         self.sign_locked(
             &transition.finality_statement(),
             validator_set,
-            FinalityScope::ValidatorSetTransition {
+            ConsensusScope::ValidatorSetTransition {
                 current_validator_set_version: transition.current_validator_set_version(),
             },
             |latest| {
@@ -152,12 +144,112 @@ impl ValidatorSigner {
             .map_err(ValidatorSigningError::from)
     }
 
+    pub fn sign_bft_prevote(
+        &self,
+        scope: ConsensusScope,
+        round: u64,
+        value: BftValue,
+        validator_set: &ValidatorSet,
+        unlock_certificate: Option<&BftQuorumCertificate>,
+    ) -> Result<BftVote, ValidatorSigningError> {
+        self.validate_consensus_key(validator_set)?;
+        self.validate_bft_scope(&scope, validator_set)?;
+
+        let unlock_round = if let Some(certificate) = unlock_certificate {
+            certificate.verify(validator_set)?;
+            let statement = certificate.statement();
+            if statement.phase() != BftPhase::Prevote
+                || statement.scope() != &scope
+                || statement.value() != value
+                || statement.round() >= round
+            {
+                return Err(PersistenceError::BftInvalidUnlockProof.into());
+            }
+            Some(statement.round())
+        } else {
+            None
+        };
+
+        self.store.lock_bft_prevote(
+            self.validator_id,
+            scope.clone(),
+            round,
+            value,
+            validator_set,
+            unlock_round,
+        )?;
+
+        let statement = BftStatement::new(
+            validator_set.version(),
+            scope,
+            round,
+            BftPhase::Prevote,
+            value,
+        );
+        Ok(BftVote::sign_unchecked(
+            &statement,
+            self.validator_id,
+            &self.signing_key,
+        ))
+    }
+
+    pub fn sign_bft_precommit(
+        &self,
+        scope: ConsensusScope,
+        round: u64,
+        value: BftValue,
+        validator_set: &ValidatorSet,
+        prevote_certificate: Option<&BftQuorumCertificate>,
+    ) -> Result<BftVote, ValidatorSigningError> {
+        self.validate_consensus_key(validator_set)?;
+        self.validate_bft_scope(&scope, validator_set)?;
+
+        let has_prevote_qc = if let BftValue::Digest(_) = value {
+            let certificate =
+                prevote_certificate.ok_or(PersistenceError::BftPrevoteCertificateRequired)?;
+            certificate.verify(validator_set)?;
+            let statement = certificate.statement();
+            if statement.phase() != BftPhase::Prevote
+                || statement.scope() != &scope
+                || statement.round() != round
+                || statement.value() != value
+            {
+                return Err(PersistenceError::BftPrevoteCertificateRequired.into());
+            }
+            true
+        } else {
+            false
+        };
+
+        self.store.lock_bft_precommit(
+            self.validator_id,
+            scope.clone(),
+            round,
+            value,
+            validator_set,
+            has_prevote_qc,
+        )?;
+
+        let statement = BftStatement::new(
+            validator_set.version(),
+            scope,
+            round,
+            BftPhase::Precommit,
+            value,
+        );
+        Ok(BftVote::sign_unchecked(
+            &statement,
+            self.validator_id,
+            &self.signing_key,
+        ))
+    }
+
     pub fn prepared_task_lock(
         &self,
         task_id: TaskId,
     ) -> Result<Option<[u8; 32]>, PersistenceError> {
         self.store
-            .finality_vote_lock(self.validator_id, FinalityScope::PreparedTask(task_id))
+            .finality_vote_lock(self.validator_id, ConsensusScope::PreparedTask(task_id))
     }
 
     pub(crate) fn sign_prepared_task(
@@ -169,16 +261,49 @@ impl ValidatorSigner {
         self.sign_locked(
             statement,
             validator_set,
-            FinalityScope::PreparedTask(task_id),
+            ConsensusScope::PreparedTask(task_id),
             |_| Ok(()),
         )
+    }
+
+    fn validate_bft_scope(
+        &self,
+        scope: &ConsensusScope,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), ValidatorSigningError> {
+        if scope.matches_validator_set_version(validator_set.version()) {
+            return Ok(());
+        }
+
+        Err(BftError::ScopeValidatorSetVersionMismatch {
+            expected: validator_set.version(),
+            actual: scope
+                .explicit_validator_set_version()
+                .unwrap_or(validator_set.version()),
+        }
+        .into())
+    }
+
+    fn validate_consensus_key(
+        &self,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), ValidatorSigningError> {
+        let credential = validator_set
+            .validator(self.validator_id)
+            .ok_or(BftError::UnknownValidator(self.validator_id))?;
+        if self.signing_key.verifying_key().to_bytes() != credential.consensus_public_key() {
+            return Err(ValidatorSigningError::ConsensusSigningKeyMismatch(
+                self.validator_id,
+            ));
+        }
+        Ok(())
     }
 
     fn sign_locked<F>(
         &self,
         statement: &FinalityStatement,
         validator_set: &ValidatorSet,
-        scope: FinalityScope,
+        scope: ConsensusScope,
         validate_latest: F,
     ) -> Result<ValidatorVote, ValidatorSigningError>
     where

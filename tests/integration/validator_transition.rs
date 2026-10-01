@@ -1,11 +1,11 @@
 use crate::support;
 
 use second::{
-    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ExecutionOutcome, Operation,
-    PersistenceError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState, StateStore,
-    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
-    ValidatorSigningError, ValidatorTransitionError,
+    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope, ExecutionOutcome,
+    Operation, PersistenceError, PreparedTaskBook, PublicCurrencyCheckpoint, SecondState,
+    StateStore, ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId,
+    ValidatorRegistry, ValidatorRotationAuthority, ValidatorSet, ValidatorSetTransition,
+    ValidatorSigner, ValidatorSigningError, ValidatorTransitionError,
 };
 use support::{
     certificate_from_keys, key, signed_vote, temp_base, validator_credential as credential,
@@ -478,6 +478,16 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
         .prepared_finality_statement(task.task_id())
         .unwrap();
     assert_eq!(statement.validator_set_version(), 4);
+    support::mark_bft_finality_ready(
+        &store,
+        ValidatorId::new(1),
+        ConsensusScope::PreparedTask(task.task_id()),
+        statement.subject_digest(),
+        &current,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
 
     recovered
         .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(4))

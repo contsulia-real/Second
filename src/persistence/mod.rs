@@ -1,3 +1,4 @@
+mod bft_store;
 mod codec;
 #[cfg(test)]
 mod codec_tests;
@@ -12,11 +13,11 @@ pub use store::StateStore;
 
 use std::collections::BTreeMap;
 
+use crate::ConsensusScope;
 use crate::prepared_plan::PreparedTask;
-use crate::validator_signer::FinalityScope;
 use crate::{
-    PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorId, ValidatorRegistry,
-    ValidatorSet,
+    BftLocalState, PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorId,
+    ValidatorRegistry, ValidatorSet,
 };
 
 #[derive(Clone)]
@@ -32,7 +33,8 @@ pub struct PersistedNodeState {
     pub minimum_signing_validator_set_version: u64,
     pub generation: u64,
     pub(crate) prepared_tasks: BTreeMap<TaskId, PreparedTask>,
-    pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+    pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,
+    pub(crate) bft_local_states: BTreeMap<(ValidatorId, ConsensusScope), BftLocalState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

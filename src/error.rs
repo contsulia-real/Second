@@ -1,4 +1,7 @@
-use crate::{AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, ValidatorId};
+use crate::{
+    AccountAddress, BftPhase, BftValue, CurrencyAddress, OperationClaimId, PaymentAddress,
+    ValidatorId,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskEncodingError {
@@ -120,6 +123,28 @@ pub enum PersistenceError {
     RecoveryCheckpointSerialOverflow {
         validator_set_version: u64,
     },
+    Bft(BftError),
+    BftRoundMismatch {
+        current: u64,
+        attempted: u64,
+    },
+    BftRoundMustAdvance {
+        current: u64,
+        attempted: u64,
+    },
+    BftVoteConflict {
+        phase: BftPhase,
+        round: u64,
+        locked: BftValue,
+        attempted: BftValue,
+    },
+    BftUnlockProofRequired {
+        locked_round: u64,
+        attempted_digest: [u8; 32],
+    },
+    BftInvalidUnlockProof,
+    BftPrevoteCertificateRequired,
+    BftFinalityNotReady,
     ValidatorSafetyStateUnavailable,
     SigningFenceViolation {
         minimum_validator_set_version: u64,
@@ -142,6 +167,18 @@ impl PersistenceError {
     pub(crate) fn from_io(error: std::io::Error) -> Self {
         Self::Io(error.kind())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BftError {
+    WrongProtocolVersion { expected: u32, actual: u32 },
+    WrongValidatorSetVersion { expected: u64, actual: u64 },
+    ScopeValidatorSetVersionMismatch { expected: u64, actual: u64 },
+    UnknownValidator(ValidatorId),
+    DuplicateVote(ValidatorId),
+    InvalidValidatorKey(ValidatorId),
+    InvalidSignature(ValidatorId),
+    InsufficientVotes { required: usize, actual: usize },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -2,11 +2,11 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, LegalTask,
-    LegalTaskPayload, Operation, PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint,
-    SecondState, StateStore, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId,
-    ValidatorRegistry, ValidatorSet, ValidatorSetTransition, ValidatorSigner,
-    ValidatorSigningError,
+    AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope,
+    LegalTask, LegalTaskPayload, Operation, PreparationError, PreparedTaskBook,
+    PublicCurrencyCheckpoint, SecondState, StateStore, ValidatorAdmissionRequest,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet, ValidatorSetTransition,
+    ValidatorSigner, ValidatorSigningError,
 };
 use support::{key, payment_address, register_payment_addresses, temp_base, verified_task};
 
@@ -22,6 +22,25 @@ fn validator_credential(id: u64) -> ValidatorCredential {
 
 fn validators() -> ValidatorSet {
     ValidatorSet::new(7, (1..=4).map(validator_credential)).unwrap()
+}
+
+fn mark_finality_ready(
+    store: &StateStore,
+    validator_id: ValidatorId,
+    scope: ConsensusScope,
+    digest: [u8; 32],
+    validator_set: &ValidatorSet,
+) {
+    support::mark_bft_finality_ready(
+        store,
+        validator_id,
+        scope,
+        digest,
+        validator_set,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| (ValidatorId::new(id), key(id as u8))),
+    );
 }
 
 fn registry_with_retired_five(current: &ValidatorSet) -> ValidatorRegistry {
@@ -107,6 +126,13 @@ fn voting_task_cannot_be_cancelled_and_phase_survives_restart() {
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
+    mark_finality_ready(
+        &store,
+        ValidatorId::new(1),
+        ConsensusScope::PreparedTask(task.task_id()),
+        digest,
+        &set,
+    );
     let first_vote = prepared
         .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1))
         .unwrap();
@@ -173,6 +199,13 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
         let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
         prepared.prepare(&mut state, &task, 2, &set).unwrap();
         first_digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
+        mark_finality_ready(
+            &store,
+            ValidatorId::new(4),
+            ConsensusScope::PreparedTask(task.task_id()),
+            first_digest,
+            &set,
+        );
         first_vote = prepared
             .sign_prepared_vote(task.task_id(), ValidatorId::new(4), &key(4))
             .unwrap();
@@ -214,6 +247,13 @@ fn vote_lock_is_durable_before_vote_is_returned() {
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
+    mark_finality_ready(
+        &store,
+        ValidatorId::new(2),
+        ConsensusScope::PreparedTask(task.task_id()),
+        digest,
+        &set,
+    );
     prepared
         .sign_prepared_vote(task.task_id(), ValidatorId::new(2), &key(2))
         .unwrap();
@@ -260,6 +300,13 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
 
     prepared.prepare(&mut state, &task, 4, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
+    mark_finality_ready(
+        &store,
+        ValidatorId::new(1),
+        ConsensusScope::PreparedTask(task.task_id()),
+        digest,
+        &set,
+    );
 
     prepared
         .sign_prepared_vote(task.task_id(), ValidatorId::new(1), &key(1))
@@ -313,6 +360,16 @@ fn public_checkpoint_signer_rejects_epoch_below_persisted_floor() {
         ))
     );
 
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: set.version(),
+            epoch: trusted.epoch(),
+        },
+        trusted.finality_statement(set.version()).subject_digest(),
+        &set,
+    );
     ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_public_checkpoint(&trusted, &set)
         .unwrap();
@@ -347,6 +404,16 @@ fn public_checkpoint_signer_rejects_summary_that_is_not_the_persisted_state() {
         10,
         state.public_currency_summary(),
     );
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: set.version(),
+            epoch: valid.epoch(),
+        },
+        valid.finality_statement(set.version()).subject_digest(),
+        &set,
+    );
     ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_public_checkpoint(&valid, &set)
         .unwrap();
@@ -367,6 +434,18 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
         CURRENT_PROTOCOL_VERSION,
         10,
         state.public_currency_summary(),
+    );
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: set_v7.version(),
+            epoch: checkpoint_v7.epoch(),
+        },
+        checkpoint_v7
+            .finality_statement(set_v7.version())
+            .subject_digest(),
+        &set_v7,
     );
     ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_public_checkpoint(&checkpoint_v7, &set_v7)
@@ -419,6 +498,18 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
         10,
         state.public_currency_summary(),
     );
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: set_v8.version(),
+            epoch: checkpoint_v8.epoch(),
+        },
+        checkpoint_v8
+            .finality_statement(set_v8.version())
+            .subject_digest(),
+        &set_v8,
+    );
     ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_public_checkpoint(&checkpoint_v8, &set_v8)
         .unwrap();
@@ -445,6 +536,16 @@ fn public_checkpoint_vote_lock_survives_restart_and_blocks_conflicting_digest() 
         second_state.public_currency_summary(),
     );
 
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::PublicCheckpoint {
+            validator_set_version: set.version(),
+            epoch: first.epoch(),
+        },
+        first.finality_statement(set.version()).subject_digest(),
+        &set,
+    );
     ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_public_checkpoint(&first, &set)
         .unwrap();
@@ -482,6 +583,15 @@ fn validator_transition_signer_uses_persisted_registry_history() {
     );
 
     let valid = transition_with_candidate(&set, &registry, 6, 110);
+    mark_finality_ready(
+        &store,
+        ValidatorId::new(1),
+        ConsensusScope::ValidatorSetTransition {
+            current_validator_set_version: set.version(),
+        },
+        valid.finality_statement().subject_digest(),
+        &set,
+    );
     ValidatorSigner::new(ValidatorId::new(1), key(1), store.clone())
         .sign_validator_set_transition(&valid, &set)
         .unwrap();
@@ -501,6 +611,15 @@ fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_ne
     let conflicting = transition_with_candidate(&set, &registry, 6, 110);
     let validator_id = ValidatorId::new(1);
 
+    mark_finality_ready(
+        &store,
+        validator_id,
+        ConsensusScope::ValidatorSetTransition {
+            current_validator_set_version: set.version(),
+        },
+        first.finality_statement().subject_digest(),
+        &set,
+    );
     let first_vote = ValidatorSigner::new(validator_id, key(1), store.clone())
         .sign_validator_set_transition(&first, &set)
         .unwrap();

@@ -4,10 +4,10 @@ use super::snapshot_validation::{
     validate_active_prepared_vote_lock_membership, validate_prepared_plans_against_state,
     validate_prepared_snapshot_links, validate_vote_lock_registry,
 };
+use crate::ConsensusScope;
 use crate::payment::{EstablishedTransfer, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
-use crate::validator_signer::FinalityScope;
 use crate::{
     AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError,
     PreparationError, SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry,
@@ -149,7 +149,7 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     let valid_lock = BTreeMap::from([(
         (
             ValidatorId::new(1),
-            FinalityScope::PreparedTask(task_id.clone()),
+            ConsensusScope::PreparedTask(task_id.clone()),
         ),
         plan_digest,
     )]);
@@ -165,7 +165,7 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     );
 
     let wrong_lock = BTreeMap::from([(
-        (ValidatorId::new(1), FinalityScope::PreparedTask(task_id)),
+        (ValidatorId::new(1), ConsensusScope::PreparedTask(task_id)),
         [9; 32],
     )]);
     assert_eq!(
@@ -186,7 +186,7 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
     let vote_locks = BTreeMap::from([(
         (
             ValidatorId::new(1),
-            FinalityScope::PreparedTask(task_id.clone()),
+            ConsensusScope::PreparedTask(task_id.clone()),
         ),
         [7; 32],
     )]);
@@ -363,7 +363,7 @@ fn vote_locks_require_a_validator_from_registry_history() {
     let known = BTreeMap::from([(
         (
             ValidatorId::new(1),
-            FinalityScope::PublicCheckpoint {
+            ConsensusScope::PublicCheckpoint {
                 validator_set_version: 1,
                 epoch: 7,
             },
@@ -375,7 +375,7 @@ fn vote_locks_require_a_validator_from_registry_history() {
     let unknown = BTreeMap::from([(
         (
             ValidatorId::new(2),
-            FinalityScope::PublicCheckpoint {
+            ConsensusScope::PublicCheckpoint {
                 validator_set_version: 1,
                 epoch: 7,
             },
@@ -418,7 +418,7 @@ fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
     let valid = BTreeMap::from([(
         (
             ValidatorId::new(1),
-            FinalityScope::PreparedTask(task_id.clone()),
+            ConsensusScope::PreparedTask(task_id.clone()),
         ),
         digest,
     )]);
@@ -428,7 +428,7 @@ fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
     );
 
     let invalid = BTreeMap::from([(
-        (ValidatorId::new(2), FinalityScope::PreparedTask(task_id)),
+        (ValidatorId::new(2), ConsensusScope::PreparedTask(task_id)),
         digest,
     )]);
     assert_eq!(

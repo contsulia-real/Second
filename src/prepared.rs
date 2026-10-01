@@ -257,12 +257,16 @@ impl PreparedTaskBook {
         signing_key: &SigningKey,
     ) -> Result<ValidatorVote, PreparationError> {
         let (statement, validator_set) = self.prepared_finality_context(task_id.clone())?;
-        self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Voting)?;
-
         let signer = ValidatorSigner::new(validator_id, signing_key.clone(), self.store.clone());
-        signer
-            .sign_prepared_task(task_id, &statement, &validator_set)
-            .map_err(PreparationError::from)
+        let vote = signer
+            .sign_prepared_task(task_id.clone(), &statement, &validator_set)
+            .map_err(PreparationError::from)?;
+
+        self.tasks
+            .get_mut(&task_id)
+            .ok_or(PreparationError::NotPrepared(task_id))?
+            .advance_phase(PreparedTaskPhase::Voting);
+        Ok(vote)
     }
 
     pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
