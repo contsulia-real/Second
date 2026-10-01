@@ -1,32 +1,10 @@
 use second::{
-    BftPhase, BftQuorumCertificate, BftValue, CURRENT_PROTOCOL_VERSION, ConsensusScope,
-    PersistenceError, PublicCurrencyCheckpoint, SecondState, StateStore, ValidatorId,
-    ValidatorSigner, ValidatorSigningError,
+    BftPhase, BftValue, CURRENT_PROTOCOL_VERSION, ConsensusScope, PersistenceError,
+    PublicCurrencyCheckpoint, SecondState, StateStore, ValidatorId, ValidatorSigner,
+    ValidatorSigningError,
 };
 
-use crate::support::{key, temp_base, validator_set};
-
-fn qc(
-    scope: ConsensusScope,
-    round: u64,
-    phase: BftPhase,
-    value: BftValue,
-    signers: [u64; 3],
-) -> BftQuorumCertificate {
-    let validators = validator_set(7, 1..=4);
-    let statement = second::BftStatement::new(7, scope, round, phase, value);
-    use ed25519_dalek::Signer as _;
-
-    let message = statement.canonical_signing_bytes();
-    let votes = signers
-        .into_iter()
-        .map(|id| {
-            let signature = key((id * 3 + 1) as u8).sign(&message).to_bytes();
-            second::BftVote::from_untrusted_parts(ValidatorId::new(id), signature)
-        })
-        .collect();
-    BftQuorumCertificate::new(statement, votes, &validators).unwrap()
-}
+use crate::support::{bft_qc, key, temp_base, validator_set};
 
 #[test]
 fn prevote_qc_enables_precommit_and_lock_survives_restart() {
@@ -53,12 +31,13 @@ fn prevote_qc_enables_precommit_and_lock_survives_restart() {
         )
         .unwrap();
 
-    let prevote_qc = qc(
+    let prevote_qc = bft_qc(
         scope.clone(),
         0,
         BftPhase::Prevote,
         BftValue::Digest(digest),
         [1, 2, 3],
+        &validators,
     );
     signer
         .sign_bft_precommit(
@@ -79,12 +58,13 @@ fn prevote_qc_enables_precommit_and_lock_survives_restart() {
     assert_eq!(persisted.locked_round(), Some(0));
     assert_eq!(persisted.locked_digest(), Some(digest));
 
-    let precommit_qc = qc(
+    let precommit_qc = bft_qc(
         scope.clone(),
         0,
         BftPhase::Precommit,
         BftValue::Digest(digest),
         [1, 2, 3],
+        &validators,
     );
     restarted
         .accept_bft_precommit_qc(ValidatorId::new(1), &precommit_qc, &validators)
@@ -126,12 +106,13 @@ fn irreversible_finality_vote_requires_precommit_qc() {
         ))
     );
 
-    let precommit_qc = qc(
+    let precommit_qc = bft_qc(
         scope.clone(),
         0,
         BftPhase::Precommit,
         BftValue::Digest(digest),
         [1, 2, 3],
+        &validators,
     );
     store
         .accept_bft_precommit_qc(ValidatorId::new(1), &precommit_qc, &validators)
@@ -168,12 +149,13 @@ fn lock_rejects_conflicting_prevote_until_higher_round_qc_unlocks_it() {
     signer
         .sign_bft_prevote(scope.clone(), 0, BftValue::Digest(a), &validators, None)
         .unwrap();
-    let a_qc = qc(
+    let a_qc = bft_qc(
         scope.clone(),
         0,
         BftPhase::Prevote,
         BftValue::Digest(a),
         [1, 2, 3],
+        &validators,
     );
     signer
         .sign_bft_precommit(
@@ -201,12 +183,13 @@ fn lock_rejects_conflicting_prevote_until_higher_round_qc_unlocks_it() {
         .advance_bft_round(ValidatorId::new(1), &scope, 2)
         .unwrap();
 
-    let b_round1_qc = qc(
+    let b_round1_qc = bft_qc(
         scope.clone(),
         1,
         BftPhase::Prevote,
         BftValue::Digest(b),
         [2, 3, 4],
+        &validators,
     );
     signer
         .sign_bft_prevote(
@@ -218,12 +201,13 @@ fn lock_rejects_conflicting_prevote_until_higher_round_qc_unlocks_it() {
         )
         .unwrap();
 
-    let b_round2_qc = qc(
+    let b_round2_qc = bft_qc(
         scope.clone(),
         2,
         BftPhase::Prevote,
         BftValue::Digest(b),
         [1, 2, 3],
+        &validators,
     );
     signer
         .sign_bft_precommit(

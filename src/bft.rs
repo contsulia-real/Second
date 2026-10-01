@@ -90,7 +90,7 @@ impl ConsensusScope {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BftPhase {
     Prevote,
     Precommit,
@@ -105,7 +105,7 @@ impl BftPhase {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BftValue {
     Nil,
     Digest([u8; 32]),
@@ -150,6 +150,24 @@ impl BftStatement {
     ) -> Self {
         Self {
             protocol_version: CURRENT_PROTOCOL_VERSION,
+            validator_set_version,
+            scope,
+            round,
+            phase,
+            value,
+        }
+    }
+
+    pub fn from_untrusted_parts(
+        protocol_version: u32,
+        validator_set_version: u64,
+        scope: ConsensusScope,
+        round: u64,
+        phase: BftPhase,
+        value: BftValue,
+    ) -> Self {
+        Self {
+            protocol_version,
             validator_set_version,
             scope,
             round,
@@ -229,6 +247,24 @@ impl BftVote {
     pub const fn signature_bytes(&self) -> [u8; 64] {
         self.signature
     }
+
+    pub fn verify(
+        &self,
+        statement: &BftStatement,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), BftError> {
+        validate_statement(statement, validator_set)?;
+        let credential = validator_set
+            .validator(self.validator_id)
+            .ok_or(BftError::UnknownValidator(self.validator_id))?;
+        let key = VerifyingKey::from_bytes(&credential.consensus_public_key())
+            .map_err(|_| BftError::InvalidValidatorKey(self.validator_id))?;
+        key.verify_strict(
+            &statement.canonical_signing_bytes(),
+            &Signature::from_bytes(&self.signature),
+        )
+        .map_err(|_| BftError::InvalidSignature(self.validator_id))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,6 +274,10 @@ pub struct BftQuorumCertificate {
 }
 
 impl BftQuorumCertificate {
+    pub fn from_untrusted_parts(statement: BftStatement, votes: Vec<BftVote>) -> Self {
+        Self { statement, votes }
+    }
+
     pub fn new(
         statement: BftStatement,
         votes: Vec<BftVote>,
@@ -257,40 +297,13 @@ impl BftQuorumCertificate {
     }
 
     pub fn verify(&self, validator_set: &ValidatorSet) -> Result<(), BftError> {
-        if self.statement.protocol_version() != CURRENT_PROTOCOL_VERSION {
-            return Err(BftError::WrongProtocolVersion {
-                expected: CURRENT_PROTOCOL_VERSION,
-                actual: self.statement.protocol_version(),
-            });
-        }
-        if self.statement.validator_set_version() != validator_set.version() {
-            return Err(BftError::WrongValidatorSetVersion {
-                expected: validator_set.version(),
-                actual: self.statement.validator_set_version(),
-            });
-        }
-        if let Some(actual) = self.statement.scope().explicit_validator_set_version()
-            && actual != self.statement.validator_set_version()
-        {
-            return Err(BftError::ScopeValidatorSetVersionMismatch {
-                expected: self.statement.validator_set_version(),
-                actual,
-            });
-        }
-
-        let message = self.statement.canonical_signing_bytes();
+        validate_statement(&self.statement, validator_set)?;
         let mut seen = BTreeSet::new();
         for vote in &self.votes {
             if !seen.insert(vote.validator_id()) {
                 return Err(BftError::DuplicateVote(vote.validator_id()));
             }
-            let credential = validator_set
-                .validator(vote.validator_id())
-                .ok_or(BftError::UnknownValidator(vote.validator_id()))?;
-            let key = VerifyingKey::from_bytes(&credential.consensus_public_key())
-                .map_err(|_| BftError::InvalidValidatorKey(vote.validator_id()))?;
-            key.verify_strict(&message, &Signature::from_bytes(&vote.signature_bytes()))
-                .map_err(|_| BftError::InvalidSignature(vote.validator_id()))?;
+            vote.verify(&self.statement, validator_set)?;
         }
 
         if seen.len() < validator_set.quorum_threshold() {
@@ -301,6 +314,33 @@ impl BftQuorumCertificate {
         }
         Ok(())
     }
+}
+
+fn validate_statement(
+    statement: &BftStatement,
+    validator_set: &ValidatorSet,
+) -> Result<(), BftError> {
+    if statement.protocol_version() != CURRENT_PROTOCOL_VERSION {
+        return Err(BftError::WrongProtocolVersion {
+            expected: CURRENT_PROTOCOL_VERSION,
+            actual: statement.protocol_version(),
+        });
+    }
+    if statement.validator_set_version() != validator_set.version() {
+        return Err(BftError::WrongValidatorSetVersion {
+            expected: validator_set.version(),
+            actual: statement.validator_set_version(),
+        });
+    }
+    if let Some(actual) = statement.scope().explicit_validator_set_version()
+        && actual != statement.validator_set_version()
+    {
+        return Err(BftError::ScopeValidatorSetVersionMismatch {
+            expected: statement.validator_set_version(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

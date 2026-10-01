@@ -131,6 +131,15 @@ impl ValidatorSet {
         self.validators.get(&validator)
     }
 
+    pub fn proposer(&self, round: u64) -> ValidatorId {
+        let index = (round % self.validators.len() as u64) as usize;
+        *self
+            .validators
+            .keys()
+            .nth(index)
+            .expect("validator set is non-empty")
+    }
+
     pub fn has_quorum<I>(&self, votes: I) -> bool
     where
         I: IntoIterator<Item = ValidatorId>,

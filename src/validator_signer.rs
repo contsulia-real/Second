@@ -2,10 +2,10 @@ use ed25519_dalek::SigningKey;
 
 use crate::persistence::VoteLockStatus;
 use crate::{
-    BftError, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote,
-    CURRENT_PROTOCOL_VERSION, ConsensusScope, FinalityError, FinalityStatement, PersistenceError,
-    PublicCurrencyCheckpoint, StateRecoveryCheckpoint, StateStore, TaskId, ValidatorId,
-    ValidatorSet, ValidatorSetTransition, ValidatorVote,
+    BftError, BftPhase, BftProposal, BftProposalSubject, BftQuorumCertificate, BftStatement,
+    BftValue, BftVote, CURRENT_PROTOCOL_VERSION, ConsensusScope, FinalityError, FinalityStatement,
+    PersistenceError, PublicCurrencyCheckpoint, StateRecoveryCheckpoint, StateStore, TaskId,
+    ValidatorId, ValidatorSet, ValidatorSetTransition, ValidatorVote,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,6 +142,22 @@ impl ValidatorSigner {
                 certified_transition,
             )
             .map_err(ValidatorSigningError::from)
+    }
+
+    pub fn sign_bft_proposal(
+        &self,
+        subject: &BftProposalSubject,
+        round: u64,
+        validator_set: &ValidatorSet,
+    ) -> Result<BftProposal, ValidatorSigningError> {
+        self.validate_consensus_key(validator_set)?;
+        Ok(BftProposal::sign(
+            subject,
+            round,
+            self.validator_id,
+            &self.signing_key,
+            validator_set,
+        )?)
     }
 
     pub fn sign_bft_prevote(

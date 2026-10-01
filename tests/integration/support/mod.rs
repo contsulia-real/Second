@@ -11,12 +11,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
-    ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask,
-    LegalTaskPayload, NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError,
-    PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity,
-    SecondState, StateStore, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
+    AccountAddress, AuthorizerSet, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote,
+    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope, ExecutionError,
+    ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask, LegalTaskPayload,
+    NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError, PreparationOutcome,
+    PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore,
+    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
 };
 
 pub fn key(byte: u8) -> SigningKey {
@@ -146,6 +147,32 @@ pub fn signed_vote(
         .sign(&statement.canonical_signing_bytes())
         .to_bytes();
     ValidatorVote::from_untrusted_parts(validator_id, signature)
+}
+
+pub fn signed_bft_vote(statement: &BftStatement, validator_id: ValidatorId) -> BftVote {
+    let signing_key = key((validator_id.value() * 3 + 1) as u8);
+    BftVote::from_untrusted_parts(
+        validator_id,
+        signing_key
+            .sign(&statement.canonical_signing_bytes())
+            .to_bytes(),
+    )
+}
+
+pub fn bft_qc(
+    scope: ConsensusScope,
+    round: u64,
+    phase: BftPhase,
+    value: BftValue,
+    signers: impl IntoIterator<Item = u64>,
+    validator_set: &ValidatorSet,
+) -> BftQuorumCertificate {
+    let statement = BftStatement::new(validator_set.version(), scope, round, phase, value);
+    let votes = signers
+        .into_iter()
+        .map(|id| signed_bft_vote(&statement, ValidatorId::new(id)))
+        .collect();
+    BftQuorumCertificate::new(statement, votes, validator_set).unwrap()
 }
 
 pub fn mark_bft_finality_ready(

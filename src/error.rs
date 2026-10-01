@@ -132,6 +132,9 @@ pub enum PersistenceError {
         current: u64,
         attempted: u64,
     },
+    BftRoundOverflow {
+        current: u64,
+    },
     BftVoteConflict {
         phase: BftPhase,
         round: u64,
@@ -171,14 +174,30 @@ impl PersistenceError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BftError {
-    WrongProtocolVersion { expected: u32, actual: u32 },
-    WrongValidatorSetVersion { expected: u64, actual: u64 },
-    ScopeValidatorSetVersionMismatch { expected: u64, actual: u64 },
+    WrongProtocolVersion {
+        expected: u32,
+        actual: u32,
+    },
+    WrongValidatorSetVersion {
+        expected: u64,
+        actual: u64,
+    },
+    ScopeValidatorSetVersionMismatch {
+        expected: u64,
+        actual: u64,
+    },
     UnknownValidator(ValidatorId),
     DuplicateVote(ValidatorId),
     InvalidValidatorKey(ValidatorId),
     InvalidSignature(ValidatorId),
-    InsufficientVotes { required: usize, actual: usize },
+    WrongProposer {
+        expected: ValidatorId,
+        actual: ValidatorId,
+    },
+    InsufficientVotes {
+        required: usize,
+        actual: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

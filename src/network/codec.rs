@@ -250,6 +250,28 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
             Ok(payload)
         }
         NetworkMessage::StateRecoveryDenied => Ok(vec![18]),
+        NetworkMessage::BftAuthenticate {
+            validator_id,
+            signature,
+        } => {
+            let mut payload = Vec::with_capacity(73);
+            payload.push(19);
+            payload.extend_from_slice(&validator_id.value().to_be_bytes());
+            payload.extend_from_slice(signature);
+            Ok(payload)
+        }
+        NetworkMessage::BftAuthenticated => Ok(vec![20]),
+        NetworkMessage::BftMessage { bytes } => {
+            if bytes.is_empty() {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            let mut payload = Vec::with_capacity(1 + bytes.len());
+            payload.push(21);
+            payload.extend_from_slice(bytes);
+            Ok(payload)
+        }
+        NetworkMessage::BftAccepted => Ok(vec![22]),
+        NetworkMessage::BftDenied => Ok(vec![23]),
     }
 }
 
@@ -334,8 +356,45 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
             require_message_length(18, payload, 1)?;
             Ok(NetworkMessage::StateRecoveryDenied)
         }
+        19 => decode_bft_authenticate(payload),
+        20 => {
+            require_message_length(20, payload, 1)?;
+            Ok(NetworkMessage::BftAuthenticated)
+        }
+        21 => {
+            if payload.len() <= 1 {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            Ok(NetworkMessage::BftMessage {
+                bytes: payload[1..].to_vec(),
+            })
+        }
+        22 => {
+            require_message_length(22, payload, 1)?;
+            Ok(NetworkMessage::BftAccepted)
+        }
+        23 => {
+            require_message_length(23, payload, 1)?;
+            Ok(NetworkMessage::BftDenied)
+        }
         other => Err(NetworkError::UnknownMessageType(other)),
     }
+}
+
+fn decode_bft_authenticate(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(19, payload, 73)?;
+    let validator_id = ValidatorId::new(u64::from_be_bytes(
+        payload[1..9]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidBftMessage)?,
+    ));
+    let signature = payload[9..73]
+        .try_into()
+        .map_err(|_| NetworkError::InvalidBftMessage)?;
+    Ok(NetworkMessage::BftAuthenticate {
+        validator_id,
+        signature,
+    })
 }
 
 fn decode_state_recovery_manifest_request(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {

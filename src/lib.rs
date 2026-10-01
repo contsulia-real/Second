@@ -1,5 +1,7 @@
 mod authorization;
 mod bft;
+mod bft_driver;
+mod bft_proposal;
 mod claims;
 mod currency;
 mod error;
@@ -29,6 +31,10 @@ pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
 pub use bft::{
     BftLocalState, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
 };
+pub use bft_driver::{
+    BftDriver, BftDriverAction, BftDriverError, BftDriverPhase, BftTimeoutConfig,
+};
+pub use bft_proposal::{BftProposal, BftProposalSubject};
 pub use claims::{ClaimError, CurrencyClaimBook, OperationClaimId};
 pub use currency::{CurrencyRole, PublicCurrencyState};
 pub use error::{
@@ -42,16 +48,18 @@ pub use ids::{
     TaskId, TaskIdParseError, ValidatorId,
 };
 pub use network::{
-    CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE,
-    MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord,
-    PublicCurrencyPage, QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
-    RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
-    RemotePublicCurrencyView, RemoteStateRecoveryPayload, SECOND_QUIC_SERVER_NAME,
-    client_fetch_state_recovery, client_peer_records, client_ping,
+    BftNetworkMessage, CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE,
+    MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError,
+    NetworkMessage, NodeId, PeerRecord, PublicCurrencyPage, QuicClient, QuicPeer,
+    QuicRequestStream, QuicServer, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
+    RemotePublicCurrencyPage, RemotePublicCurrencySummary, RemotePublicCurrencyView,
+    RemoteStateRecoveryPayload, SECOND_QUIC_SERVER_NAME, ValidatorBftPeer,
+    authenticate_validator_bft_peer, client_fetch_state_recovery, client_peer_records, client_ping,
     client_public_currency_checkpoint_proof, client_public_currency_page,
     client_public_currency_summary, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view, decode_network_message, encode_network_message,
-    serve_ping_session, serve_public_currency_connection,
+    client_sync_public_currency_view, decode_bft_network_message, decode_network_message,
+    encode_bft_network_message, encode_network_message, serve_ping_session,
+    serve_public_currency_connection, serve_validator_bft_connection,
 };
 pub use payment::PaymentAddressStatus;
 pub use persistence::{PersistedNodeState, StateStore};

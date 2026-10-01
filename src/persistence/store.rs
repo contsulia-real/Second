@@ -462,24 +462,7 @@ impl StateStore {
         let latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
-        let validator_set_version = latest.validator_set.version();
-        let serial = match latest
-            .recovery_checkpoint_floors
-            .get(&validator_set_version)
-        {
-            None => 1,
-            Some(floor) if !floor.certified => {
-                return Err(PersistenceError::RecoveryCheckpointAwaitingFinality {
-                    validator_set_version,
-                    serial: floor.serial,
-                });
-            }
-            Some(floor) => floor.serial.checked_add(1).ok_or(
-                PersistenceError::RecoveryCheckpointSerialOverflow {
-                    validator_set_version,
-                },
-            )?,
-        };
+        let serial = next_recovery_checkpoint_serial(&latest)?;
         StateRecoveryCheckpoint::from_persisted(serial, &latest)
     }
 
@@ -963,6 +946,32 @@ fn validate_certified_checkpoint_for_state(
     }
 
     Ok(())
+}
+
+pub(super) fn next_recovery_checkpoint_serial(
+    snapshot: &PersistedNodeState,
+) -> Result<u64, PersistenceError> {
+    let validator_set_version = snapshot.validator_set.version();
+    match snapshot
+        .recovery_checkpoint_floors
+        .get(&validator_set_version)
+    {
+        None => Ok(1),
+        Some(floor) if !floor.certified => {
+            Err(PersistenceError::RecoveryCheckpointAwaitingFinality {
+                validator_set_version,
+                serial: floor.serial,
+            })
+        }
+        Some(floor) => {
+            floor
+                .serial
+                .checked_add(1)
+                .ok_or(PersistenceError::RecoveryCheckpointSerialOverflow {
+                    validator_set_version,
+                })
+        }
+    }
 }
 
 fn checkpoint_floor_for_write(

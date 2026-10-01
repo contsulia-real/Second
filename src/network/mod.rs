@@ -1,3 +1,5 @@
+mod bft;
+mod bft_codec;
 mod codec;
 mod identity;
 mod peer_manager;
@@ -10,12 +12,14 @@ mod session;
 use std::fmt;
 
 use crate::{
-    CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
+    BftError, CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
     FinalityError, PublicCheckpointError, PublicCurrencyCheckpointProof, PublicCurrencyState,
     PublicCurrencySummary, PublicCurrencyView, PublicStateError, StateRecoveryCheckpointProof,
     StateRecoveryPayload, ValidatorId,
 };
 
+pub use bft::{ValidatorBftPeer, authenticate_validator_bft_peer, serve_validator_bft_connection};
+pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
 pub use identity::QuicTransportIdentity;
 pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
@@ -161,6 +165,16 @@ pub enum NetworkMessage {
         bytes: Vec<u8>,
     },
     StateRecoveryDenied,
+    BftAuthenticate {
+        validator_id: ValidatorId,
+        signature: [u8; 64],
+    },
+    BftAuthenticated,
+    BftMessage {
+        bytes: Vec<u8>,
+    },
+    BftAccepted,
+    BftDenied,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -250,6 +264,9 @@ pub enum NetworkError {
         requested: u32,
         maximum: u32,
     },
+    BftUnauthorized,
+    InvalidBftMessage,
+    Bft(BftError),
     UnexpectedMessage,
     NonceMismatch {
         expected: u64,
