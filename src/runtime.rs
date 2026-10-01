@@ -64,6 +64,7 @@ struct PublicNetworkContext {
 pub struct NodeRuntime {
     server: QuicServer,
     transport_identity: QuicTransportIdentity,
+    store: StateStore,
     state: Arc<SecondState>,
     validator_set: ValidatorSet,
     validator_registry: ValidatorRegistry,
@@ -104,6 +105,7 @@ impl NodeRuntime {
         Ok(Self {
             server,
             transport_identity,
+            store: store.clone(),
             state: Arc::new(persisted.state),
             validator_set,
             validator_registry,
@@ -212,6 +214,7 @@ impl NodeRuntime {
             &self.validator_registry,
             &checkpoint,
         )?);
+        self.store.advance_recovery_checkpoint_floor(&checkpoint)?;
         *self
             .state_recovery_provider
             .write()

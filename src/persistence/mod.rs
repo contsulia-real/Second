@@ -27,10 +27,17 @@ pub struct PersistedNodeState {
     pub retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     pub public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub checkpoint_floor_epoch: u64,
+    pub(crate) recovery_checkpoint_floors: BTreeMap<u64, RecoveryCheckpointFloor>,
     pub validator_safety_ready: bool,
     pub generation: u64,
     pub(crate) prepared_tasks: BTreeMap<TaskId, PreparedTask>,
     pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveryCheckpointFloor {
+    pub(crate) serial: u64,
+    pub(crate) checkpoint_digest: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

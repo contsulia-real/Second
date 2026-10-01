@@ -94,6 +94,17 @@ async fn privileged_recovery_chunks_large_private_state_and_installs_only_shared
         source_store.load().unwrap().unwrap().validator_registry
     );
     assert!(!installed.validator_safety_ready);
+
+    let stale_installed_checkpoint = certified_checkpoint(&destination_store, 40);
+    assert!(matches!(
+        destination_store.advance_recovery_checkpoint_floor(&stale_installed_checkpoint),
+        Err(PersistenceError::StaleRecoveryCheckpointSerial {
+            validator_set_version: 7,
+            minimum: 41,
+            actual: 40,
+        })
+    ));
+
     assert_eq!(
         PreparedTaskBook::new(destination_store.clone())
             .unwrap()
@@ -163,5 +174,41 @@ async fn recovery_payload_is_denied_without_current_validator_identity_proof() {
     task.abort();
     let _ = task.await;
     drop(runtime);
+    support::cleanup_node_runtime(store, base);
+}
+
+#[tokio::test]
+async fn runtime_persists_recovery_floor_and_refuses_stale_certified_publication_after_restart() {
+    let validators = validator_set(7, 1..=4);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    let base = support::temp_base("state-recovery-publish-floor");
+    let store = StateStore::new(&base);
+    store.initialize(&state, &validators).unwrap();
+
+    let current = certified_checkpoint(&store, 41);
+    {
+        let runtime =
+            NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap();
+        runtime.publish_state_recovery_checkpoint(current).unwrap();
+    }
+
+    let stale = certified_checkpoint(&store, 40);
+    let restarted =
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap();
+    assert!(matches!(
+        restarted.publish_state_recovery_checkpoint(stale),
+        Err(second::NodeRuntimeError::Persistence(
+            PersistenceError::StaleRecoveryCheckpointSerial {
+                validator_set_version: 7,
+                minimum: 41,
+                actual: 40,
+            }
+        ))
+    ));
+
+    let next = certified_checkpoint(&store, 42);
+    restarted.publish_state_recovery_checkpoint(next).unwrap();
+
+    drop(restarted);
     support::cleanup_node_runtime(store, base);
 }

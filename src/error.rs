@@ -97,10 +97,27 @@ pub enum PersistenceError {
     RecoveryCheckpointDoesNotMatchState,
     RecoveryValidatorSetMismatch,
     RecoveryCheckpointFinality(FinalityError),
+    StaleRecoveryCheckpointSerial {
+        validator_set_version: u64,
+        minimum: u64,
+        actual: u64,
+    },
+    RecoveryCheckpointFloorConflict {
+        validator_set_version: u64,
+        serial: u64,
+        locked_digest: [u8; 32],
+        attempted_digest: [u8; 32],
+    },
     ValidatorSafetyStateUnavailable,
-    CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
+    CheckpointValidatorSetMismatch {
+        expected: u64,
+        actual: u64,
+    },
     CheckpointFinality(FinalityError),
-    StaleCheckpointEpoch { minimum: u64, actual: u64 },
+    StaleCheckpointEpoch {
+        minimum: u64,
+        actual: u64,
+    },
 }
 
 impl PersistenceError {

@@ -13,6 +13,7 @@ use crate::{
     SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
+use super::RecoveryCheckpointFloor;
 use super::local_codec::{decode_local_state, encode_local_state};
 use super::snapshot_validation::{
     validate_active_prepared_vote_lock_membership, validate_prepared_plans_against_state,
@@ -40,6 +41,7 @@ pub(super) struct SnapshotContents<'a> {
     pub(super) retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
     pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
     pub(super) checkpoint_floor_epoch: u64,
+    pub(super) recovery_checkpoint_floors: &'a BTreeMap<u64, RecoveryCheckpointFloor>,
     pub(super) validator_safety_ready: bool,
     pub(super) validator_registry: &'a ValidatorRegistry,
     pub(super) prepared_tasks: &'a BTreeMap<TaskId, PreparedTask>,
@@ -52,6 +54,7 @@ struct DecodedSnapshotPayload {
     retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     checkpoint_floor_epoch: u64,
+    recovery_checkpoint_floors: BTreeMap<u64, RecoveryCheckpointFloor>,
     validator_safety_ready: bool,
     validator_registry: ValidatorRegistry,
     prepared_tasks: BTreeMap<TaskId, PreparedTask>,
@@ -72,6 +75,10 @@ pub(super) fn encode_snapshot(
         .validator_registry
         .validate_current_set(contents.validator_set)
         .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    validate_recovery_checkpoint_floors(
+        contents.validator_registry,
+        contents.recovery_checkpoint_floors,
+    )?;
     validate_retained_validator_sets(
         contents.validator_set,
         contents.retained_validator_sets,
@@ -174,6 +181,10 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         .validator_registry
         .validate_current_set(&decoded.validator_set)
         .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    validate_recovery_checkpoint_floors(
+        &decoded.validator_registry,
+        &decoded.recovery_checkpoint_floors,
+    )?;
     validate_retained_validator_sets(
         &decoded.validator_set,
         &decoded.retained_validator_sets,
@@ -188,6 +199,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         retained_validator_sets: decoded.retained_validator_sets,
         public_checkpoint_proof: decoded.public_checkpoint_proof,
         checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
+        recovery_checkpoint_floors: decoded.recovery_checkpoint_floors,
         validator_safety_ready: decoded.validator_safety_ready,
         generation,
         prepared_tasks: decoded.prepared_tasks,
@@ -208,6 +220,7 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     let retained_validator_sets = contents.retained_validator_sets;
     let public_checkpoint_proof = contents.public_checkpoint_proof;
     let checkpoint_floor_epoch = contents.checkpoint_floor_epoch;
+    let recovery_checkpoint_floors = contents.recovery_checkpoint_floors;
     let validator_safety_ready = contents.validator_safety_ready;
     let validator_registry = contents.validator_registry;
     let prepared_tasks = contents.prepared_tasks;
@@ -223,6 +236,12 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
 
     encode_validator_registry(&mut out, validator_registry)?;
     out.extend_from_slice(&checkpoint_floor_epoch.to_be_bytes());
+    push_len(&mut out, recovery_checkpoint_floors.len())?;
+    for (validator_set_version, floor) in recovery_checkpoint_floors {
+        out.extend_from_slice(&validator_set_version.to_be_bytes());
+        out.extend_from_slice(&floor.serial.to_be_bytes());
+        out.extend_from_slice(&floor.checkpoint_digest);
+    }
 
     match public_checkpoint_proof {
         Some(proof) => {
@@ -528,6 +547,25 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
 
     let validator_registry = decode_validator_registry(&mut decoder)?;
     let checkpoint_floor_epoch = decoder.read_u64()?;
+    let recovery_floor_count = decoder.read_len()?;
+    const RECOVERY_FLOOR_ENCODED_SIZE: usize = 8 + 8 + 32;
+    if recovery_floor_count > decoder.remaining() / RECOVERY_FLOOR_ENCODED_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    let mut recovery_checkpoint_floors = BTreeMap::new();
+    for _ in 0..recovery_floor_count {
+        let validator_set_version = decoder.read_u64()?;
+        let floor = RecoveryCheckpointFloor {
+            serial: decoder.read_u64()?,
+            checkpoint_digest: decoder.read_array_32()?,
+        };
+        if recovery_checkpoint_floors
+            .insert(validator_set_version, floor)
+            .is_some()
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
 
     let public_checkpoint_proof = match decoder.read_u8()? {
         0 => None,
@@ -573,11 +611,25 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         retained_validator_sets,
         public_checkpoint_proof,
         checkpoint_floor_epoch,
+        recovery_checkpoint_floors,
         validator_safety_ready,
         validator_registry,
         prepared_tasks,
         validator_vote_locks,
     })
+}
+
+fn validate_recovery_checkpoint_floors(
+    validator_registry: &ValidatorRegistry,
+    recovery_checkpoint_floors: &BTreeMap<u64, RecoveryCheckpointFloor>,
+) -> Result<(), PersistenceError> {
+    if recovery_checkpoint_floors
+        .keys()
+        .any(|version| *version > validator_registry.active_validator_set_version())
+    {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    Ok(())
 }
 
 fn validate_checkpoint_attachment(
