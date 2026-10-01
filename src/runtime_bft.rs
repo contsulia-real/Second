@@ -73,6 +73,8 @@ struct ValidatorBftRuntimeInner {
 const VALIDATOR_BFT_SEND_QUEUE_CAPACITY: usize = 64;
 const VALIDATOR_FINALITY_SEND_QUEUE_CAPACITY: usize = 32;
 const VALIDATOR_BFT_NORMAL_IN_FLIGHT_LIMIT: usize = MAX_CONCURRENT_ONE_WAY_STREAMS / 2;
+const VALIDATOR_FINALITY_IN_FLIGHT_LIMIT: usize =
+    MAX_CONCURRENT_ONE_WAY_STREAMS - VALIDATOR_BFT_NORMAL_IN_FLIGHT_LIMIT;
 
 struct ManagedValidatorBftPeer {
     peer: ValidatorBftPeer,
@@ -528,6 +530,8 @@ async fn run_validator_bft_sender(
 ) {
     let mut receiver_open = true;
     let mut finality_receiver_open = true;
+    let mut normal_in_flight = 0_usize;
+    let mut finality_in_flight = 0_usize;
     let mut in_flight = tokio::task::JoinSet::new();
 
     loop {
@@ -540,15 +544,16 @@ async fn run_validator_bft_sender(
 
             message = finality_receiver.recv(),
                 if finality_receiver_open
-                    && in_flight.len() < MAX_CONCURRENT_ONE_WAY_STREAMS =>
+                    && finality_in_flight < VALIDATOR_FINALITY_IN_FLIGHT_LIMIT =>
             {
                 match message {
                     Some(message) => {
+                        finality_in_flight += 1;
                         let send_peer = peer.clone();
                         let scope = message.scope().clone();
                         in_flight.spawn(async move {
                             let result = send_peer.send(&message).await;
-                            (Some(scope), result)
+                            (true, Some(scope), result)
                         });
                     }
                     None => finality_receiver_open = false,
@@ -557,12 +562,19 @@ async fn run_validator_bft_sender(
 
             result = in_flight.join_next(), if !in_flight.is_empty() => {
                 let failure = match result {
-                    Some(Ok((scope, Err(error)))) => Some((scope, error)),
+                    Some(Ok((is_finality, scope, result))) => {
+                        if is_finality {
+                            finality_in_flight = finality_in_flight.saturating_sub(1);
+                        } else {
+                            normal_in_flight = normal_in_flight.saturating_sub(1);
+                        }
+                        result.err().map(|error| (scope, error))
+                    }
                     Some(Err(error)) => Some((
                         None,
                         NetworkError::Transport(format!("BFT send task failed: {error}")),
                     )),
-                    Some(Ok((_, Ok(())))) | None => None,
+                    None => None,
                 };
                 if let Some((scope, error)) = failure {
                     alive.store(false, Ordering::Release);
@@ -583,15 +595,16 @@ async fn run_validator_bft_sender(
 
             message = receiver.recv(),
                 if receiver_open
-                    && in_flight.len() < VALIDATOR_BFT_NORMAL_IN_FLIGHT_LIMIT =>
+                    && normal_in_flight < VALIDATOR_BFT_NORMAL_IN_FLIGHT_LIMIT =>
             {
                 match message {
                     Some(message) => {
+                        normal_in_flight += 1;
                         let send_peer = peer.clone();
                         let scope = message.scope().clone();
                         in_flight.spawn(async move {
                             let result = send_peer.send(&message).await;
-                            (Some(scope), result)
+                            (false, Some(scope), result)
                         });
                     }
                     None => receiver_open = false,

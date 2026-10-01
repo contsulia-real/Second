@@ -260,11 +260,20 @@ pub enum BftConsensusEvent {
 
 const MAX_PENDING_UNREGISTERED_SCOPES: usize = 32;
 const MAX_PENDING_MESSAGES_PER_SCOPE: usize = 64;
+const MAX_RECENT_COMPLETED_SCOPES: usize = 64;
 
 pub(crate) struct BftConsensusCoordinator {
     sessions: BTreeMap<ConsensusScope, BftConsensusSession>,
     pending_unregistered: BTreeMap<ConsensusScope, VecDeque<InboundBftMessage>>,
+    recent_completed: VecDeque<CompletedConsensusScope>,
     events: VecDeque<BftConsensusEvent>,
+}
+
+struct CompletedConsensusScope {
+    subject: BftProposalSubject,
+    certificate: FinalityCertificate,
+    relay_interval: Duration,
+    next_relay_at: Instant,
 }
 
 struct BftConsensusSession {
@@ -298,6 +307,7 @@ impl BftConsensusCoordinator {
         Self {
             sessions: BTreeMap::new(),
             pending_unregistered: BTreeMap::new(),
+            recent_completed: VecDeque::new(),
             events: VecDeque::new(),
         }
     }
@@ -312,6 +322,16 @@ impl BftConsensusCoordinator {
     ) -> Result<(), BftConsensusRuntimeError> {
         let subject = target.proposal_subject(&store)?;
         let scope = subject.scope().clone();
+        if let Some(existing) = self
+            .recent_completed
+            .iter()
+            .find(|completed| completed.subject.scope() == &scope)
+        {
+            if existing.subject == subject {
+                return Ok(());
+            }
+            return Err(BftConsensusRuntimeError::SubjectConflict(scope));
+        }
         if let Some(existing) = self.sessions.get(&scope) {
             if existing.subject == subject && existing.target == target {
                 return Ok(());
@@ -453,7 +473,46 @@ impl BftConsensusCoordinator {
         }
 
         self.replay_ready_future(now, &mut output);
+        self.retire_finished_sessions(now);
         output
+    }
+
+    fn retire_finished_sessions(&mut self, now: Instant) {
+        let finished = self
+            .sessions
+            .iter()
+            .filter_map(|(scope, session)| session.finished.then_some(scope.clone()))
+            .collect::<Vec<_>>();
+
+        for scope in finished {
+            let Some(session) = self.sessions.remove(&scope) else {
+                continue;
+            };
+            self.pending_unregistered.remove(&scope);
+            let Some(certificate) = session.finality_certificate else {
+                continue;
+            };
+            self.remember_completed(CompletedConsensusScope {
+                subject: session.subject,
+                certificate,
+                relay_interval: session.timeouts.precommit,
+                next_relay_at: add_duration(now, session.timeouts.precommit),
+            });
+        }
+    }
+
+    fn remember_completed(&mut self, completed: CompletedConsensusScope) {
+        if let Some(index) = self
+            .recent_completed
+            .iter()
+            .position(|existing| existing.subject.scope() == completed.subject.scope())
+        {
+            self.recent_completed.remove(index);
+        }
+        if self.recent_completed.len() >= MAX_RECENT_COMPLETED_SCOPES {
+            self.recent_completed.pop_front();
+        }
+        self.recent_completed.push_back(completed);
     }
 
     fn dispatch_inbound(
@@ -464,6 +523,26 @@ impl BftConsensusCoordinator {
     ) {
         let scope = inbound_message.message.scope().clone();
         let validator_id = inbound_message.validator_id;
+        if let Some(completed) = self
+            .recent_completed
+            .iter_mut()
+            .find(|completed| completed.subject.scope() == &scope)
+        {
+            if !matches!(
+                inbound_message.message,
+                BftNetworkMessage::FinalityCertificate { .. }
+            ) && now >= completed.next_relay_at
+            {
+                output
+                    .outbound
+                    .push(BftNetworkMessage::FinalityCertificate {
+                        scope,
+                        certificate: completed.certificate.clone(),
+                    });
+                completed.next_relay_at = add_duration(now, completed.relay_interval);
+            }
+            return;
+        }
         if !self.sessions.contains_key(&scope) {
             self.buffer_unregistered(inbound_message);
             return;
