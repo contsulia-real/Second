@@ -693,7 +693,7 @@ BFT vote 使用独立 `SECOND_BFT_V1` signing domain，绑定 `protocol_version 
 
 只有节点已经验证并持久接受 exact scope/digest 的有效 **precommit QC**，现有永久 `FinalityVote` 入口才被打开；成功写入不可逆 vote-lock 后，对应 transient BFT local state 被移除。已经存在的同 digest finality vote-lock 仍允许确定性 replay，不要求重新跑 BFT。
 
-这一层当前只实现 core safety state machine、BFT vote/QC 校验和 durable lock；**尚未**定义 proposer selection、网络消息、timeout、自动 round advancement 或 view-change 驱动。timeout 未来只能作为本地 liveness 触发器，不能成为协议事实。也没有因此引入全局区块、全局序号、stake 权重或新 authority。
+这一层当前只实现 core safety state machine、BFT vote/QC 校验和 durable lock；**尚未**定义 proposer selection、proposal transport/validation、网络消息、timeout、自动 round advancement 或 view-change 驱动。当前 `sign_bft_prevote` / `sign_bft_precommit` 接受的 digest 是本地共识 core primitive，不代表“任意收到的 digest 已经是合法 proposal”；未来 Validator-only 网络入口在调用 signer 前必须按对应 `ConsensusScope` 验证 proposal 对象、业务前置条件和 exact subject digest，不能把 raw network digest 直接送入 signer。timeout 未来只能作为本地 liveness 触发器，不能成为协议事实。也没有因此引入全局区块、全局序号、stake 权重或新 authority。
 
 Finality certificate 必须：
 

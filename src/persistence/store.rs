@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::ConsensusScope;
-use crate::prepared_plan::PreparedTask;
+use crate::prepared_plan::{PreparedTask, PreparedTaskPhase};
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, PersistenceError, PublicCurrencyCheckpointProof, SecondState,
@@ -631,6 +631,51 @@ impl StateStore {
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
                 bft_local_states: &bft_local_states,
+            },
+        )
+    }
+
+    pub(crate) fn advance_prepared_task_phase(
+        &self,
+        task_id: &TaskId,
+        expected_plan_digest: [u8; 32],
+        phase: PreparedTaskPhase,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let mut latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        let prepared = latest
+            .prepared_tasks
+            .get_mut(task_id)
+            .ok_or(PersistenceError::StalePreparedTasks)?;
+        let actual_plan_digest = prepared
+            .plan_digest()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if actual_plan_digest != expected_plan_digest {
+            return Err(PersistenceError::StalePreparedTasks);
+        }
+        if phase <= prepared.phase {
+            return Ok(latest.generation);
+        }
+        prepared.advance_phase(phase);
+
+        self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state: &latest.state,
+                validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
+                public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
+                validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
             },
         )
     }

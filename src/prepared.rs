@@ -308,14 +308,13 @@ impl PreparedTaskBook {
             return Ok(());
         }
 
-        let mut updated = self.tasks.clone();
-        updated
+        let plan_digest = current.plan_digest()?;
+        self.store
+            .advance_prepared_task_phase(&task_id, plan_digest, phase)?;
+        self.tasks
             .get_mut(&task_id)
-            .ok_or(PreparationError::NotPrepared(task_id.clone()))?
+            .ok_or(PreparationError::NotPrepared(task_id))?
             .advance_phase(phase);
-
-        self.store.replace_prepared_tasks(&self.tasks, &updated)?;
-        self.tasks = updated;
         Ok(())
     }
 
