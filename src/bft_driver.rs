@@ -33,6 +33,7 @@ impl BftTimeoutConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BftDriverAction {
+    Noop,
     Vote {
         statement: BftStatement,
         vote: BftVote,
@@ -83,7 +84,8 @@ pub struct BftDriver {
     validator_set: ValidatorSet,
     scope: ConsensusScope,
     votes: BTreeMap<(u64, BftPhase, BftValue), BTreeMap<ValidatorId, BftVote>>,
-    validated_subjects: BTreeSet<(u64, [u8; 32])>,
+    certified: BTreeSet<(u64, BftPhase, BftValue)>,
+    validated_digests: BTreeSet<[u8; 32]>,
 }
 
 impl BftDriver {
@@ -102,12 +104,17 @@ impl BftDriver {
             validator_set,
             scope,
             votes: BTreeMap::new(),
-            validated_subjects: BTreeSet::new(),
+            certified: BTreeSet::new(),
+            validated_digests: BTreeSet::new(),
         })
     }
 
     pub fn scope(&self) -> &ConsensusScope {
         &self.scope
+    }
+
+    pub const fn validator_id(&self) -> ValidatorId {
+        self.signer.validator_id()
     }
 
     pub fn current_round(&self) -> Result<u64, BftDriverError> {
@@ -134,6 +141,12 @@ impl BftDriver {
         Ok(self.validator_set.proposer(self.current_round()?))
     }
 
+    pub fn register_subject(&mut self, subject: &BftProposalSubject) -> Result<(), BftDriverError> {
+        self.validate_subject(subject)?;
+        self.validated_digests.insert(subject.digest());
+        Ok(())
+    }
+
     pub fn create_proposal(
         &mut self,
         subject: &BftProposalSubject,
@@ -143,7 +156,7 @@ impl BftDriver {
         let proposal = self
             .signer
             .sign_bft_proposal(subject, round, &self.validator_set)?;
-        self.validated_subjects.insert((round, subject.digest()));
+        self.validated_digests.insert(subject.digest());
         Ok(proposal)
     }
 
@@ -177,8 +190,7 @@ impl BftDriver {
             &self.validator_set,
             unlock_certificate,
         )?;
-        self.validated_subjects
-            .insert((current, proposal.subject_digest()));
+        self.validated_digests.insert(proposal.subject_digest());
         Ok(BftDriverAction::Vote {
             statement: BftStatement::new(
                 self.validator_set.version(),
@@ -200,7 +212,13 @@ impl BftDriver {
             return Err(BftDriverError::ScopeMismatch);
         }
         let current = self.current_round()?;
-        if statement.round() != current {
+        if statement.round() != current
+            && !(statement.round() < current
+                && matches!(
+                    (statement.phase(), statement.value()),
+                    (BftPhase::Precommit, BftValue::Digest(_))
+                ))
+        {
             return Err(BftDriverError::RoundMismatch {
                 current,
                 actual: statement.round(),
@@ -215,6 +233,9 @@ impl BftDriver {
             return Ok(None);
         }
 
+        if !self.certified.insert(key) {
+            return Ok(None);
+        }
         let certificate = BftQuorumCertificate::new(
             statement,
             votes.values().cloned().collect(),
@@ -232,6 +253,21 @@ impl BftDriver {
         if statement.scope() != &self.scope {
             return Err(BftDriverError::ScopeMismatch);
         }
+        if let (BftPhase::Precommit, BftValue::Digest(digest)) =
+            (statement.phase(), statement.value())
+        {
+            self.require_validated_subject(digest)?;
+            self.store.accept_bft_precommit_qc(
+                self.signer.validator_id(),
+                certificate,
+                &self.validator_set,
+            )?;
+            return Ok(BftDriverAction::FinalityReady {
+                round: statement.round(),
+                digest,
+            });
+        }
+
         let current = self.current_round()?;
         if statement.round() != current {
             return Err(BftDriverError::RoundMismatch {
@@ -241,11 +277,17 @@ impl BftDriver {
         }
 
         if let BftValue::Digest(digest) = statement.value() {
-            self.require_validated_subject(current, digest)?;
+            self.require_validated_subject(digest)?;
         }
 
         match (statement.phase(), statement.value()) {
             (BftPhase::Prevote, value) => {
+                let local_state = self
+                    .store
+                    .bft_local_state(self.signer.validator_id(), &self.scope)?;
+                if local_state.is_some_and(|state| state.precommit().is_some()) {
+                    return Ok(BftDriverAction::Noop);
+                }
                 let prevote_certificate =
                     matches!(value, BftValue::Digest(_)).then_some(certificate);
                 let vote = self.signer.sign_bft_precommit(
@@ -266,17 +308,6 @@ impl BftDriver {
                     vote,
                 })
             }
-            (BftPhase::Precommit, BftValue::Digest(digest)) => {
-                self.store.accept_bft_precommit_qc(
-                    self.signer.validator_id(),
-                    certificate,
-                    &self.validator_set,
-                )?;
-                Ok(BftDriverAction::FinalityReady {
-                    round: current,
-                    digest,
-                })
-            }
             (BftPhase::Precommit, BftValue::Nil) => {
                 let next = current
                     .checked_add(1)
@@ -286,11 +317,14 @@ impl BftDriver {
                     certificate,
                     &self.validator_set,
                 )?;
-                self.validated_subjects.clear();
+                self.prune_after_round_advance(next);
                 Ok(BftDriverAction::RoundAdvanced {
                     round: next,
                     proposer: self.validator_set.proposer(next),
                 })
+            }
+            (BftPhase::Precommit, BftValue::Digest(_)) => {
+                unreachable!("digest precommit QCs are handled before round checks")
             }
         }
     }
@@ -360,19 +394,23 @@ impl BftDriver {
             .ok_or(BftDriverError::RoundOverflow)?;
         self.store
             .advance_bft_round(self.signer.validator_id(), &self.scope, next)?;
-        self.validated_subjects.clear();
+        self.prune_after_round_advance(next);
         Ok(BftDriverAction::RoundAdvanced {
             round: next,
             proposer: self.validator_set.proposer(next),
         })
     }
 
-    fn require_validated_subject(
-        &self,
-        round: u64,
-        digest: [u8; 32],
-    ) -> Result<(), BftDriverError> {
-        if self.validated_subjects.contains(&(round, digest)) {
+    fn prune_after_round_advance(&mut self, current: u64) {
+        self.votes.retain(|(round, phase, value), _| {
+            *round >= current
+                || (*phase == BftPhase::Precommit && matches!(value, BftValue::Digest(_)))
+        });
+        self.certified.retain(|(round, _, _)| *round >= current);
+    }
+
+    fn require_validated_subject(&self, digest: [u8; 32]) -> Result<(), BftDriverError> {
+        if self.validated_digests.contains(&digest) {
             Ok(())
         } else {
             Err(BftDriverError::SubjectMismatch)

@@ -695,7 +695,7 @@ BFT vote 使用独立 `SECOND_BFT_V1` signing domain，绑定 `protocol_version 
 
 这一层现在直接在既有 safety core 上补齐 proposer、proposal validation、Validator-only BFT transport 与 timeout/view-change driver，而没有引入第二套 consensus。proposer 对 exact `ValidatorSet` 按 `ValidatorId` 升序排列，并以 `round % N` 确定；`BftProposal` 使用独立 `SECOND_BFT_PROPOSAL_V1` signing domain，绑定 `protocol_version + validator_set_version + ConsensusScope + round + proposer_id + subject_digest`。网络收到的 digest 不能直接进入 signer：节点必须先从本地真实对象和状态构造 `BftProposalSubject`，PreparedTask 校验 durable plan 与其 exact active/retained ValidatorSet，PublicCheckpoint 校验本地 public summary/floor，ValidatorSetTransition 校验当前 registry transition，StateRecoveryCheckpoint 继续复用既有 recovery serial/floor 与 shared-state 匹配规则。`BftDriver` 只在本轮已经本地验证过 exact subject 后，才允许 digest prevote QC 触发 precommit 签名或 digest precommit QC 进入 finality-ready；仅凭网络 QC 中的 raw digest 不会打开签名入口。重启后 transient subject-validation context 不冒充 durable safety fact，需要重新从权威业务对象验证 proposal。
 
-`BftDriver` 的 timeout 仍只是本地 liveness 触发器：proposal timeout 产生本轮 `Nil` prevote，prevote timeout 产生本轮 `Nil` precommit，precommit timeout 或有效同 round `Nil` precommit QC 只将 durable round 严格推进 `+1` 并轮换 proposer；即使本地完全错过该 round、尚无 BFT state，有效 Nil precommit QC 也可原子创建该 scope 的本地 state 后进入下一 round，但不能靠无 QC 的网络消息跳轮。协议不签名 timeout 时间戳、不创建 timeout certificate，也不把本地时钟变成共享事实。Validator-only BFT transport 复用现有 QUIC/TLS transport，但在 dedicated BFT connection 上额外用 active ValidatorCredential 的 identity key 对 `CURRENT_NETWORK_PROTOCOL_VERSION + QUIC TLS exporter channel binding + ValidatorId` 做一次会话认证；认证后的连接只接受 BFT Proposal/Vote/QC，仍分别验证 proposer、vote signer、QC 与 exact ValidatorSet。BFT transport 只承载共识 envelope，不替代业务对象传播；接收方必须已经能从本地可信对象/状态独立得到相同 `BftProposalSubject`。这些能力没有引入全局区块、全局序号、stake 权重或新 authority。
+`BftDriver` 的 timeout 仍只是本地 liveness 触发器：proposal timeout 产生本轮 `Nil` prevote，prevote timeout 产生本轮 `Nil` precommit，precommit timeout 或有效同 round `Nil` precommit QC 只将 durable round 严格推进 `+1` 并轮换 proposer；即使本地完全错过该 round、尚无 BFT state，有效 Nil precommit QC 也可原子创建该 scope 的本地 state 后进入下一 round，但不能靠无 QC 的网络消息跳轮。协议不签名 timeout 时间戳、不创建 timeout certificate，也不把本地时钟变成共享事实。Validator-only BFT transport 复用现有 QUIC/TLS transport，但在 dedicated BFT connection 上额外用 active ValidatorCredential 的 identity key 对 `CURRENT_NETWORK_PROTOCOL_VERSION + QUIC TLS exporter channel binding + ValidatorId` 做一次会话认证；认证后的连接承载 bounded BFT Proposal/Vote/QC、不可逆 `FinalityVote` 与 `FinalityCertificate` envelope。Proposal 与 BFT Vote 必须由该连接认证出的原始 proposer/voter 发送；QC 与 FinalityCertificate 依靠自身 quorum signature 独立验证，FinalityVote 允许由其他已认证 Validator relay，但始终验证原始 `vote.validator_id` 的 consensus signature。认证后每个 BFT envelope 使用独立 QUIC 单向流，runtime 对发送与接收都做有界并发，并为 finality 消息保留优先容量；这些只是本地 liveness/resource 策略，不进入签名或共享协议状态。BFT transport 只承载共识 envelope，不替代业务对象传播；接收方必须已经能从本地可信对象/状态独立得到相同 `BftProposalSubject`。这些能力没有引入全局区块、全局序号、stake 权重或新 authority。
 
 Finality certificate 必须：
 
@@ -900,7 +900,7 @@ transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应
 
 长期 `second node` 的初始 bootstrap 来源固定为可选 sidecar `<snapshot-base>.bootstrap.json`。文件不存在表示没有静态 bootstrap，不阻止仅依靠已有 PeerStore 或 inbound peer 启动；文件一旦存在则必须是严格 JSON 数组，每项只含 `node_id`（64 位小写 hex）、`address`（SocketAddr）和 `certificate_base64`，未知字段、非法 NodeId/address/certificate、超过 32 条记录都会在创建 transport identity 之前使节点启动失败。该 sidecar 是本地 deployment hint，不属于 snapshot、protocol state 或 authority。
 
-runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护目标；这是实现策略，不是协议常量。节点每 2 秒运行维护 tick，连接不足时从 PeerStore + 静态 bootstrap + 已连接 peer 返回的候选继续扩展；没有取得新连接时，dial retry 从 1 秒指数退避到最多 60 秒，取得进展后重置。PeerStore 的选择策略保持有界且简单：直接认证成功或 owner-authenticated reachability 刷新会把记录提升到 MRU 端；对已持久记录的拨号失败会把该精确 record 降到最旧端，后续优先尝试近期成功/刷新的 peer，而不是永久反复先撞同一个坏 endpoint。主动 outbound QUIC client 使用 2 秒 keepalive，使长期连接不会被 5 秒 idle timeout 周期性拆掉；server 端仍保持原 5 秒 idle timeout，因此陌生 inbound peer 不会因为本节点的 keepalive 策略被无限维持。当前仍没有 DHT、DNS seed 或 NAT traversal。
+runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护目标；这是实现策略，不是协议常量。节点每 2 秒运行维护 tick，连接不足时从 PeerStore + 静态 bootstrap + 已连接 peer 返回的候选继续扩展；没有取得新连接时，dial retry 从 1 秒指数退避到最多 60 秒，取得进展后重置。PeerStore 的选择策略保持有界且简单：直接认证成功或 owner-authenticated reachability 刷新会把记录提升到 MRU 端；对已持久记录的拨号失败会把该精确 record 降到最旧端，后续优先尝试近期成功/刷新的 peer，而不是永久反复先撞同一个坏 endpoint。QUIC client 与 server transport 都对已建立的长期 session 使用 2 秒 keepalive，并保留 5 秒 idle timeout；连接 admission、128 connection 容量与 peer/session 生命周期仍负责资源边界，keepalive 不授予任何额外 authority，也不会绕过 admission。当前仍没有 DHT、DNS seed 或 NAT traversal。
 
 节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public network session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
 
@@ -908,7 +908,7 @@ runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护
 
 该 runtime sync 的结果是 `RemoteCertifiedPublicCurrencyView`，明确属于经过验证的网络观察结果，而不是本地业务状态写入。它不会用 public view 覆盖本地 `SecondState`，也不会自动推进持久 `checkpoint_floor_epoch`：public view 不包含 owner、PaymentAddress、claims、prepared task 等 private/protocol state，不能成为完整 Second state 的替代品。CLI `second observe-public-network <snapshot-base>` 是这条语义的真实入口：先加载同一 snapshot-base 的 PeerStore + 可选 bootstrap sidecar，按 runtime 默认 active-peer target 建立 authenticated connections，然后输出选出的最高有效 certified public view；命令退出后 snapshot 的 private state、checkpoint floor 和 attached proof 保持不变。是否把某个远端观察结果提升为本地持久状态属于另一条尚未定义的同步/恢复协议，不能由 public read path 猜测完成。
 
-当前公开节点网络面暴露 Ping/Pong、public Currency 查询/同步以及有界 `GetPeers/Peers` reachability discovery。BFT Proposal/Prevote/Precommit/QC 不进入这条 authenticated-open public session，而是使用独立 Validator-only BFT connection：先用 active Validator identity key 做 channel-bound 会话认证，再传 bounded binary BFT envelope。LegalTask 与最终不可逆 `FinalityVote` 的业务对象/传播通道仍未由 public node runtime 猜测实现；BFT transport 本身也不把 proposal digest 当成业务对象分发协议。
+当前公开节点网络面暴露 Ping/Pong、public Currency 查询/同步以及有界 `GetPeers/Peers` reachability discovery。BFT Proposal/Prevote/Precommit/QC、不可逆 `FinalityVote` 与 `FinalityCertificate` 都不进入这条 authenticated-open public session，而是使用独立 Validator-only BFT connection：先用 active Validator identity key 做 channel-bound 会话认证，再传 bounded binary BFT envelope。NodeRuntime 当前会为 PublicCheckpoint、ValidatorSetTransition、StateRecoveryCheckpoint 维护这条共识运行时；proposal envelope 仍只承载 digest/签名等共识元数据，不负责分发对应业务对象。LegalTask / PreparedTask 的隐私安全对象传播方案尚未冻结，因此当前 public runtime 不会擅自广播这些私有对象，也尚未把 PreparedTask 自动接入该节点级 coordinator。
 
 当前 public Node admission 是开放的：任何能够完成 authenticated Hello、证明持有其 NodeId 对应 transport private key 的 peer，都可以使用上述公开只读网络能力，前提是通过现有 connection / stream / sync resource guardrail 与 peer 去重规则。public admission 不维护 allowlist，也不要求 ValidatorCredential，因为这些数据本来就是公开状态。
 
@@ -1042,7 +1042,7 @@ recovery serial 的发行规则现已固定：**每个新的 `ValidatorSet.versi
 
 已通过 QC 的 checkpoint 属于更强的网络事实：节点可以直接接受高于本地 head 的 certified serial 进行离线 catch-up，包括空 store 直接安装当前较新的 recovery checkpoint。这样不要求恢复节点下载从 1 开始的全部历史 QC；合法高 serial QC 的 quorum 中至少包含遵守签票规则的诚实 Validator，因此其存在意味着该 set 的连续 serial 前驱已经按协议推进。该 catch-up 只推进本地 certified head，不允许未经 QC 的任意跳号。
 
-这套规则解决的是 recovery checkpoint 的**编号、freshness 与 anti-equivocation 协调**，没有被 BFT liveness 工作重写。现有 per-scope BFT 在同一 safety core 上已经具备 round/prevote/precommit/locking、precommit-QC→FinalityVote gate、确定性 proposer、Validator-only BFT transport，以及本地 timeout 驱动的严格 `+1` view-change；StateRecoveryCheckpoint proposal subject 仍必须通过既有 recovery serial/floor 与 exact persisted shared state 校验，并与 `next_state_recovery_checkpoint()` 复用同一个 persistence serial 计算 helper，不维护第二份 recovery 编号规则。多个节点即使对同一 next serial 出现不同 proposal，锁与 quorum intersection 继续负责 safety，round-robin proposer + `Nil` timeout 路径提供 liveness 推进原语。当前仍未把这些原语封装成 `NodeRuntime` 自动维护所有 Validator connection、fanout `BftDriverAction` 并持续驱动每个 scope 的后台 coordinator；这属于后续运行时编排，不是第二套 consensus。实现仍不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial。
+这套规则解决的是 recovery checkpoint 的**编号、freshness 与 anti-equivocation 协调**，没有被 BFT liveness 工作重写。现有 per-scope BFT 在同一 safety core 上已经具备 round/prevote/precommit/locking、precommit-QC→FinalityVote gate、确定性 proposer、Validator-only BFT transport，以及本地 timeout 驱动的严格 `+1` view-change；StateRecoveryCheckpoint proposal subject 仍必须通过既有 recovery serial/floor 与 exact persisted shared state 校验，并与 `next_state_recovery_checkpoint()` 复用同一个 persistence serial 计算 helper，不维护第二份 recovery 编号规则。多个节点即使对同一 next serial 出现不同 proposal，锁与 quorum intersection 继续负责 safety，round-robin proposer + `Nil` timeout 路径提供 liveness 推进原语。现在 `NodeRuntime` 已能维护 active Validator-only peer 集合、对 PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint fanout 与接收 BFT envelope、驱动每个已注册 scope 的本地 timeout、缓冲先于本地注册到达的有限消息，并在 precommit QC 后复用既有 signer 产生不可逆 FinalityVote、聚合/relay FinalityCertificate。PreparedTask 的 core safety 仍存在，但其私有 LegalTask/plan 对象传播与节点级自动注册尚未冻结，因此没有被公共 runtime 猜测实现。实现仍不会用本地时钟、snapshot generation、public checkpoint epoch 或 `ValidatorSet.version` 冒充 recovery serial。
 
 `CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。
 
@@ -1091,8 +1091,11 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | public_checkpoint.rs | 公共 checkpoint 与 finality proof |
 | state_recovery_checkpoint.rs | shared recovery payload/checkpoint/QC commitment |
 | network/ | 二进制网络 framing / session / public state sync |
-| network/bft_codec.rs | bounded BFT Proposal/Vote/QC binary envelope codec |
-| network/bft.rs | channel-bound active-Validator identity session 与 Validator-only BFT transport |
+| network/bft_codec.rs | bounded BFT Proposal/Vote/QC/FinalityVote/FinalityCertificate binary envelope codec |
+| network/bft.rs | channel-bound active-Validator identity session 与 bounded one-way Validator-only BFT envelope transport |
+| runtime_bft.rs | Validator-only peer 维护、inbound queue、优先级/有界并发 fanout 与 send-failure 生命周期 |
+| runtime_bft_consensus.rs | NodeRuntime per-scope BFT coordinator、timeout、early-message buffering、FinalityVote/Certificate 收敛 |
+| runtime_consensus_target.rs | PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 到既有 proposal/finality 类型的单一适配层 |
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
 | persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
 | transaction.rs | 外部 transaction request 严格解析 |
@@ -1259,10 +1262,9 @@ ValidatorId + TaskId
 
 后续重点：
 
-- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器，也没有被本轮 BFT liveness 工作重做。per-scope BFT core 的 round/prevote/precommit/durable locking、precommit-QC→FinalityVote gate、deterministic proposer、Validator-only BFT transport 与 timeout/view-change driver 已接到同一条 consensus 路径；identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
+- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器，也没有被本轮 BFT liveness 工作重做。per-scope BFT core 的 round/prevote/precommit/durable locking、precommit-QC→FinalityVote gate、deterministic proposer、Validator-only BFT transport、timeout/view-change driver，以及 PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 的 NodeRuntime multi-peer orchestration 已接到同一条 consensus 路径；FinalityVote/FinalityCertificate 也沿该 Validator-only 通道验证和收敛，identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
-- BFT safety core 与本轮要求的 liveness primitives 已落地，但完整节点级 orchestration 仍未完成：后续若继续共识运行时，应把现有 `BftDriverAction` 与 authenticated Validator peer 集合做多 peer fanout/接收循环，并为需要业务对象的 proposal 建立对应获取路径；不能另造第二套 vote/QC/lock 状态机，也不能把 BFT digest transport 偷换成业务对象传播协议；
-- LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
+- PreparedTask 的 BFT safety core 已存在，但 LegalTask / prepared-plan 的隐私安全网络传播方案和节点级自动注册尚未冻结，因此当前 NodeRuntime 不会把 PreparedTask 对象公开广播，也不会把 digest transport 偷换成业务对象分发协议；后续接入时必须复用现有 vote/QC/lock/finality 状态机；
 - 持续检查 persistence / network / executor 等大模块是否开始职责混杂，避免形成 God File。
 
 ---

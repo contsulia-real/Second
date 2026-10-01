@@ -16,6 +16,9 @@ mod prepared_plan;
 mod public_checkpoint;
 mod public_state;
 mod runtime;
+mod runtime_bft;
+mod runtime_bft_consensus;
+mod runtime_consensus_target;
 mod state;
 mod state_recovery_checkpoint;
 mod task;
@@ -70,6 +73,8 @@ pub use public_checkpoint::{
 };
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
 pub use runtime::{DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError};
+pub use runtime_bft::{ValidatorBftRuntimeError, ValidatorBftSendFailure, ValidatorRuntimeKeys};
+pub use runtime_bft_consensus::{BftConsensusEvent, BftConsensusRuntimeError};
 pub use state::{ExecutionOutcome, SecondState};
 pub use state_recovery_checkpoint::{
     CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint, StateRecoveryCheckpointProof,

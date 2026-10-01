@@ -373,7 +373,10 @@ pub fn spawn_node_runtime_with_bootstrap(
 ) -> tokio::task::JoinHandle<()> {
     let runtime = Arc::clone(runtime);
     tokio::spawn(async move {
-        let _ = runtime.run(&bootstrap_records).await;
+        runtime
+            .run(&bootstrap_records)
+            .await
+            .expect("test node runtime must keep running");
     })
 }
 

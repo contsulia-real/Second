@@ -84,6 +84,37 @@ impl ValidatorVote {
     pub const fn signature_bytes(&self) -> [u8; 64] {
         self.signature
     }
+
+    pub(crate) fn verify(
+        &self,
+        statement: &FinalityStatement,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), FinalityError> {
+        if statement.protocol_version() != CURRENT_PROTOCOL_VERSION {
+            return Err(FinalityError::WrongProtocolVersion {
+                expected: CURRENT_PROTOCOL_VERSION,
+                actual: statement.protocol_version(),
+            });
+        }
+        if statement.validator_set_version() != validator_set.version() {
+            return Err(FinalityError::WrongValidatorSetVersion {
+                expected: validator_set.version(),
+                actual: statement.validator_set_version(),
+            });
+        }
+
+        let credential = validator_set
+            .credential(self.validator_id())
+            .ok_or(FinalityError::UnknownValidator(self.validator_id()))?;
+        let verifying_key = VerifyingKey::from_bytes(&credential.consensus_public_key())
+            .map_err(|_| FinalityError::InvalidValidatorKey(self.validator_id()))?;
+        verifying_key
+            .verify_strict(
+                &statement.canonical_signing_bytes(),
+                &Signature::from_bytes(&self.signature_bytes()),
+            )
+            .map_err(|_| FinalityError::InvalidSignature(self.validator_id()))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,6 +124,10 @@ pub struct FinalityCertificate {
 }
 
 impl FinalityCertificate {
+    pub fn from_untrusted_parts(statement: FinalityStatement, votes: Vec<ValidatorVote>) -> Self {
+        Self { statement, votes }
+    }
+
     pub fn new(
         statement: FinalityStatement,
         votes: Vec<ValidatorVote>,
@@ -130,25 +165,13 @@ impl FinalityCertificate {
             });
         }
 
-        let message = self.statement.canonical_signing_bytes();
         let mut seen = BTreeSet::new();
 
         for vote in &self.votes {
             if !seen.insert(vote.validator_id()) {
                 return Err(FinalityError::DuplicateVote(vote.validator_id()));
             }
-
-            let credential = validator_set
-                .credential(vote.validator_id())
-                .ok_or(FinalityError::UnknownValidator(vote.validator_id()))?;
-
-            let verifying_key = VerifyingKey::from_bytes(&credential.consensus_public_key())
-                .map_err(|_| FinalityError::InvalidValidatorKey(vote.validator_id()))?;
-            let signature = Signature::from_bytes(&vote.signature_bytes());
-
-            verifying_key
-                .verify_strict(&message, &signature)
-                .map_err(|_| FinalityError::InvalidSignature(vote.validator_id()))?;
+            vote.verify(&self.statement, validator_set)?;
         }
 
         if seen.len() < validator_set.quorum_threshold() {

@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+
 use std::time::Duration;
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
@@ -12,6 +13,8 @@ use super::{NetworkError, NetworkMessage, NodeId};
 
 const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const MAX_CONCURRENT_REQUEST_STREAMS: usize = 8;
+pub(crate) const MAX_CONCURRENT_ONE_WAY_STREAMS: usize = 8;
 const PEER_AUTH_EXPORTER_LABEL: &[u8] = b"SECOND_QUIC_PEER_AUTH_V1";
 
 pub const SECOND_QUIC_SERVER_NAME: &str = "second.local";
@@ -32,7 +35,7 @@ impl QuicServer {
         ));
         let mut config = quinn::ServerConfig::with_single_cert(vec![certificate], key)
             .map_err(transport_error)?;
-        config.transport_config(transport_config(false));
+        config.transport_config(transport_config());
 
         let endpoint = Endpoint::server(config, address).map_err(transport_error)?;
         Ok(Self {
@@ -98,7 +101,7 @@ impl QuicClient {
 
         let mut config = quinn::ClientConfig::with_root_certificates(Arc::new(roots))
             .map_err(transport_error)?;
-        config.transport_config(transport_config(true));
+        config.transport_config(transport_config());
 
         let mut endpoint = Endpoint::client(bind_address).map_err(transport_error)?;
         endpoint.set_default_client_config(config);
@@ -169,7 +172,7 @@ impl QuicPeer {
 
     pub async fn exchange(&self, message: &NetworkMessage) -> Result<NetworkMessage, NetworkError> {
         let (mut send, mut recv) = self.connection.open_bi().await.map_err(transport_error)?;
-        write_stream_message(&mut send, message).await?;
+        write_request_message(&mut send, message).await?;
         read_stream_message(&mut recv).await
     }
 
@@ -179,6 +182,20 @@ impl QuicPeer {
                 let message = read_stream_message(&mut recv).await?;
                 Ok(Some(QuicRequestStream { send, message }))
             }
+            Err(quinn::ConnectionError::ApplicationClosed(_))
+            | Err(quinn::ConnectionError::LocallyClosed) => Ok(None),
+            Err(error) => Err(transport_error(error)),
+        }
+    }
+
+    pub(crate) async fn send_one_way(&self, message: &NetworkMessage) -> Result<(), NetworkError> {
+        let mut send = self.connection.open_uni().await.map_err(transport_error)?;
+        write_request_message(&mut send, message).await
+    }
+
+    pub(crate) async fn accept_one_way(&self) -> Result<Option<NetworkMessage>, NetworkError> {
+        match self.connection.accept_uni().await {
+            Ok(mut recv) => read_stream_message(&mut recv).await.map(Some),
             Err(quinn::ConnectionError::ApplicationClosed(_))
             | Err(quinn::ConnectionError::LocallyClosed) => Ok(None),
             Err(error) => Err(transport_error(error)),
@@ -199,20 +216,33 @@ impl QuicRequestStream {
     pub async fn respond(mut self, response: &NetworkMessage) -> Result<(), NetworkError> {
         write_stream_message(&mut self.send, response).await
     }
+
+    pub(crate) async fn respond_without_delivery_wait(
+        mut self,
+        response: &NetworkMessage,
+    ) -> Result<(), NetworkError> {
+        write_request_message(&mut self.send, response).await
+    }
 }
 
-fn transport_config(outbound_keep_alive: bool) -> Arc<TransportConfig> {
+pub(crate) fn outbound_bind_address(remote: SocketAddr) -> SocketAddr {
+    let ip = match remote {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    SocketAddr::new(ip, 0)
+}
+
+fn transport_config() -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
-    config.max_concurrent_bidi_streams(1_u8.into());
-    config.max_concurrent_uni_streams(0_u8.into());
+    config.max_concurrent_bidi_streams((MAX_CONCURRENT_REQUEST_STREAMS as u32).into());
+    config.max_concurrent_uni_streams((MAX_CONCURRENT_ONE_WAY_STREAMS as u32).into());
     config.max_idle_timeout(Some(
         QUIC_IDLE_TIMEOUT
             .try_into()
             .expect("five seconds is a valid QUIC idle timeout"),
     ));
-    if outbound_keep_alive {
-        config.keep_alive_interval(Some(QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL));
-    }
+    config.keep_alive_interval(Some(QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL));
     Arc::new(config)
 }
 
@@ -222,7 +252,7 @@ async fn client_handshake(
 ) -> Result<QuicPeer, NetworkError> {
     let channel_binding = peer_channel_binding(&connection)?;
     let (mut send, mut recv) = connection.open_bi().await.map_err(transport_error)?;
-    write_stream_message(
+    write_request_message(
         &mut send,
         &NetworkMessage::Hello {
             node_id: identity.node_id(),
@@ -293,14 +323,21 @@ fn peer_channel_binding(connection: &Connection) -> Result<[u8; 32], NetworkErro
     Ok(binding)
 }
 
-async fn write_stream_message(
+async fn write_request_message(
     send: &mut SendStream,
     message: &NetworkMessage,
 ) -> Result<(), NetworkError> {
     let frame = encode_network_message(message)?;
     send.write_all(&frame).await.map_err(transport_error)?;
     send.finish().map_err(transport_error)?;
+    Ok(())
+}
 
+async fn write_stream_message(
+    send: &mut SendStream,
+    message: &NetworkMessage,
+) -> Result<(), NetworkError> {
+    write_request_message(send, message).await?;
     match send.stopped().await.map_err(transport_error)? {
         None => Ok(()),
         Some(code) => Err(NetworkError::Transport(format!(

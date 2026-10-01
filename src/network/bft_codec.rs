@@ -1,6 +1,6 @@
 use crate::{
     BftPhase, BftProposal, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
-    TaskId, ValidatorId,
+    FinalityCertificate, FinalityStatement, TaskId, ValidatorId, ValidatorVote,
 };
 
 use super::{MAX_NETWORK_FRAME_SIZE, NetworkError};
@@ -18,6 +18,26 @@ pub enum BftNetworkMessage {
         vote: BftVote,
     },
     QuorumCertificate(BftQuorumCertificate),
+    FinalityVote {
+        scope: ConsensusScope,
+        statement: FinalityStatement,
+        vote: ValidatorVote,
+    },
+    FinalityCertificate {
+        scope: ConsensusScope,
+        certificate: FinalityCertificate,
+    },
+}
+
+impl BftNetworkMessage {
+    pub fn scope(&self) -> &ConsensusScope {
+        match self {
+            Self::Proposal { proposal, .. } => proposal.scope(),
+            Self::Vote { statement, .. } => statement.scope(),
+            Self::QuorumCertificate(certificate) => certificate.statement().scope(),
+            Self::FinalityVote { scope, .. } | Self::FinalityCertificate { scope, .. } => scope,
+        }
+    }
 }
 
 pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>, NetworkError> {
@@ -45,6 +65,21 @@ pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>
         BftNetworkMessage::QuorumCertificate(certificate) => {
             out.push(3);
             encode_qc(certificate, &mut out)?;
+        }
+        BftNetworkMessage::FinalityVote {
+            scope,
+            statement,
+            vote,
+        } => {
+            out.push(4);
+            encode_scope(scope, &mut out)?;
+            encode_finality_statement(statement, &mut out);
+            encode_finality_vote(vote, &mut out);
+        }
+        BftNetworkMessage::FinalityCertificate { scope, certificate } => {
+            out.push(5);
+            encode_scope(scope, &mut out)?;
+            encode_finality_certificate(certificate, &mut out)?;
         }
     }
 
@@ -77,6 +112,15 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
             vote: decode_vote(&mut cursor)?,
         },
         3 => BftNetworkMessage::QuorumCertificate(decode_qc(&mut cursor)?),
+        4 => BftNetworkMessage::FinalityVote {
+            scope: decode_scope(&mut cursor)?,
+            statement: decode_finality_statement(&mut cursor)?,
+            vote: decode_finality_vote(&mut cursor)?,
+        },
+        5 => BftNetworkMessage::FinalityCertificate {
+            scope: decode_scope(&mut cursor)?,
+            certificate: decode_finality_certificate(&mut cursor)?,
+        },
         _ => return Err(NetworkError::InvalidBftMessage),
     };
     if !cursor.finished() {
@@ -174,6 +218,62 @@ fn encode_vote(vote: &BftVote, out: &mut Vec<u8>) {
 
 fn decode_vote(cursor: &mut Cursor<'_>) -> Result<BftVote, NetworkError> {
     Ok(BftVote::from_untrusted_parts(
+        ValidatorId::new(cursor.u64()?),
+        cursor.array::<64>()?,
+    ))
+}
+
+fn encode_finality_statement(statement: &FinalityStatement, out: &mut Vec<u8>) {
+    out.extend_from_slice(&statement.protocol_version().to_be_bytes());
+    out.extend_from_slice(&statement.validator_set_version().to_be_bytes());
+    out.extend_from_slice(&statement.subject_digest());
+}
+
+fn decode_finality_statement(cursor: &mut Cursor<'_>) -> Result<FinalityStatement, NetworkError> {
+    Ok(FinalityStatement::new(
+        cursor.u32()?,
+        cursor.u64()?,
+        cursor.array::<32>()?,
+    ))
+}
+
+fn encode_finality_certificate(
+    certificate: &FinalityCertificate,
+    out: &mut Vec<u8>,
+) -> Result<(), NetworkError> {
+    encode_finality_statement(&certificate.statement(), out);
+    let count =
+        u16::try_from(certificate.votes().len()).map_err(|_| NetworkError::InvalidBftMessage)?;
+    out.extend_from_slice(&count.to_be_bytes());
+    for vote in certificate.votes() {
+        encode_finality_vote(vote, out);
+    }
+    Ok(())
+}
+
+fn decode_finality_certificate(
+    cursor: &mut Cursor<'_>,
+) -> Result<FinalityCertificate, NetworkError> {
+    let statement = decode_finality_statement(cursor)?;
+    let count = usize::from(cursor.u16()?);
+    const ENCODED_FINALITY_VOTE_SIZE: usize = 8 + 64;
+    if count > cursor.remaining() / ENCODED_FINALITY_VOTE_SIZE {
+        return Err(NetworkError::InvalidBftMessage);
+    }
+    let mut votes = Vec::with_capacity(count);
+    for _ in 0..count {
+        votes.push(decode_finality_vote(cursor)?);
+    }
+    Ok(FinalityCertificate::from_untrusted_parts(statement, votes))
+}
+
+fn encode_finality_vote(vote: &ValidatorVote, out: &mut Vec<u8>) {
+    out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
+    out.extend_from_slice(&vote.signature_bytes());
+}
+
+fn decode_finality_vote(cursor: &mut Cursor<'_>) -> Result<ValidatorVote, NetworkError> {
+    Ok(ValidatorVote::from_untrusted_parts(
         ValidatorId::new(cursor.u64()?),
         cursor.array::<64>()?,
     ))

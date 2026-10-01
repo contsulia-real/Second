@@ -3,9 +3,34 @@ use crate::{
     PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorSet,
 };
 
-use super::quic::QuicPeer;
+use super::quic::{QuicPeer, QuicRequestStream};
 
 const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) struct PublicNetworkServices<'a> {
+    peer_store: &'a PeerStore,
+    local_node_id: NodeId,
+    local_peer_record: Option<&'a PeerRecord>,
+    state_recovery_provider: &'a StateRecoveryProviderHandle,
+}
+
+impl<'a> PublicNetworkServices<'a> {
+    pub(crate) const fn new(
+        peer_store: &'a PeerStore,
+        local_node_id: NodeId,
+        local_peer_record: Option<&'a PeerRecord>,
+        state_recovery_provider: &'a StateRecoveryProviderHandle,
+    ) -> Self {
+        Self {
+            peer_store,
+            local_node_id,
+            local_peer_record,
+            state_recovery_provider,
+        }
+    }
+}
+
 use super::{
     MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord, PeerStore,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
@@ -224,26 +249,31 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
-    serve_public_connection(peer, state, checkpoint_proof, None, None, None, None).await
+    serve_public_connection(peer, state, checkpoint_proof, None, None).await
 }
 
 pub(crate) async fn serve_public_network_connection(
     peer: &QuicPeer,
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    peer_store: &PeerStore,
-    local_node_id: NodeId,
-    local_peer_record: Option<&PeerRecord>,
-    state_recovery_provider: &StateRecoveryProviderHandle,
+    services: PublicNetworkServices<'_>,
+) -> Result<NodeId, NetworkError> {
+    serve_public_connection(peer, state, checkpoint_proof, Some(services), None).await
+}
+
+pub(crate) async fn serve_public_network_connection_from_request(
+    peer: &QuicPeer,
+    state: &SecondState,
+    checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    services: PublicNetworkServices<'_>,
+    first_request: QuicRequestStream,
 ) -> Result<NodeId, NetworkError> {
     serve_public_connection(
         peer,
         state,
         checkpoint_proof,
-        Some(peer_store),
-        Some(local_node_id),
-        local_peer_record,
-        Some(state_recovery_provider),
+        Some(services),
+        Some(first_request),
     )
     .await
 }
@@ -252,10 +282,8 @@ async fn serve_public_connection(
     peer: &QuicPeer,
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
-    peer_store: Option<&PeerStore>,
-    local_node_id: Option<NodeId>,
-    local_peer_record: Option<&PeerRecord>,
-    state_recovery_provider: Option<&StateRecoveryProviderHandle>,
+    services: Option<PublicNetworkServices<'_>>,
+    mut first_request: Option<QuicRequestStream>,
 ) -> Result<NodeId, NetworkError> {
     if checkpoint_proof
         .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
@@ -264,12 +292,19 @@ async fn serve_public_connection(
     }
 
     loop {
-        let Some(request) = peer.accept_request().await? else {
-            return Ok(peer.remote_node_id());
+        let request = match first_request.take() {
+            Some(request) => request,
+            None => {
+                let Some(request) = peer.accept_request().await? else {
+                    return Ok(peer.remote_node_id());
+                };
+                request
+            }
         };
 
-        let recovery_response = state_recovery_provider
-            .and_then(|provider| state_recovery_response(peer, request.message(), provider));
+        let recovery_response = services.as_ref().and_then(|services| {
+            state_recovery_response(peer, request.message(), services.state_recovery_provider)
+        });
         let response = match recovery_response {
             Some(response) => response?,
             None => match request.message() {
@@ -286,16 +321,18 @@ async fn serve_public_connection(
                     .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
                 NetworkMessage::GetPeers { limit } => {
                     validate_peer_limit(*limit)?;
-                    let store = peer_store.ok_or(NetworkError::UnexpectedMessage)?;
-                    let local_node_id = local_node_id.ok_or(NetworkError::UnexpectedMessage)?;
+                    let services = services.as_ref().ok_or(NetworkError::UnexpectedMessage)?;
                     let mut records = Vec::with_capacity(usize::from(*limit));
-                    if let Some(record) = local_peer_record {
+                    if let Some(record) = services.local_peer_record {
                         records.push(record.clone());
                     }
                     let remaining = limit.saturating_sub(records.len() as u16);
                     if remaining > 0 {
                         records.extend(
-                            store.recent(remaining, &[local_node_id, peer.remote_node_id()]),
+                            services.peer_store.recent(
+                                remaining,
+                                &[services.local_node_id, peer.remote_node_id()],
+                            ),
                         );
                     }
                     NetworkMessage::Peers { records }

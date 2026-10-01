@@ -18,6 +18,7 @@ use crate::{
     StateRecoveryPayload, ValidatorId,
 };
 
+pub(crate) use bft::serve_validator_bft_connection_from_request;
 pub use bft::{ValidatorBftPeer, authenticate_validator_bft_peer, serve_validator_bft_connection};
 pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
@@ -26,20 +27,22 @@ pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistr
 pub(crate) use peer_record::validate_peer_limit;
 pub use peer_record::{MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, PeerRecord};
 pub(crate) use peer_store::PeerStore;
+pub(crate) use quic::{MAX_CONCURRENT_ONE_WAY_STREAMS, outbound_bind_address};
 pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
 pub use recovery::{MAX_STATE_RECOVERY_CHUNK_SIZE, client_fetch_state_recovery};
 pub(crate) use recovery::{
     StateRecoveryProvider, StateRecoveryProviderHandle, new_state_recovery_provider_handle,
     state_recovery_response, validate_chunk_limit,
 };
+pub(crate) use session::{
+    PublicNetworkServices, client_sync_certified_public_currency_view_from_checkpoint,
+    serve_public_network_connection, serve_public_network_connection_from_request,
+};
 pub use session::{
     client_peer_records, client_ping, client_public_currency_checkpoint_proof,
     client_public_currency_page, client_public_currency_summary,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     serve_ping_session, serve_public_currency_connection,
-};
-pub(crate) use session::{
-    client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
 };
 
 pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 1;
@@ -169,11 +172,13 @@ pub enum NetworkMessage {
         validator_id: ValidatorId,
         signature: [u8; 64],
     },
-    BftAuthenticated,
+    BftAuthenticated {
+        validator_id: ValidatorId,
+        signature: [u8; 64],
+    },
     BftMessage {
         bytes: Vec<u8>,
     },
-    BftAccepted,
     BftDenied,
 }
 
@@ -267,6 +272,7 @@ pub enum NetworkError {
     BftUnauthorized,
     InvalidBftMessage,
     Bft(BftError),
+    ConsensusFinality(FinalityError),
     UnexpectedMessage,
     NonceMismatch {
         expected: u64,

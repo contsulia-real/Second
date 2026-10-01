@@ -1,12 +1,12 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-const MAX_ACTIVE_CONNECTIONS: usize = 128;
+pub(crate) const MAX_ACTIVE_CONNECTIONS: usize = 128;
 pub const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
 const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -15,16 +15,19 @@ const PEER_CHECKPOINT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::network::{
-    MAX_PEER_RECORDS, NetworkError, NodeId, PeerDirection, PeerLease, PeerManager, PeerRecord,
-    PeerRegistrationError, PeerStore, QuicClient, QuicPeer, QuicServer, QuicTransportIdentity,
-    StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
-    client_public_currency_checkpoint_proof,
+    MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
+    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
+    QuicRequestStream, QuicServer, QuicTransportIdentity, StateRecoveryProvider,
+    StateRecoveryProviderHandle, client_peer_records, client_public_currency_checkpoint_proof,
     client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
-    serve_public_network_connection,
+    outbound_bind_address, serve_public_network_connection,
+    serve_public_network_connection_from_request,
 };
+use crate::runtime_bft::{ValidatorBftRuntime, ValidatorBftRuntimeError};
 use crate::{
-    CertifiedStateRecoveryCheckpoint, PersistenceError, PublicCurrencyCheckpointProof,
-    RemoteCertifiedPublicCurrencyView, SecondState, StateStore, ValidatorRegistry, ValidatorSet,
+    BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint, PersistenceError,
+    PublicCurrencyCheckpointProof, RemoteCertifiedPublicCurrencyView, SecondState, StateStore,
+    ValidatorRegistry, ValidatorSet,
 };
 
 #[derive(Debug)]
@@ -37,6 +40,10 @@ pub enum NodeRuntimeError {
     DuplicatePeer(NodeId),
     NoActivePeers,
     NoCertifiedPublicPeer,
+    ValidatorBftNotConfigured,
+    ValidatorBft(ValidatorBftRuntimeError),
+    BftDriver(BftDriverError),
+    BftConsensus(BftConsensusRuntimeError),
 }
 
 impl From<PersistenceError> for NodeRuntimeError {
@@ -48,6 +55,24 @@ impl From<PersistenceError> for NodeRuntimeError {
 impl From<NetworkError> for NodeRuntimeError {
     fn from(error: NetworkError) -> Self {
         Self::Network(error)
+    }
+}
+
+impl From<ValidatorBftRuntimeError> for NodeRuntimeError {
+    fn from(error: ValidatorBftRuntimeError) -> Self {
+        Self::ValidatorBft(error)
+    }
+}
+
+impl From<BftDriverError> for NodeRuntimeError {
+    fn from(error: BftDriverError) -> Self {
+        Self::BftDriver(error)
+    }
+}
+
+impl From<BftConsensusRuntimeError> for NodeRuntimeError {
+    fn from(error: BftConsensusRuntimeError) -> Self {
+        Self::BftConsensus(error)
     }
 }
 
@@ -63,18 +88,19 @@ struct PublicNetworkContext {
 
 pub struct NodeRuntime {
     server: QuicServer,
-    transport_identity: QuicTransportIdentity,
-    store: StateStore,
+    pub(crate) transport_identity: QuicTransportIdentity,
+    pub(crate) store: StateStore,
     state: Arc<SecondState>,
-    validator_set: ValidatorSet,
+    pub(crate) validator_set: ValidatorSet,
     validator_registry: ValidatorRegistry,
     checkpoint_floor_epoch: u64,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
-    peer_store: PeerStore,
+    pub(crate) peer_store: PeerStore,
     local_peer_record: Option<PeerRecord>,
     state_recovery_provider: StateRecoveryProviderHandle,
-    active_connections: Arc<AtomicUsize>,
+    pub(crate) validator_bft: Option<ValidatorBftRuntime>,
+    pub(crate) active_connections: Arc<AtomicUsize>,
 }
 
 impl NodeRuntime {
@@ -115,6 +141,7 @@ impl NodeRuntime {
             peer_store,
             local_peer_record,
             state_recovery_provider: new_state_recovery_provider_handle(),
+            validator_bft: None,
             active_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -334,6 +361,7 @@ impl NodeRuntime {
             peer_lease,
             permit,
             Some(client),
+            None,
         ));
 
         Ok(active_peer)
@@ -343,6 +371,7 @@ impl NodeRuntime {
         tokio::select! {
             result = self.run_listener() => result,
             result = self.maintain_peers(bootstrap_records) => result,
+            result = self.run_validator_bft_consensus() => result,
         }
     }
 
@@ -356,10 +385,28 @@ impl NodeRuntime {
 
             let context = self.public_network_context();
             let peer_manager = self.peer_manager.clone();
+            let validator_bft = self.validator_bft.clone();
             tokio::spawn(async move {
                 let Ok(peer) = incoming.handshake().await else {
                     return;
                 };
+                let Ok(Some(first_request)) = peer.accept_request().await else {
+                    return;
+                };
+
+                if matches!(
+                    first_request.message(),
+                    NetworkMessage::BftAuthenticate { .. }
+                ) {
+                    if let Some(runtime) = validator_bft {
+                        if runtime.serve_inbound(&peer, first_request).await.is_err() {
+                            peer.close_with_reason(b"validator BFT session failed");
+                        }
+                    } else {
+                        let _ = first_request.respond(&NetworkMessage::BftDenied).await;
+                    }
+                    return;
+                }
 
                 let peer_lease = match peer_manager.register(&peer, PeerDirection::Inbound) {
                     Ok(lease) => lease,
@@ -373,7 +420,8 @@ impl NodeRuntime {
                     }
                 };
 
-                serve_managed_peer(peer, context, peer_lease, permit, None).await;
+                serve_managed_peer(peer, context, peer_lease, permit, None, Some(first_request))
+                    .await;
             });
         }
     }
@@ -406,6 +454,7 @@ impl NodeRuntime {
                 }
             }
 
+            self.maintain_validator_bft_peers(bootstrap_records).await;
             tokio::time::sleep(PEER_MAINTENANCE_INTERVAL).await;
         }
     }
@@ -417,6 +466,7 @@ async fn serve_managed_peer(
     peer_lease: PeerLease,
     permit: ActiveConnectionPermit,
     outbound_client: Option<QuicClient>,
+    first_request: Option<QuicRequestStream>,
 ) {
     let _peer_lease = peer_lease;
     let _permit = permit;
@@ -435,32 +485,42 @@ async fn serve_managed_peer(
         }
     });
 
-    let _ = serve_public_network_connection(
-        &peer,
-        &context.state,
-        context.public_checkpoint_proof.as_deref(),
+    let services = PublicNetworkServices::new(
         &context.peer_store,
         context.local_node_id,
         context.local_peer_record.as_ref(),
         &context.state_recovery_provider,
-    )
-    .await;
-}
-
-fn outbound_bind_address(remote: SocketAddr) -> SocketAddr {
-    let ip = match remote {
-        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    );
+    let result = match first_request {
+        Some(first_request) => {
+            serve_public_network_connection_from_request(
+                &peer,
+                &context.state,
+                context.public_checkpoint_proof.as_deref(),
+                services,
+                first_request,
+            )
+            .await
+        }
+        None => {
+            serve_public_network_connection(
+                &peer,
+                &context.state,
+                context.public_checkpoint_proof.as_deref(),
+                services,
+            )
+            .await
+        }
     };
-    SocketAddr::new(ip, 0)
+    let _ = result;
 }
 
-struct ActiveConnectionPermit {
+pub(crate) struct ActiveConnectionPermit {
     active_connections: Arc<AtomicUsize>,
 }
 
 impl ActiveConnectionPermit {
-    fn try_acquire(active_connections: &Arc<AtomicUsize>) -> Option<Self> {
+    pub(crate) fn try_acquire(active_connections: &Arc<AtomicUsize>) -> Option<Self> {
         active_connections
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAX_ACTIVE_CONNECTIONS).then_some(active + 1)
