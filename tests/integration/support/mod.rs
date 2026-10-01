@@ -16,8 +16,9 @@ use second::{
     ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask, LegalTaskPayload,
     NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError, PreparationOutcome,
     PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore,
-    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
-    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
+    TaskId, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
+    ValidatorSet, ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
+    VerifiedValidatorAdmission,
 };
 
 pub fn key(byte: u8) -> SigningKey {
@@ -113,12 +114,50 @@ pub fn validator_set(version: u64, ids: impl IntoIterator<Item = u64>) -> Valida
     ValidatorSet::new(version, ids.into_iter().map(validator_credential)).unwrap()
 }
 
-pub fn certify_and_activate_validator_transition(
+pub fn verified_validator_admission(id: u64) -> VerifiedValidatorAdmission {
+    ValidatorAdmissionRequest::sign(
+        CURRENT_PROTOCOL_VERSION,
+        validator_credential(id),
+        &key((id * 3) as u8),
+        &key((id * 3 + 1) as u8),
+        &key((id * 3 + 2) as u8),
+    )
+    .unwrap()
+    .verify()
+    .unwrap()
+}
+
+pub fn certified_add_validator_transition(
     current: &ValidatorSet,
-    registry: &mut ValidatorRegistry,
+    next_version: u64,
+    existing_ids: impl IntoIterator<Item = u64>,
+    new_validator_id: u64,
+    signer_ids: impl IntoIterator<Item = u64>,
+) -> CertifiedValidatorSetTransition {
+    let registry = ValidatorRegistry::from_validator_set(current).unwrap();
+    let mut credentials = existing_ids
+        .into_iter()
+        .map(validator_credential)
+        .collect::<Vec<_>>();
+    credentials.push(validator_credential(new_validator_id));
+    let next = ValidatorSet::new(next_version, credentials).unwrap();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        current,
+        &registry,
+        next,
+        vec![verified_validator_admission(new_validator_id)],
+        Vec::new(),
+    )
+    .unwrap();
+    certify_validator_transition(current, transition, signer_ids)
+}
+
+pub fn certify_validator_transition(
+    current: &ValidatorSet,
     transition: ValidatorSetTransition,
     signer_ids: impl IntoIterator<Item = u64>,
-) -> ValidatorSet {
+) -> CertifiedValidatorSetTransition {
     let statement = transition.finality_statement();
     let votes = signer_ids
         .into_iter()
@@ -132,8 +171,16 @@ pub fn certify_and_activate_validator_transition(
         })
         .collect();
 
-    CertifiedValidatorSetTransition::new(transition, votes, current)
-        .unwrap()
+    CertifiedValidatorSetTransition::new(transition, votes, current).unwrap()
+}
+
+pub fn certify_and_activate_validator_transition(
+    current: &ValidatorSet,
+    registry: &mut ValidatorRegistry,
+    transition: ValidatorSetTransition,
+    signer_ids: impl IntoIterator<Item = u64>,
+) -> ValidatorSet {
+    certify_validator_transition(current, transition, signer_ids)
         .activate(registry)
         .unwrap()
 }

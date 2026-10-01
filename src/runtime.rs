@@ -27,7 +27,6 @@ use crate::runtime_bft::{ValidatorBftRuntime, ValidatorBftRuntimeError};
 use crate::{
     BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint, PersistenceError,
     PublicCurrencyCheckpointProof, RemoteCertifiedPublicCurrencyView, SecondState, StateStore,
-    ValidatorRegistry, ValidatorSet,
 };
 
 #[derive(Debug)]
@@ -91,9 +90,6 @@ pub struct NodeRuntime {
     pub(crate) transport_identity: QuicTransportIdentity,
     pub(crate) store: StateStore,
     state: Arc<SecondState>,
-    pub(crate) validator_set: ValidatorSet,
-    validator_registry: ValidatorRegistry,
-    checkpoint_floor_epoch: u64,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
     pub(crate) peer_store: PeerStore,
@@ -124,18 +120,11 @@ impl NodeRuntime {
         };
         let peer_manager = PeerManager::new(transport_identity.node_id());
         let peer_store = PeerStore::load(peer_store_path(store))?;
-        let validator_set = persisted.validator_set.clone();
-        let validator_registry = persisted.validator_registry.clone();
-        let checkpoint_floor_epoch = persisted.checkpoint_floor_epoch;
-
         Ok(Self {
             server,
             transport_identity,
             store: store.clone(),
             state: Arc::new(persisted.state),
-            validator_set,
-            validator_registry,
-            checkpoint_floor_epoch,
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
             peer_manager,
             peer_store,
@@ -169,6 +158,13 @@ impl NodeRuntime {
     pub async fn sync_freshest_certified_public_currency_view(
         &self,
     ) -> Result<RemoteCertifiedPublicCurrencyView, NodeRuntimeError> {
+        let persisted = self
+            .store
+            .load()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
+        let validator_set = persisted.validator_set;
+        let checkpoint_floor_epoch = persisted.checkpoint_floor_epoch;
+
         let peers = self.peer_manager.peers();
         if peers.is_empty() {
             return Err(NodeRuntimeError::NoActivePeers);
@@ -186,11 +182,11 @@ impl NodeRuntime {
             };
 
             let epoch = proof.checkpoint().epoch();
-            if epoch < self.checkpoint_floor_epoch {
+            if epoch < checkpoint_floor_epoch {
                 continue;
             }
 
-            let Ok(checkpoint) = proof.verify_checkpoint(&self.validator_set) else {
+            let Ok(checkpoint) = proof.verify_checkpoint(&validator_set) else {
                 continue;
             };
             candidates.push((epoch, peer.remote_node_id(), peer, checkpoint));
@@ -202,7 +198,7 @@ impl NodeRuntime {
             let sync = client_sync_certified_public_currency_view_from_checkpoint(
                 &peer,
                 checkpoint,
-                &self.validator_set,
+                &validator_set,
             );
             if let Ok(Ok(synced)) = tokio::time::timeout(PEER_PUBLIC_SYNC_TIMEOUT, sync).await {
                 return Ok(synced);
@@ -235,10 +231,14 @@ impl NodeRuntime {
         &self,
         checkpoint: CertifiedStateRecoveryCheckpoint,
     ) -> Result<(), NodeRuntimeError> {
+        let persisted = self
+            .store
+            .load()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
         let provider = Arc::new(StateRecoveryProvider::new(
-            &self.state,
-            &self.validator_set,
-            &self.validator_registry,
+            &persisted.state,
+            &persisted.validator_set,
+            &persisted.validator_registry,
             &checkpoint,
         )?);
         self.store.advance_recovery_checkpoint_floor(&checkpoint)?;

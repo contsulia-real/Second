@@ -9,7 +9,7 @@ use second::{
 };
 use support::{
     certificate_from_keys, key, signed_vote, temp_base, validator_credential as credential,
-    verified_task,
+    verified_task, verified_validator_admission as admission,
 };
 
 fn current_set() -> ValidatorSet {
@@ -18,19 +18,6 @@ fn current_set() -> ValidatorSet {
 
 fn registry(current: &ValidatorSet) -> ValidatorRegistry {
     ValidatorRegistry::from_validator_set(current).unwrap()
-}
-
-fn admission(id: u64) -> second::VerifiedValidatorAdmission {
-    second::ValidatorAdmissionRequest::sign(
-        CURRENT_PROTOCOL_VERSION,
-        credential(id),
-        &key((id * 3) as u8),
-        &key((id * 3 + 1) as u8),
-        &key((id * 3 + 2) as u8),
-    )
-    .unwrap()
-    .verify()
-    .unwrap()
 }
 
 #[test]

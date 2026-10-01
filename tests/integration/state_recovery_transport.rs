@@ -14,8 +14,7 @@ fn certified_checkpoint(store: &StateStore, serial: u64) -> CertifiedStateRecove
     let checkpoint = StateRecoveryCheckpoint::from_persisted(serial, &persisted).unwrap();
     let statement = checkpoint.finality_statement();
     let validators = persisted.validator_set.clone();
-    let votes = [1_u64, 2, 3]
-        .into_iter()
+    let votes = (1..=validators.quorum_threshold() as u64)
         .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
         .collect();
     CertifiedStateRecoveryCheckpoint::new(checkpoint, votes, &validators).unwrap()
@@ -210,5 +209,60 @@ async fn runtime_persists_recovery_floor_and_refuses_stale_certified_publication
     restarted.publish_state_recovery_checkpoint(next).unwrap();
 
     drop(restarted);
+    support::cleanup_node_runtime(store, base);
+}
+
+#[tokio::test]
+async fn runtime_recovery_publish_uses_durable_membership_after_online_transition() {
+    let initial = validator_set(7, 1..=4);
+    let next = validator_set(8, 1..=5);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    let base = support::temp_base("state-recovery-online-transition");
+    let store = StateStore::new(&base);
+    store.initialize(&state, &initial).unwrap();
+
+    let runtime = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
+    );
+
+    let certified_transition =
+        support::certified_add_validator_transition(&initial, 8, 1..=4, 5, 1..=3);
+    store
+        .activate_validator_set_transition(&certified_transition)
+        .unwrap();
+    assert_eq!(store.load().unwrap().unwrap().validator_set, next);
+
+    let checkpoint = certified_checkpoint(&store, 50);
+    runtime
+        .publish_state_recovery_checkpoint(checkpoint.clone())
+        .unwrap();
+    let runtime_task = support::spawn_node_runtime(&runtime);
+
+    let client = QuicClient::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        runtime.transport_certificate_der(),
+        QuicTransportIdentity::generate().unwrap(),
+    )
+    .unwrap();
+    let peer = client.connect(runtime.local_addr().unwrap()).await.unwrap();
+
+    let recovered = client_fetch_state_recovery(&peer, ValidatorId::new(5), &key(15), &next)
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.payload.validator_set(), &next);
+    assert_eq!(
+        recovered.payload.validator_registry(),
+        &store.load().unwrap().unwrap().validator_registry
+    );
+    assert_eq!(
+        StateRecoveryCheckpoint::from_payload(50, &recovered.payload).unwrap(),
+        *checkpoint.checkpoint()
+    );
+
+    peer.close();
+    runtime_task.abort();
+    let _ = runtime_task.await;
+    drop(runtime);
     support::cleanup_node_runtime(store, base);
 }

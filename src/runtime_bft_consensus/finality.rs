@@ -55,7 +55,6 @@ pub(super) fn ingest_finality_certificate(
     scope: ConsensusScope,
     certificate: FinalityCertificate,
     output: &mut BftConsensusOutput,
-    now: Instant,
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     let expected_statement = session.target.finality_statement(&session.validator_set);
     if scope != *session.subject.scope() || certificate.statement() != expected_statement {
@@ -64,6 +63,9 @@ pub(super) fn ingest_finality_certificate(
     certificate
         .verify(&session.validator_set)
         .map_err(BftConsensusRuntimeError::Finality)?;
+    if session.certified_emitted {
+        return Ok(None);
+    }
 
     for vote in certificate.votes() {
         session
@@ -76,13 +78,10 @@ pub(super) fn ingest_finality_certificate(
     session.target.persist_certified(&session.store)?;
 
     session.finality_certificate = Some(certificate.clone());
-    schedule_finality_relay(session, now);
     relay_finality_certificate(session, certificate, output);
-
-    if session.certified_emitted {
-        return Ok(None);
-    }
     session.certified_emitted = true;
+    session.finished = true;
+    session.deadline = None;
     Ok(Some(certified_event(certified)))
 }
 
@@ -106,6 +105,8 @@ pub(super) fn certify_if_ready(
     session.finality_certificate = Some(certificate.clone());
     session.certified_emitted = true;
     relay_finality_certificate(session, certificate, output);
+    session.finished = true;
+    session.deadline = None;
     Ok(Some(certified_event(certified)))
 }
 

@@ -14,8 +14,7 @@ fn valid_votes(
     validators: &ValidatorSet,
 ) -> Vec<ValidatorVote> {
     let statement = checkpoint.finality_statement(validators.version());
-    [1_u64, 2, 3]
-        .into_iter()
+    (1..=validators.quorum_threshold() as u64)
         .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
         .collect()
 }
@@ -169,4 +168,53 @@ async fn runtime_sync_selects_highest_valid_certified_public_checkpoint_without_
     support::cleanup_node_runtime(stale_store, stale_base);
     support::cleanup_node_runtime(malicious_store, malicious_base);
     support::cleanup_node_runtime(fresh_store, fresh_base);
+}
+
+#[tokio::test]
+async fn runtime_public_sync_uses_durable_validator_set_after_online_transition() {
+    let initial = validator_set(1, 1..=4);
+    let next = validator_set(2, 1..=5);
+    let local_state = SecondState::genesis([], 100).with_reserve(1).unwrap();
+    let local_base = support::temp_base("runtime-public-sync-online-transition-local");
+    let local_store = StateStore::new(&local_base);
+    local_store.initialize(&local_state, &initial).unwrap();
+    let local = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &local_store)
+            .unwrap(),
+    );
+
+    let certified_transition =
+        support::certified_add_validator_transition(&initial, 2, 1..=4, 5, 1..=3);
+    local_store
+        .activate_validator_set_transition(&certified_transition)
+        .unwrap();
+    assert_eq!(local_store.load().unwrap().unwrap().validator_set, next);
+
+    let remote_state = SecondState::genesis([], 200).with_reserve(4).unwrap();
+    let remote_proof = valid_proof(&remote_state, &next, 7);
+    let (remote, remote_store, remote_base) = runtime_with_proof(
+        "runtime-public-sync-online-transition-remote",
+        &remote_state,
+        &next,
+        &remote_proof,
+    );
+    let remote_task = support::spawn_node_runtime(&remote);
+
+    let peer = local.dial(&support::peer_record(&remote)).await.unwrap();
+    let synced = local
+        .sync_freshest_certified_public_currency_view()
+        .await
+        .unwrap();
+
+    assert_eq!(synced.remote_node_id, remote.node_id());
+    assert_eq!(synced.checkpoint.checkpoint().epoch(), 7);
+    assert_eq!(synced.view.summary, remote_state.public_currency_summary());
+
+    peer.close();
+    remote_task.abort();
+    let _ = remote_task.await;
+    drop(local);
+    drop(remote);
+    support::cleanup_node_runtime(local_store, local_base);
+    support::cleanup_node_runtime(remote_store, remote_base);
 }

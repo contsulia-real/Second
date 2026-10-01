@@ -496,7 +496,7 @@ impl BftConsensusCoordinator {
                 subject: session.subject,
                 certificate,
                 relay_interval: session.timeouts.precommit,
-                next_relay_at: add_duration(now, session.timeouts.precommit),
+                next_relay_at: now,
             });
         }
     }
@@ -731,7 +731,7 @@ fn handle_inbound(
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     let message = match message {
         BftNetworkMessage::FinalityCertificate { scope, certificate } => {
-            return ingest_finality_certificate(session, scope, certificate, output, now);
+            return ingest_finality_certificate(session, scope, certificate, output);
         }
         BftNetworkMessage::FinalityVote {
             scope,
