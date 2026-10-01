@@ -1,4 +1,6 @@
 mod keys;
+#[cfg(test)]
+mod tests;
 
 pub use keys::ValidatorRuntimeKeys;
 
@@ -68,6 +70,7 @@ struct ValidatorBftRuntimeInner {
     inbound: Mutex<VecDeque<InboundBftMessage>>,
     consensus: ValidatorConsensusRuntime,
     rejected_nodes: Mutex<BTreeSet<NodeId>>,
+    authority_refresh: Mutex<()>,
 }
 
 const VALIDATOR_BFT_SEND_QUEUE_CAPACITY: usize = 64;
@@ -222,6 +225,7 @@ impl ValidatorBftRuntime {
                 inbound: Mutex::new(VecDeque::new()),
                 consensus: ValidatorConsensusRuntime::new(),
                 rejected_nodes: Mutex::new(BTreeSet::new()),
+                authority_refresh: Mutex::new(()),
             }),
         })
     }
@@ -263,6 +267,12 @@ impl ValidatorBftRuntime {
     }
 
     pub(crate) fn refresh_authority(&self) -> Result<(), ValidatorBftRuntimeError> {
+        let _refresh_guard = self
+            .inner
+            .authority_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let persisted = self
             .inner
             .store
@@ -287,12 +297,22 @@ impl ValidatorBftRuntime {
         } else {
             BTreeSet::new()
         };
+        let authority_changed = {
+            let current = self
+                .inner
+                .authority
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *current != authority
+        };
 
-        *self
-            .inner
-            .authority
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = authority;
+        if authority_changed {
+            *self
+                .inner
+                .authority
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = authority;
+        }
 
         let mut outbound = self
             .inner
@@ -308,11 +328,13 @@ impl ValidatorBftRuntime {
         });
         drop(outbound);
 
-        self.inner
-            .rejected_nodes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        if authority_changed {
+            self.inner
+                .rejected_nodes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
         Ok(())
     }
 

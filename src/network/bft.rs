@@ -19,7 +19,7 @@ enum BftAuthRole {
 
 pub(crate) type SharedValidatorBftAuthority = Arc<RwLock<ValidatorBftAuthority>>;
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ValidatorBftAuthority {
     active_validator_set_version: u64,
     validator_sets: BTreeMap<u64, ValidatorSet>,
