@@ -76,6 +76,7 @@ impl StateStore {
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: true,
+                minimum_signing_validator_set_version: validator_set.version(),
                 validator_registry: &validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -112,6 +113,7 @@ impl StateStore {
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: true,
+                minimum_signing_validator_set_version: validator_set.version(),
                 validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -152,9 +154,118 @@ impl StateStore {
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: false,
+                minimum_signing_validator_set_version: payload.validator_set().version(),
                 validator_registry: payload.validator_registry(),
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
+            },
+        )
+    }
+
+    pub(crate) fn complete_validator_safety_recovery(
+        &self,
+        validator_id: ValidatorId,
+        new_consensus_public_key: [u8; 32],
+        previous_validator_set: &ValidatorSet,
+        certified_transition: &CertifiedValidatorSetTransition,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        if latest.validator_safety_ready {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        certified_transition
+            .certificate()
+            .verify(previous_validator_set)
+            .map_err(|error| {
+                PersistenceError::ValidatorTransition(ValidatorTransitionError::Finality(error))
+            })?;
+
+        let transition = certified_transition.transition();
+        if transition.current_validator_set_version() != previous_validator_set.version()
+            || certified_transition.next_validator_set() != &latest.validator_set
+            || latest.validator_set.version()
+                != previous_validator_set
+                    .version()
+                    .checked_add(1)
+                    .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?
+        {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        if certified_transition
+            .certificate()
+            .votes()
+            .iter()
+            .any(|vote| vote.validator_id() == validator_id)
+        {
+            return Err(
+                PersistenceError::RecoveringValidatorVotedSafetyFenceTransition(validator_id),
+            );
+        }
+
+        latest
+            .validator_registry
+            .validate_current_set(&latest.validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        latest
+            .validator_registry
+            .validate_historical_set(previous_validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+
+        if !latest
+            .recovery_checkpoint_floors
+            .contains_key(&latest.validator_set.version())
+        {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        let previous = previous_validator_set
+            .validator(validator_id)
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        let current = latest
+            .validator_set
+            .validator(validator_id)
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+
+        if previous.identity_public_key() != current.identity_public_key()
+            || previous.recovery_public_key() != current.recovery_public_key()
+            || previous.consensus_public_key() == current.consensus_public_key()
+            || current.consensus_public_key() != new_consensus_public_key
+        {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        let rotation = transition
+            .consensus_key_rotations()
+            .iter()
+            .find(|rotation| rotation.validator_id() == validator_id)
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        rotation.verify(previous).map_err(|error| {
+            PersistenceError::ValidatorTransition(ValidatorTransitionError::Rotation(error))
+        })?;
+        if rotation.new_consensus_public_key() != new_consensus_public_key {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state: &latest.state,
+                validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
+                public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
+                validator_safety_ready: true,
+                minimum_signing_validator_set_version: latest.validator_set.version(),
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
             },
         )
     }
@@ -193,6 +304,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -245,6 +357,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -279,6 +392,7 @@ impl StateStore {
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -313,6 +427,7 @@ impl StateStore {
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -349,6 +464,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -406,6 +522,10 @@ impl StateStore {
                     .as_ref()
                     .map(|snapshot| snapshot.validator_safety_ready)
                     .unwrap_or(true),
+                minimum_signing_validator_set_version: latest
+                    .as_ref()
+                    .map(|snapshot| snapshot.minimum_signing_validator_set_version)
+                    .unwrap_or(validator_set.version()),
                 validator_registry: &registry,
                 prepared_tasks,
                 validator_vote_locks: &vote_locks,
@@ -449,6 +569,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -482,6 +603,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -527,10 +649,16 @@ impl StateStore {
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
 
-        validate_vote_validator_set(&latest, &scope, validator_set)?;
         if !latest.validator_safety_ready {
             return Err(PersistenceError::ValidatorSafetyStateUnavailable);
         }
+        if validator_set.version() < latest.minimum_signing_validator_set_version {
+            return Err(PersistenceError::SigningFenceViolation {
+                minimum_validator_set_version: latest.minimum_signing_validator_set_version,
+                actual_validator_set_version: validator_set.version(),
+            });
+        }
+        validate_vote_validator_set(&latest, &scope, validator_set)?;
 
         match latest
             .validator_vote_locks
@@ -570,6 +698,7 @@ impl StateStore {
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
+                minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,

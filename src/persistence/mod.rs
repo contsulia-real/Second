@@ -29,6 +29,7 @@ pub struct PersistedNodeState {
     pub checkpoint_floor_epoch: u64,
     pub(crate) recovery_checkpoint_floors: BTreeMap<u64, RecoveryCheckpointFloor>,
     pub validator_safety_ready: bool,
+    pub minimum_signing_validator_set_version: u64,
     pub generation: u64,
     pub(crate) prepared_tasks: BTreeMap<TaskId, PreparedTask>,
     pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,

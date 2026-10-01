@@ -30,6 +30,7 @@ mod transaction_request;
 mod validator_admission;
 mod validator_key_rotation;
 mod validator_registry;
+mod validator_safety_recovery;
 mod validator_set;
 mod validator_transition;
 mod validator_vote_lock;

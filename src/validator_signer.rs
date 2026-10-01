@@ -137,6 +137,21 @@ impl ValidatorSigner {
         )
     }
 
+    pub fn complete_safety_recovery(
+        &self,
+        previous_validator_set: &ValidatorSet,
+        certified_transition: &crate::CertifiedValidatorSetTransition,
+    ) -> Result<u64, ValidatorSigningError> {
+        self.store
+            .complete_validator_safety_recovery(
+                self.validator_id,
+                self.signing_key.verifying_key().to_bytes(),
+                previous_validator_set,
+                certified_transition,
+            )
+            .map_err(ValidatorSigningError::from)
+    }
+
     pub fn prepared_task_lock(
         &self,
         task_id: TaskId,

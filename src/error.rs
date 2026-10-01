@@ -109,6 +109,12 @@ pub enum PersistenceError {
         attempted_digest: [u8; 32],
     },
     ValidatorSafetyStateUnavailable,
+    SigningFenceViolation {
+        minimum_validator_set_version: u64,
+        actual_validator_set_version: u64,
+    },
+    InvalidValidatorSafetyRecovery,
+    RecoveringValidatorVotedSafetyFenceTransition(ValidatorId),
     CheckpointValidatorSetMismatch {
         expected: u64,
         actual: u64,

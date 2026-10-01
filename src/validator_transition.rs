@@ -140,6 +140,10 @@ impl CertifiedValidatorSetTransition {
         })
     }
 
+    pub fn transition(&self) -> &ValidatorSetTransition {
+        &self.transition
+    }
+
     pub fn next_validator_set(&self) -> &ValidatorSet {
         self.transition.next_validator_set()
     }

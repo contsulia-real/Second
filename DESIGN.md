@@ -774,7 +774,7 @@ ValidatorSet 有显式 version。
 
 下一版本必须按版本顺序推进，不能跳过或倒退。
 
-Validator transition / admission / rotation 仍然必须经过既有验证逻辑，不能绕过 Registry 的永久历史约束。
+Validator transition / admission / rotation 仍然必须经过既有验证逻辑，不能绕过 Registry 的永久历史约束。若某 Validator 因 local safety state 丢失而进入 fail-closed recovery，它不能给用于建立自己新 signing domain 的那次 ValidatorSetTransition 投票；该 transition 必须由当前 set 中其余 Validator 独立达到正常 quorum。恢复流程不引入 emergency quorum、RecoverySet 或超级密钥。
 
 Validator admission 的治理来源固定为**当前 active ValidatorSet 的 finality**：候选 Validator 的 `ValidatorAdmissionRequest` 只证明候选方同时控制其声明的 identity / consensus / recovery 三把 key，并不自行授予 Validator 权限。新 Validator 只有在其 credential 被纳入 `next_validator_set`，整个 `ValidatorSetTransition` 又由当前 ValidatorSet 达到正常 finality quorum 后，才获得协议授权。
 
@@ -1030,9 +1030,13 @@ privileged recovery 已复用现有 QUIC/TLS connection 与二进制 framing，�
 
 `NodeRuntime::publish_state_recovery_checkpoint` 只显式发布一个与 runtime 当前 shared state 匹配的 certified checkpoint，并把 immutable provider 放在内存中；发布前必须先验证 QC/shared payload 并 durable 推进 recovery freshness floor，失败则不能把 provider 暴露出去。runtime 仍不会因启动节点就自动选择下一个 recovery serial。provider 可以被更新的 certified checkpoint 替换；正在下载旧 digest 的客户端若因此无法继续，应从 manifest 重新开始。
 
-`StateStore::install_recovered_state` 只允许写入**空 store**：先验证 trusted ValidatorSet、QC、payload exact set 与 shared-state digest，再通过现有 dual-slot writer 一次性安装。任何已有 snapshot 都返回 `AlreadyInitialized`，因此 recovery 不能成为任意 state overwrite API。安装结果只包含 recovered shared state；retained sets、PreparedTask lifecycle、vote-lock、attached public checkpoint proof 均为空，public checkpoint floor 当前从 0 开始；recovery freshness floor 则由安装所依据的 certified recovery checkpoint 初始化。最重要的是 snapshot 会持久写入 `validator_safety_ready = false`；正常 genesis/既有节点为 true。所有 `ValidatorSigner` 的 vote-lock 入口都在 store lock 内检查此标记，所以只恢复 shared state 的 Validator **可以读取/继续恢复数据，但不能重新签任何 finality vote**。
+`StateStore::install_recovered_state` 只允许写入**空 store**：先验证 trusted ValidatorSet、QC、payload exact set 与 shared-state digest，再通过现有 dual-slot writer 一次性安装。任何已有 snapshot 都返回 `AlreadyInitialized`，因此 recovery 不能成为任意 state overwrite API。安装结果只包含 recovered shared state；retained sets、PreparedTask lifecycle、vote-lock、attached public checkpoint proof 均为空，public checkpoint floor 当前从 0 开始；recovery freshness floor 则由安装所依据的 certified recovery checkpoint 初始化。snapshot 同时写入 `validator_safety_ready = false` 和 `minimum_signing_validator_set_version = recovered ValidatorSet.version`，所以只恢复 shared state 的 Validator **可以读取/继续恢复数据，但不能重新签任何 finality vote**。
 
-当前故意**没有**提供把 recovered node 的 `validator_safety_ready` 重新置为 true 的公开入口。仅恢复一份旧的本地 snapshot 也不足以证明安全：在该备份之后、磁盘丢失之前可能已经产生新的 recovery/public/transition/PreparedTask vote-lock，而这些签票不一定改变 shared state；PreparedTask local lifecycle 与 retained old-set authority 也可能仍在其他节点继续完成。因此未来 local-safety recovery 必须证明所有本地签票/PreparedTask safety state 的连续性与 freshness，或者建立一个能够使丢失的旧 signing scopes 确定不可再达的协议 fence。不能因为 shared-state digest 相同、恢复了某个旧备份、或单纯轮换 key 就直接解除 fail-closed。
+local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝试重建无法证明完整的旧 vote-lock 历史。恢复中的 Validator 必须先由 identity key 或 recovery key 授权一个从 V 到严格下一版 V+1 的 `ValidatorConsensusKeyRotationRequest`，把自己的 consensus key 旋转到从未使用过的新 key；V→V+1 的 `CertifiedValidatorSetTransition` 必须由其余 Validator 独立达到 quorum，证书中出现恢复中 Validator 自己的票则本地拒绝解锁。随后节点必须安装/持有 V+1 的 certified shared recovery state；本地恢复 signer 还要证明自己持有 V+1 credential 对应的新 consensus private key。只有这些条件同时满足，`ValidatorSigner::complete_safety_recovery` 才会原子把 `validator_safety_ready` 置回 true，并把 durable `minimum_signing_validator_set_version` 固定到 V+1。
+
+之后所有签票入口除了检查 `validator_safety_ready`，还先检查所用 ValidatorSet.version 不得低于该 minimum。正常未丢失 safety state 的节点初始化时 minimum 等于其最初 active set version，后续正常 transition 不抬高它，因此仍可为合法 retained old-set PreparedTask 服务；经过 safety recovery 的节点 minimum 则从新 signing domain V+1 开始，哪怕旧 consensus private key 后来又从备份中被找回，也会因为 signing fence 永久拒绝 V 及更旧 scope。该 fence 与 recovery floor、vote-lock 一样属于本地 safety metadata，不进入 shared recovery digest。
+
+这条流程只解决“consensus signing key 仍可通过 identity/recovery authority 安全轮换”的情况。如果 identity/recovery authority 也丢失或怀疑泄露，则不能用同一个 ValidatorId 解除 fail-closed；应通过正常 ValidatorSet transition 永久退休旧 ValidatorId，再以全新 ValidatorId 和全新三把 key 重新 admission。旧 PreparedTask 若仍绑定 V，只能由仍具备 V local safety continuity 的其他 Validator 继续完成；恢复节点不会重新加入旧 signing domain，liveness 不足时也不能用 recovery 绕过 safety。
 
 ---
 
@@ -1227,7 +1231,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装，以及按 `ValidatorSet.version` 分桶的 durable `(serial, digest)` recovery freshness floor 已具备；仍需冻结 recovery serial 的全网发行/协调规则，以及 Validator 自己的 local safety-state continuity 恢复/重新启用签票流程。`validator_safety_ready = false` 的恢复节点在该流程完成前必须一直 fail-closed；
+- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、durable recovery freshness floor，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；当前仍需冻结 recovery serial 的全网发行/协调规则。若 identity/recovery authority 本身丢失，则走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
