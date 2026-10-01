@@ -8,9 +8,10 @@ use std::process::ExitCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use second::{
-    CurrencyAddress, CurrencyRole, NodeRuntime, NodeRuntimeError, QuicClient,
-    QuicTransportIdentity, StateStore, client_ping, client_public_currency_page,
-    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError,
+    QuicClient, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView, StateStore, client_ping,
+    client_public_currency_page, client_sync_certified_public_currency_view,
+    client_sync_public_currency_view,
 };
 
 #[tokio::main]
@@ -40,6 +41,9 @@ async fn run() -> Result<(), String> {
         {
             sync_public_certified(address, trust_snapshot_base, server_certificate).await
         }
+        [command, snapshot_base] if command == "observe-public-network" => {
+            observe_public_network(snapshot_base).await
+        }
         [command, address, snapshot_base] if command == "node" => {
             node(address, snapshot_base).await
         }
@@ -53,7 +57,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second node <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64>"
+            "usage: second node <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -168,12 +172,43 @@ async fn sync_public_certified(
         .advance_checkpoint_floor(&synced.checkpoint)
         .map_err(|error| format!("failed to persist checkpoint floor: {error:?}"))?;
 
+    print_certified_public_view("CERTIFIED", &synced);
+
+    Ok(())
+}
+
+async fn observe_public_network(snapshot_base: &str) -> Result<(), String> {
+    let bootstrap_records = bootstrap_config::load(snapshot_base)?;
+    let store = StateStore::new(snapshot_base);
+    let runtime = NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store)
+        .map_err(|error| match error {
+            NodeRuntimeError::SnapshotMissing => {
+                format!("no snapshot found at {snapshot_base}")
+            }
+            other => format!("failed to start network observer: {other:?}"),
+        })?;
+
+    runtime
+        .bootstrap(&bootstrap_records, DEFAULT_ACTIVE_PEER_TARGET)
+        .await
+        .map_err(|error| format!("failed to connect known peers: {error:?}"))?;
+
+    let synced = runtime
+        .sync_freshest_certified_public_currency_view()
+        .await
+        .map_err(|error| format!("certified public network observation failed: {error:?}"))?;
+
+    print_certified_public_view("NETWORK-CERTIFIED", &synced);
+    Ok(())
+}
+
+fn print_certified_public_view(label: &str, synced: &RemoteCertifiedPublicCurrencyView) {
     let summary = &synced.view.summary;
     let checkpoint = synced.checkpoint.checkpoint();
     let digest = hex_digest(&summary.state_digest);
 
     println!(
-        "CERTIFIED peer={} epoch={} validator_set={} votes={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
+        "{label} peer={} epoch={} validator_set={} votes={} count={} supply={} reserve={} occupied={} next_currency={} digest={}",
         synced.remote_node_id,
         checkpoint.epoch(),
         synced
@@ -189,8 +224,6 @@ async fn sync_public_certified(
         summary.next_currency_address,
         digest,
     );
-
-    Ok(())
 }
 
 async fn query_public(

@@ -866,7 +866,7 @@ NodeId 的认证权威是 Hello peer-auth Ed25519 key：Hello signature 的签�
 
 长期 server 当前用同一 transport Ed25519 key 生成 self-signed TLS certificate 和 Hello proof，使 certificate pin 与 NodeId 都能随同一持久 identity 稳定重建；但协议不把这描述成 mTLS。`QuicClient` 不向 server 提交 TLS client certificate，server 对 client NodeId 的认证来自 channel-bound Hello proof。对 server，显式 certificate pin 认证 TLS endpoint，Hello proof 再认证该会话上的 NodeId；当前接收端不额外解析 certificate SPKI 去重复证明“certificate key == Hello key”。
 
-当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。首次创建使用邻接 lock 文件串行化，并先把完整 identity 写入并 `sync_all` 到 `.transport.new`，再原子 rename 发布为 `.transport`；因此崩溃留下的 `.new` 不是 identity authority，下次启动可安全覆盖，只有最终 `.transport` 才是已发布身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。当前 CLI 客户端仍显式 pin server certificate；一次性 CLI client 使用临时 transport identity。
+当前长期节点入口为 `second node <listen-address> <snapshot-base>`。长期节点的 transport private key 保存在独立的 `<snapshot-base>.transport` 本地 sidecar 中，不写入 Second state snapshot：首次不存在时创建，之后重启必须复用；已有 identity 文件损坏或无法解析时启动失败，不静默生成新身份。首次创建使用邻接 lock 文件串行化，并先把完整 identity 写入并 `sync_all` 到 `.transport.new`，再原子 rename 发布为 `.transport`；因此崩溃留下的 `.new` 不是 identity authority，下次启动可安全覆盖，只有最终 `.transport` 才是已发布身份。该文件包含私钥，Unix 创建权限为 `0600`。由同一 key 重建的 certificate 和 NodeId 在重启后保持稳定。显式地址的一次性 CLI（如 `ping` / `sync-public-certified`）仍由调用方 pin server certificate 并使用临时 transport identity；`observe-public-network` 则复用该 snapshot-base 对应的持久 transport identity、PeerStore 和静态 bootstrap records。
 
 transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应的 transport private key”，不自动授予 Validator 权限、网络信任或 admission。Validator 权限仍只来自有效 ValidatorCredential；trust/discovery/admission 仍需要独立规则。
 
@@ -888,7 +888,7 @@ runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护
 
 `NodeRuntime::sync_freshest_certified_public_currency_view()` 把这些长期连接用于实际 public-state 观察：先向所有当前 active peer 请求 checkpoint proof，对低于本地 `checkpoint_floor_epoch` 的 proof 直接丢弃，并使用本地 snapshot 中的当前 `ValidatorSet` 在下载完整 public state 之前验证 checkpoint finality；只有 finality 有效的候选才按 checkpoint epoch 从高到低进入下载阶段。伪造一个更大的 epoch 不会获得选择优先权，因为未通过 Validator quorum 的 proof 不进入候选。checkpoint probe 每个 peer 最多等待 5 秒，完整 public sync 每个候选最多等待 30 秒，失败后继续下一个有效候选，避免一个不响应的 peer 独占整个选择流程。
 
-该 runtime sync 的结果是 `RemoteCertifiedPublicCurrencyView`，明确属于经过验证的网络观察结果，而不是本地业务状态写入。它不会用 public view 覆盖本地 `SecondState`，也不会自动推进持久 `checkpoint_floor_epoch`：public view 不包含 owner、PaymentAddress、claims、prepared task 等 private/protocol state，不能成为完整 Second state 的替代品。是否把某个远端观察结果提升为本地持久状态属于另一条尚未定义的同步/恢复协议，不能由 public read path 猜测完成。
+该 runtime sync 的结果是 `RemoteCertifiedPublicCurrencyView`，明确属于经过验证的网络观察结果，而不是本地业务状态写入。它不会用 public view 覆盖本地 `SecondState`，也不会自动推进持久 `checkpoint_floor_epoch`：public view 不包含 owner、PaymentAddress、claims、prepared task 等 private/protocol state，不能成为完整 Second state 的替代品。CLI `second observe-public-network <snapshot-base>` 是这条语义的真实入口：先加载同一 snapshot-base 的 PeerStore + 可选 bootstrap sidecar，按 runtime 默认 active-peer target 建立 authenticated connections，然后输出选出的最高有效 certified public view；命令退出后 snapshot 的 private state、checkpoint floor 和 attached proof 保持不变。是否把某个远端观察结果提升为本地持久状态属于另一条尚未定义的同步/恢复协议，不能由 public read path 猜测完成。
 
 当前节点网络面暴露 Ping/Pong、public Currency 查询/同步以及有界 `GetPeers/Peers` reachability discovery；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 

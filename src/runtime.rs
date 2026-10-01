@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
-const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
+pub const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
 const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const PEER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);

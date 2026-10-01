@@ -55,7 +55,7 @@ pub use public_checkpoint::{
     PublicCurrencyCheckpointProof,
 };
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
-pub use runtime::{NodeRuntime, NodeRuntimeError};
+pub use runtime::{DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError};
 pub use state::{ExecutionOutcome, SecondState};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
