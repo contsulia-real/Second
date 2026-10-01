@@ -73,6 +73,7 @@ pub(super) fn ingest_finality_certificate(
     let certified = session
         .target
         .certify(certificate.votes().to_vec(), &session.validator_set)?;
+    session.target.persist_certified(&session.store)?;
 
     session.finality_certificate = Some(certificate.clone());
     schedule_finality_relay(session, now);
@@ -100,6 +101,7 @@ pub(super) fn certify_if_ready(
     let certificate = FinalityCertificate::new(statement, votes.clone(), &session.validator_set)
         .map_err(BftConsensusRuntimeError::Finality)?;
     let certified = session.target.certify(votes, &session.validator_set)?;
+    session.target.persist_certified(&session.store)?;
 
     session.finality_certificate = Some(certificate.clone());
     session.certified_emitted = true;
@@ -154,6 +156,13 @@ pub(super) fn relay_finality_certificate(
 
 pub(super) fn certified_event(certified: CertifiedConsensusTarget) -> BftConsensusEvent {
     match certified {
+        CertifiedConsensusTarget::PreparedTask {
+            task_id,
+            certificate,
+        } => BftConsensusEvent::CertifiedPreparedTask {
+            task_id,
+            certificate,
+        },
         CertifiedConsensusTarget::PublicCheckpoint(value) => {
             BftConsensusEvent::CertifiedPublicCheckpoint(value)
         }

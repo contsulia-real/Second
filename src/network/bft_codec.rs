@@ -38,6 +38,38 @@ impl BftNetworkMessage {
             Self::FinalityVote { scope, .. } | Self::FinalityCertificate { scope, .. } => scope,
         }
     }
+
+    pub fn validator_set_version(&self) -> u64 {
+        match self {
+            Self::Proposal { proposal, .. } => proposal.validator_set_version(),
+            Self::Vote { statement, .. } => statement.validator_set_version(),
+            Self::QuorumCertificate(certificate) => certificate.statement().validator_set_version(),
+            Self::FinalityVote { statement, .. } => statement.validator_set_version(),
+            Self::FinalityCertificate { certificate, .. } => {
+                certificate.statement().validator_set_version()
+            }
+        }
+    }
+
+    pub(crate) fn consensus_round(&self) -> Option<u64> {
+        match self {
+            Self::Proposal { proposal, .. } => Some(proposal.round()),
+            Self::Vote { statement, .. } => Some(statement.round()),
+            Self::QuorumCertificate(certificate) => Some(certificate.statement().round()),
+            Self::FinalityVote { .. } | Self::FinalityCertificate { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_digest_precommit_evidence(&self) -> bool {
+        let statement = match self {
+            Self::Vote { statement, .. } => statement,
+            Self::QuorumCertificate(certificate) => certificate.statement(),
+            Self::Proposal { .. }
+            | Self::FinalityVote { .. }
+            | Self::FinalityCertificate { .. } => return false,
+        };
+        statement.phase() == BftPhase::Precommit && matches!(statement.value(), BftValue::Digest(_))
+    }
 }
 
 pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>, NetworkError> {

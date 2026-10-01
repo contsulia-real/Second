@@ -1,46 +1,25 @@
+mod keys;
+
+pub use keys::ValidatorRuntimeKeys;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use ed25519_dalek::SigningKey;
 use tokio::sync::mpsc;
 
 use crate::network::{
     MAX_CONCURRENT_ONE_WAY_STREAMS, MAX_PEER_RECORDS, NetworkError, NodeId, PeerRecord, QuicClient,
-    QuicRequestStream, QuicTransportIdentity, ValidatorBftPeer, authenticate_validator_bft_peer,
-    outbound_bind_address, serve_validator_bft_connection_from_request,
+    QuicRequestStream, QuicTransportIdentity, SharedValidatorBftAuthority, ValidatorBftAuthority,
+    ValidatorBftPeer, authenticate_validator_bft_peer_with_authority, outbound_bind_address,
+    serve_validator_bft_connection_from_request,
 };
 use crate::runtime::{ActiveConnectionPermit, MAX_ACTIVE_CONNECTIONS};
 use crate::runtime_bft_consensus::ValidatorConsensusRuntime;
 use crate::{
-    BftNetworkMessage, NodeRuntime, NodeRuntimeError, StateStore, ValidatorId, ValidatorSet,
-    ValidatorSigner,
+    BftNetworkMessage, NodeRuntime, NodeRuntimeError, PersistenceError, StateStore, ValidatorId,
+    ValidatorSet, ValidatorSigner,
 };
-
-#[derive(Clone)]
-pub struct ValidatorRuntimeKeys {
-    validator_id: ValidatorId,
-    identity_key: SigningKey,
-    consensus_key: SigningKey,
-}
-
-impl ValidatorRuntimeKeys {
-    pub fn new(
-        validator_id: ValidatorId,
-        identity_key: SigningKey,
-        consensus_key: SigningKey,
-    ) -> Self {
-        Self {
-            validator_id,
-            identity_key,
-            consensus_key,
-        }
-    }
-
-    pub const fn validator_id(&self) -> ValidatorId {
-        self.validator_id
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InboundBftMessage {
@@ -60,7 +39,14 @@ pub enum ValidatorBftRuntimeError {
     IdentityKeyMismatch(ValidatorId),
     ConsensusKeyMismatch(ValidatorId),
     SelfValidatorPeer(ValidatorId),
+    Persistence(PersistenceError),
     Network(NetworkError),
+}
+
+impl From<PersistenceError> for ValidatorBftRuntimeError {
+    fn from(value: PersistenceError) -> Self {
+        Self::Persistence(value)
+    }
 }
 
 impl From<NetworkError> for ValidatorBftRuntimeError {
@@ -77,7 +63,7 @@ pub(crate) struct ValidatorBftRuntime {
 struct ValidatorBftRuntimeInner {
     keys: ValidatorRuntimeKeys,
     store: StateStore,
-    validator_set: ValidatorSet,
+    authority: SharedValidatorBftAuthority,
     outbound: Mutex<BTreeMap<ValidatorId, ManagedValidatorBftPeer>>,
     inbound: Mutex<VecDeque<InboundBftMessage>>,
     consensus: ValidatorConsensusRuntime,
@@ -104,10 +90,15 @@ impl NodeRuntime {
         keys: ValidatorRuntimeKeys,
     ) -> Result<Self, NodeRuntimeError> {
         let mut runtime = Self::load_and_bind(listen_address, store)?;
+        let persisted = runtime
+            .store
+            .load()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
         runtime.validator_bft = Some(ValidatorBftRuntime::new(
             keys,
             runtime.store.clone(),
-            runtime.validator_set.clone(),
+            persisted.validator_set,
+            persisted.retained_validator_sets.into_values(),
         )?);
         Ok(runtime)
     }
@@ -133,6 +124,7 @@ impl NodeRuntime {
             .validator_bft
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
+        runtime.refresh_authority()?;
         let permit = ActiveConnectionPermit::try_acquire(&self.active_connections).ok_or(
             NodeRuntimeError::ConnectionCapacityReached {
                 maximum: MAX_ACTIVE_CONNECTIONS,
@@ -143,13 +135,21 @@ impl NodeRuntime {
             .await?)
     }
 
-    pub(crate) async fn maintain_validator_bft_peers(&self, bootstrap_records: &[PeerRecord]) {
+    pub(crate) async fn maintain_validator_bft_peers(
+        &self,
+        bootstrap_records: &[PeerRecord],
+    ) -> Result<(), NodeRuntimeError> {
         let Some(runtime) = self.validator_bft.as_ref() else {
-            return;
+            return Ok(());
         };
-        let target = runtime.validator_set().len().saturating_sub(1);
+        runtime.refresh_authority()?;
+        let target = runtime
+            .validator_ids()
+            .into_iter()
+            .filter(|validator_id| *validator_id != runtime.validator_id())
+            .count();
         if runtime.connected_validator_ids().len() >= target {
-            return;
+            return Ok(());
         }
 
         let connected_nodes = runtime.connected_node_ids();
@@ -182,6 +182,7 @@ impl NodeRuntime {
                 Err(_) => {}
             }
         }
+        Ok(())
     }
 }
 
@@ -190,26 +191,31 @@ impl ValidatorBftRuntime {
         keys: ValidatorRuntimeKeys,
         store: StateStore,
         validator_set: ValidatorSet,
+        retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
     ) -> Result<Self, ValidatorBftRuntimeError> {
-        let credential = validator_set.validator(keys.validator_id).ok_or(
-            ValidatorBftRuntimeError::UnknownValidator(keys.validator_id),
-        )?;
-        if credential.identity_public_key() != keys.identity_key.verifying_key().to_bytes() {
-            return Err(ValidatorBftRuntimeError::IdentityKeyMismatch(
-                keys.validator_id,
-            ));
-        }
-        if credential.consensus_public_key() != keys.consensus_key.verifying_key().to_bytes() {
-            return Err(ValidatorBftRuntimeError::ConsensusKeyMismatch(
-                keys.validator_id,
-            ));
+        let authority = ValidatorBftAuthority::new(validator_set, retained_validator_sets)?;
+        if authority.identity_public_key(keys.validator_id())
+            != Some(keys.identity_key().verifying_key().to_bytes())
+        {
+            return if authority
+                .validator_ids()
+                .any(|validator_id| validator_id == keys.validator_id())
+            {
+                Err(ValidatorBftRuntimeError::IdentityKeyMismatch(
+                    keys.validator_id(),
+                ))
+            } else {
+                Err(ValidatorBftRuntimeError::UnknownValidator(
+                    keys.validator_id(),
+                ))
+            };
         }
 
         Ok(Self {
             inner: Arc::new(ValidatorBftRuntimeInner {
                 keys,
                 store,
-                validator_set,
+                authority: Arc::new(std::sync::RwLock::new(authority)),
                 outbound: Mutex::new(BTreeMap::new()),
                 inbound: Mutex::new(VecDeque::new()),
                 consensus: ValidatorConsensusRuntime::new(),
@@ -219,19 +225,93 @@ impl ValidatorBftRuntime {
     }
 
     pub(crate) fn validator_id(&self) -> ValidatorId {
-        self.inner.keys.validator_id
+        self.inner.keys.validator_id()
     }
 
-    pub(crate) fn signer(&self) -> ValidatorSigner {
-        ValidatorSigner::new(
-            self.inner.keys.validator_id,
-            self.inner.keys.consensus_key.clone(),
+    pub(crate) fn signer_for(
+        &self,
+        validator_set: &ValidatorSet,
+    ) -> Result<ValidatorSigner, ValidatorBftRuntimeError> {
+        let signing_key = self.inner.keys.consensus_key_for(validator_set).ok_or(
+            ValidatorBftRuntimeError::ConsensusKeyMismatch(self.validator_id()),
+        )?;
+        Ok(ValidatorSigner::new(
+            self.validator_id(),
+            signing_key.clone(),
             self.inner.store.clone(),
-        )
+        ))
     }
 
-    pub(crate) fn validator_set(&self) -> &ValidatorSet {
-        &self.inner.validator_set
+    pub(crate) fn validator_ids(&self) -> Vec<ValidatorId> {
+        self.inner
+            .authority
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .validator_ids()
+            .collect()
+    }
+
+    pub(crate) fn validator_set(&self) -> ValidatorSet {
+        self.inner
+            .authority
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_validator_set()
+            .clone()
+    }
+
+    pub(crate) fn refresh_authority(&self) -> Result<(), ValidatorBftRuntimeError> {
+        let persisted = self
+            .inner
+            .store
+            .load()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        let authority = ValidatorBftAuthority::new(
+            persisted.validator_set,
+            persisted.retained_validator_sets.into_values(),
+        )?;
+
+        if let Some(identity_public_key) = authority.identity_public_key(self.validator_id())
+            && identity_public_key != self.inner.keys.identity_key().verifying_key().to_bytes()
+        {
+            return Err(ValidatorBftRuntimeError::IdentityKeyMismatch(
+                self.validator_id(),
+            ));
+        }
+
+        let local_authorized = authority.identity_public_key(self.validator_id()).is_some();
+        let allowed_validator_ids = if local_authorized {
+            authority.validator_ids().collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+
+        *self
+            .inner
+            .authority
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = authority;
+
+        let mut outbound = self
+            .inner
+            .outbound
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        outbound.retain(|validator_id, managed| {
+            let keep = allowed_validator_ids.contains(validator_id);
+            if !keep {
+                managed.peer.close();
+            }
+            keep
+        });
+        drop(outbound);
+
+        self.inner
+            .rejected_nodes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        Ok(())
     }
 
     pub(crate) async fn serve_inbound(
@@ -239,13 +319,14 @@ impl ValidatorBftRuntime {
         peer: &crate::network::QuicPeer,
         first_request: QuicRequestStream,
     ) -> Result<ValidatorId, ValidatorBftRuntimeError> {
+        self.refresh_authority()?;
         let inbound = Arc::clone(&self.inner);
         Ok(serve_validator_bft_connection_from_request(
             peer,
             first_request,
-            self.inner.keys.validator_id,
-            &self.inner.keys.identity_key,
-            &self.inner.validator_set,
+            self.inner.keys.validator_id(),
+            self.inner.keys.identity_key(),
+            &self.inner.authority,
             move |validator_id, message| {
                 inbound
                     .inbound
@@ -276,15 +357,15 @@ impl ValidatorBftRuntime {
         let peer = client
             .connect_expected(record.address(), record.node_id())
             .await?;
-        let peer = authenticate_validator_bft_peer(
+        let peer = authenticate_validator_bft_peer_with_authority(
             peer,
-            self.inner.keys.validator_id,
-            &self.inner.keys.identity_key,
-            &self.inner.validator_set,
+            self.inner.keys.validator_id(),
+            self.inner.keys.identity_key(),
+            &self.inner.authority,
         )
         .await?;
         let remote_validator_id = peer.remote_validator_id();
-        if remote_validator_id == self.inner.keys.validator_id {
+        if remote_validator_id == self.inner.keys.validator_id() {
             peer.close();
             return Err(ValidatorBftRuntimeError::SelfValidatorPeer(
                 remote_validator_id,
@@ -393,6 +474,9 @@ impl ValidatorBftRuntime {
         let mut failures = Vec::new();
         let mut failed_ids = Vec::new();
         for (validator_id, managed) in outbound.iter() {
+            if !managed.peer.accepts_recipient(message) {
+                continue;
+            }
             let sender = if matches!(
                 message,
                 BftNetworkMessage::FinalityVote { .. }

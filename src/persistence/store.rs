@@ -13,7 +13,8 @@ use crate::{
 };
 
 use super::bft_store::{
-    retain_active_prepared_bft_states, retain_bft_states_for_validator_transition,
+    open_prepared_voting, retain_active_prepared_bft_states,
+    retain_bft_states_for_validator_transition,
 };
 use super::codec::{SnapshotContents, encode_snapshot};
 use super::slot::{
@@ -774,6 +775,8 @@ impl StateStore {
 
         validate_latest(&latest)?;
         self.require_bft_finality_ready(&latest, validator_id, &scope, digest)?;
+
+        open_prepared_voting(&mut latest, &scope)?;
 
         latest
             .validator_vote_locks

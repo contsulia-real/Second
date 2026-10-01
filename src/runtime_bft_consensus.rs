@@ -22,7 +22,7 @@ use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, ConsensusScope, FinalityCertificate, FinalityError,
     NodeRuntime, NodeRuntimeError, PersistenceError, PublicCurrencyCheckpoint,
-    StateRecoveryCheckpoint, ValidatorBftSendFailure, ValidatorId, ValidatorSet,
+    StateRecoveryCheckpoint, TaskId, ValidatorBftSendFailure, ValidatorId, ValidatorSet,
     ValidatorSetTransition, ValidatorSigner, ValidatorSigningError, ValidatorTransitionError,
     ValidatorVote,
 };
@@ -108,6 +108,16 @@ impl ValidatorConsensusRuntime {
 }
 
 impl NodeRuntime {
+    pub fn start_prepared_task_consensus(
+        &self,
+        task_id: TaskId,
+        timeouts: BftTimeoutConfig,
+    ) -> Result<(), NodeRuntimeError> {
+        let target = ValidatorConsensusTarget::prepared_task(&self.store, task_id)
+            .map_err(BftConsensusRuntimeError::from)?;
+        self.start_validator_consensus_target(target, timeouts)
+    }
+
     pub fn start_public_checkpoint_consensus(
         &self,
         checkpoint: PublicCurrencyCheckpoint,
@@ -150,10 +160,16 @@ impl NodeRuntime {
             .validator_bft
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
+        runtime.refresh_authority()?;
+        let active_validator_set = runtime.validator_set();
+        let validator_set = target
+            .validator_set(&self.store, &active_validator_set)
+            .map_err(BftConsensusRuntimeError::from)?;
+        let signer = runtime.signer_for(&validator_set)?;
         runtime.consensus().register(
-            runtime.signer(),
+            signer,
             self.store.clone(),
-            runtime.validator_set().clone(),
+            validator_set,
             target,
             timeouts,
         )?;
@@ -198,6 +214,7 @@ pub enum BftConsensusRuntimeError {
     ValidatorTransition(ValidatorTransitionError),
     FinalityStatementMismatch,
     SubjectConflict(ConsensusScope),
+    PendingFutureMessagesFull(ConsensusScope),
 }
 
 impl From<BftDriverError> for BftConsensusRuntimeError {
@@ -219,6 +236,10 @@ impl From<ConsensusTargetError> for BftConsensusRuntimeError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BftConsensusEvent {
+    CertifiedPreparedTask {
+        task_id: TaskId,
+        certificate: FinalityCertificate,
+    },
     CertifiedPublicCheckpoint(CertifiedPublicCurrencyCheckpoint),
     CertifiedValidatorSetTransition(CertifiedValidatorSetTransition),
     CertifiedStateRecoveryCheckpoint(CertifiedStateRecoveryCheckpoint),
@@ -238,7 +259,7 @@ pub enum BftConsensusEvent {
 }
 
 const MAX_PENDING_UNREGISTERED_SCOPES: usize = 32;
-const MAX_PENDING_UNREGISTERED_MESSAGES_PER_SCOPE: usize = 64;
+const MAX_PENDING_MESSAGES_PER_SCOPE: usize = 64;
 
 pub(crate) struct BftConsensusCoordinator {
     sessions: BTreeMap<ConsensusScope, BftConsensusSession>,
@@ -248,6 +269,7 @@ pub(crate) struct BftConsensusCoordinator {
 
 struct BftConsensusSession {
     driver: BftDriver,
+    store: crate::StateStore,
     signer: ValidatorSigner,
     validator_set: ValidatorSet,
     target: ValidatorConsensusTarget,
@@ -261,6 +283,7 @@ struct BftConsensusSession {
     timeouts: BftTimeoutConfig,
     deadline: Option<Instant>,
     relayed_certificates: BTreeSet<(u64, BftPhase, BftValue)>,
+    pending_future: VecDeque<InboundBftMessage>,
     needs_start: bool,
     finished: bool,
 }
@@ -296,13 +319,18 @@ impl BftConsensusCoordinator {
             return Err(BftConsensusRuntimeError::SubjectConflict(scope));
         }
 
-        let mut driver =
-            BftDriver::new(signer.clone(), store, validator_set.clone(), scope.clone())?;
+        let mut driver = BftDriver::new(
+            signer.clone(),
+            store.clone(),
+            validator_set.clone(),
+            scope.clone(),
+        )?;
         driver.register_subject(&subject)?;
         self.sessions.insert(
             scope,
             BftConsensusSession {
                 driver,
+                store,
                 signer,
                 validator_set,
                 target,
@@ -316,6 +344,7 @@ impl BftConsensusCoordinator {
                 timeouts,
                 deadline: None,
                 relayed_certificates: BTreeSet::new(),
+                pending_future: VecDeque::new(),
                 needs_start: true,
                 finished: false,
             },
@@ -379,33 +408,7 @@ impl BftConsensusCoordinator {
         }
 
         for inbound_message in inbound.drain(..) {
-            let scope = inbound_message.message.scope().clone();
-            let validator_id = inbound_message.validator_id;
-            if !self.sessions.contains_key(&scope) {
-                self.buffer_unregistered(inbound_message);
-                continue;
-            }
-            let result = self.with_session(
-                &scope,
-                |session, output| handle_inbound(session, inbound_message.message, output, now),
-                &mut output,
-            );
-            if let Err(error) = result {
-                if matches!(
-                    error,
-                    BftConsensusRuntimeError::Driver(BftDriverError::RoundMismatch {
-                        current,
-                        actual,
-                    }) if actual < current
-                ) {
-                    continue;
-                }
-                self.events.push_back(BftConsensusEvent::Rejected {
-                    validator_id: Some(validator_id),
-                    scope,
-                    error,
-                });
-            }
+            self.dispatch_inbound(inbound_message, now, &mut output);
         }
 
         let due = self
@@ -449,7 +452,105 @@ impl BftConsensusCoordinator {
             }
         }
 
+        self.replay_ready_future(now, &mut output);
         output
+    }
+
+    fn dispatch_inbound(
+        &mut self,
+        inbound_message: InboundBftMessage,
+        now: Instant,
+        output: &mut BftConsensusOutput,
+    ) {
+        let scope = inbound_message.message.scope().clone();
+        let validator_id = inbound_message.validator_id;
+        if !self.sessions.contains_key(&scope) {
+            self.buffer_unregistered(inbound_message);
+            return;
+        }
+
+        let future_scope = scope.clone();
+        let result = self.with_session(
+            &scope,
+            move |session, output| {
+                if let Some(actual) = inbound_message.message.consensus_round() {
+                    let current = session.driver.current_round()?;
+                    if actual < current && !inbound_message.message.is_digest_precommit_evidence() {
+                        return Ok(None);
+                    }
+                    if actual > current {
+                        if session.pending_future.contains(&inbound_message) {
+                            return Ok(None);
+                        }
+                        if session.pending_future.len() >= MAX_PENDING_MESSAGES_PER_SCOPE {
+                            return Err(BftConsensusRuntimeError::PendingFutureMessagesFull(
+                                future_scope,
+                            ));
+                        }
+                        session.pending_future.push_back(inbound_message);
+                        return Ok(None);
+                    }
+                }
+                handle_inbound(session, inbound_message.message, output, now)
+            },
+            output,
+        );
+        if let Err(error) = result {
+            self.events.push_back(BftConsensusEvent::Rejected {
+                validator_id: Some(validator_id),
+                scope,
+                error,
+            });
+        }
+    }
+
+    fn replay_ready_future(&mut self, now: Instant, output: &mut BftConsensusOutput) {
+        loop {
+            let scopes = self.sessions.keys().cloned().collect::<Vec<_>>();
+            let mut ready = Vec::new();
+
+            for scope in scopes {
+                let Some(session) = self.sessions.get_mut(&scope) else {
+                    continue;
+                };
+                if session.finished || session.pending_future.is_empty() {
+                    continue;
+                }
+
+                let current = match session.driver.current_round() {
+                    Ok(current) => current,
+                    Err(error) => {
+                        self.events.push_back(BftConsensusEvent::Rejected {
+                            validator_id: None,
+                            scope,
+                            error: error.into(),
+                        });
+                        continue;
+                    }
+                };
+
+                let mut future = VecDeque::new();
+                while let Some(message) = session.pending_future.pop_front() {
+                    if message
+                        .message
+                        .consensus_round()
+                        .is_none_or(|round| round <= current)
+                    {
+                        ready.push(message);
+                    } else {
+                        future.push_back(message);
+                    }
+                }
+                session.pending_future = future;
+            }
+
+            if ready.is_empty() {
+                break;
+            }
+            for message in ready {
+                self.dispatch_inbound(message, now, output);
+            }
+        }
     }
 
     fn take_registered_pending(
@@ -485,7 +586,7 @@ impl BftConsensusCoordinator {
         }
 
         let pending = self.pending_unregistered.entry(scope.clone()).or_default();
-        if pending.len() >= MAX_PENDING_UNREGISTERED_MESSAGES_PER_SCOPE {
+        if pending.len() >= MAX_PENDING_MESSAGES_PER_SCOPE {
             self.events.push_back(BftConsensusEvent::UnregisteredScope {
                 validator_id: message.validator_id,
                 scope,

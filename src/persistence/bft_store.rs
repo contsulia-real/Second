@@ -436,7 +436,7 @@ pub(super) fn retain_active_prepared_bft_states(
     });
 }
 
-fn open_prepared_voting(
+pub(super) fn open_prepared_voting(
     snapshot: &mut crate::PersistedNodeState,
     scope: &ConsensusScope,
 ) -> Result<(), PersistenceError> {

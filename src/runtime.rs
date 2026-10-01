@@ -454,7 +454,7 @@ impl NodeRuntime {
                 }
             }
 
-            self.maintain_validator_bft_peers(bootstrap_records).await;
+            self.maintain_validator_bft_peers(bootstrap_records).await?;
             tokio::time::sleep(PEER_MAINTENANCE_INTERVAL).await;
         }
     }
