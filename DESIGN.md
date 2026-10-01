@@ -1094,7 +1094,8 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | network/bft_codec.rs | bounded BFT Proposal/Vote/QC/FinalityVote/FinalityCertificate binary envelope codec |
 | network/bft.rs | channel-bound active-Validator identity session 与 bounded one-way Validator-only BFT envelope transport |
 | runtime_bft.rs | Validator-only peer 维护、inbound queue、优先级/有界并发 fanout 与 send-failure 生命周期 |
-| runtime_bft_consensus.rs | NodeRuntime per-scope BFT coordinator、timeout、early-message buffering、FinalityVote/Certificate 收敛 |
+| runtime_bft_consensus.rs | NodeRuntime per-scope BFT coordinator、round/timeout 与 early-message buffering |
+| runtime_bft_consensus/finality.rs | precommit-QC gated FinalityVote / FinalityCertificate 聚合、验证、relay 与 Certified* 事件收敛 |
 | runtime_consensus_target.rs | PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 到既有 proposal/finality 类型的单一适配层 |
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
 | persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |

@@ -190,7 +190,7 @@ impl QuicPeer {
 
     pub(crate) async fn send_one_way(&self, message: &NetworkMessage) -> Result<(), NetworkError> {
         let mut send = self.connection.open_uni().await.map_err(transport_error)?;
-        write_request_message(&mut send, message).await
+        write_stream_message(&mut send, message).await
     }
 
     pub(crate) async fn accept_one_way(&self) -> Result<Option<NetworkMessage>, NetworkError> {
