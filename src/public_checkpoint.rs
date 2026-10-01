@@ -232,6 +232,13 @@ impl PublicCurrencyCheckpointProof {
             return Err(PublicCheckpointError::SummaryMismatch);
         }
 
+        self.verify_checkpoint(validator_set)
+    }
+
+    pub fn verify_checkpoint(
+        self,
+        validator_set: &ValidatorSet,
+    ) -> Result<CertifiedPublicCurrencyCheckpoint, PublicCheckpointError> {
         let certificate = FinalityCertificate::new(
             self.checkpoint
                 .finality_statement(self.validator_set_version),

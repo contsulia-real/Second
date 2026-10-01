@@ -21,6 +21,7 @@ mod prepared_tasks;
 mod public_checkpoint;
 mod public_state_summary;
 mod public_state_sync;
+mod runtime_public_sync;
 mod task_id;
 mod transaction_request;
 mod validator_admission;

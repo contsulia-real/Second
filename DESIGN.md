@@ -886,6 +886,10 @@ runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护
 
 节点启动时恢复 snapshot，持续接受 QUIC connection；每个通过 peer manager 注册的连接独立运行 public network session，因此单个 peer 的断开、错误请求或握手失败不会结束 listener。当前 runtime 最多同时保留 128 个进入握手/已建立的 inbound + outbound connection；超过该本地容量的新 inbound `Incoming` 在握手前直接拒绝，主动 dial 则直接返回本地 capacity error。这个 128 是节点实现的 DoS / 资源保护默认值，不是协议、共识或 Validator 数量规则，不进入任何签名、frame 或 snapshot 版本。
 
+`NodeRuntime::sync_freshest_certified_public_currency_view()` 把这些长期连接用于实际 public-state 观察：先向所有当前 active peer 请求 checkpoint proof，对低于本地 `checkpoint_floor_epoch` 的 proof 直接丢弃，并使用本地 snapshot 中的当前 `ValidatorSet` 在下载完整 public state 之前验证 checkpoint finality；只有 finality 有效的候选才按 checkpoint epoch 从高到低进入下载阶段。伪造一个更大的 epoch 不会获得选择优先权，因为未通过 Validator quorum 的 proof 不进入候选。checkpoint probe 每个 peer 最多等待 5 秒，完整 public sync 每个候选最多等待 30 秒，失败后继续下一个有效候选，避免一个不响应的 peer 独占整个选择流程。
+
+该 runtime sync 的结果是 `RemoteCertifiedPublicCurrencyView`，明确属于经过验证的网络观察结果，而不是本地业务状态写入。它不会用 public view 覆盖本地 `SecondState`，也不会自动推进持久 `checkpoint_floor_epoch`：public view 不包含 owner、PaymentAddress、claims、prepared task 等 private/protocol state，不能成为完整 Second state 的替代品。是否把某个远端观察结果提升为本地持久状态属于另一条尚未定义的同步/恢复协议，不能由 public read path 猜测完成。
+
 当前节点网络面暴露 Ping/Pong、public Currency 查询/同步以及有界 `GetPeers/Peers` reachability discovery；LegalTask、Validator vote 和其他私有/共识消息尚未定义网络传播协议，因此不会由 node runtime 猜测实现。
 
 当前 public Node admission 是开放的：任何能够完成 authenticated Hello、证明持有其 NodeId 对应 transport private key 的 peer，都可以使用上述公开只读网络能力，前提是通过现有 connection / stream / sync resource guardrail 与 peer 去重规则。public admission 不维护 allowlist，也不要求 ValidatorCredential，因为这些数据本来就是公开状态。
@@ -1197,7 +1201,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有静态 bootstrap sidecar + authenticated self-reachability refresh + MRU/failure-demotion peer selection + 长期连接维护基础上，后续只在真实部署需要时再决定 NAT traversal、DNS seed/DHT 或更复杂的 peer quality 指标；transport identity 仍只证明 key ownership，不等于 Validator authority；
+- 在现有静态 bootstrap sidecar + authenticated self-reachability refresh + MRU/failure-demotion peer selection + active-peer certified public sync 基础上，后续只在真实部署需要时再决定 NAT traversal、DNS seed/DHT、更复杂的 peer quality 指标，或单独设计完整 state recovery/synchronization；transport identity 仍只证明 key ownership，不等于 Validator authority；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；

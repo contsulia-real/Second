@@ -127,7 +127,7 @@ async fn stale_but_valid_checkpoint_is_rejected_before_state_sync() {
 }
 
 #[tokio::test]
-async fn fake_checkpoint_signature_is_rejected_after_successful_state_sync() {
+async fn fake_checkpoint_signature_is_rejected_before_public_state_sync() {
     let validators = validators();
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     let checkpoint =

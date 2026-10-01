@@ -11,13 +11,19 @@ const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
 const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const PEER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+const PEER_CHECKPOINT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NodeId, PeerDirection, PeerLease, PeerManager, PeerRecord,
     PeerRegistrationError, PeerStore, QuicClient, QuicPeer, QuicServer, QuicTransportIdentity,
-    client_peer_records, serve_public_network_connection,
+    client_peer_records, client_public_currency_checkpoint_proof,
+    client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
 };
-use crate::{PersistenceError, PublicCurrencyCheckpointProof, SecondState, StateStore};
+use crate::{
+    PersistenceError, PublicCurrencyCheckpointProof, RemoteCertifiedPublicCurrencyView,
+    SecondState, StateStore, ValidatorSet,
+};
 
 #[derive(Debug)]
 pub enum NodeRuntimeError {
@@ -27,6 +33,8 @@ pub enum NodeRuntimeError {
     ConnectionCapacityReached { maximum: usize },
     SelfConnection,
     DuplicatePeer(NodeId),
+    NoActivePeers,
+    NoCertifiedPublicPeer,
 }
 
 impl From<PersistenceError> for NodeRuntimeError {
@@ -54,6 +62,8 @@ pub struct NodeRuntime {
     server: QuicServer,
     transport_identity: QuicTransportIdentity,
     state: Arc<SecondState>,
+    validator_set: ValidatorSet,
+    checkpoint_floor_epoch: u64,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
     peer_store: PeerStore,
@@ -82,11 +92,15 @@ impl NodeRuntime {
         };
         let peer_manager = PeerManager::new(transport_identity.node_id());
         let peer_store = PeerStore::load(peer_store_path(store))?;
+        let validator_set = persisted.validator_set.clone();
+        let checkpoint_floor_epoch = persisted.checkpoint_floor_epoch;
 
         Ok(Self {
             server,
             transport_identity,
             state: Arc::new(persisted.state),
+            validator_set,
+            checkpoint_floor_epoch,
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
             peer_manager,
             peer_store,
@@ -113,6 +127,52 @@ impl NodeRuntime {
 
     pub fn local_peer_record(&self) -> Option<&PeerRecord> {
         self.local_peer_record.as_ref()
+    }
+
+    pub async fn sync_freshest_certified_public_currency_view(
+        &self,
+    ) -> Result<RemoteCertifiedPublicCurrencyView, NodeRuntimeError> {
+        let peers = self.peer_manager.peers();
+        if peers.is_empty() {
+            return Err(NodeRuntimeError::NoActivePeers);
+        }
+
+        let mut candidates = Vec::new();
+        for peer in peers {
+            let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                PEER_CHECKPOINT_QUERY_TIMEOUT,
+                client_public_currency_checkpoint_proof(&peer),
+            )
+            .await
+            else {
+                continue;
+            };
+
+            let epoch = proof.checkpoint().epoch();
+            if epoch < self.checkpoint_floor_epoch {
+                continue;
+            }
+
+            let Ok(checkpoint) = proof.verify_checkpoint(&self.validator_set) else {
+                continue;
+            };
+            candidates.push((epoch, peer.remote_node_id(), peer, checkpoint));
+        }
+
+        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+        for (_, _, peer, checkpoint) in candidates {
+            let sync = client_sync_certified_public_currency_view_from_checkpoint(
+                &peer,
+                checkpoint,
+                &self.validator_set,
+            );
+            if let Ok(Ok(synced)) = tokio::time::timeout(PEER_PUBLIC_SYNC_TIMEOUT, sync).await {
+                return Ok(synced);
+            }
+        }
+
+        Err(NodeRuntimeError::NoCertifiedPublicPeer)
     }
 
     fn known_active_peer_count(&self) -> usize {

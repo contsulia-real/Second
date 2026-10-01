@@ -64,6 +64,16 @@ impl PeerManager {
             .and_then(|active| active.peer.clone())
     }
 
+    pub(crate) fn peers(&self) -> Vec<QuicPeer> {
+        self.inner
+            .connected
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter_map(|active| active.peer.clone())
+            .collect()
+    }
+
     fn register_entry(
         &self,
         node_id: NodeId,

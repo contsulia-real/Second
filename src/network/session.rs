@@ -1,6 +1,6 @@
 use crate::{
-    CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencyView,
-    SecondState, ValidatorSet,
+    CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCurrencyCheckpointProof,
+    PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorSet,
 };
 
 use super::quic::QuicPeer;
@@ -110,10 +110,23 @@ pub async fn client_sync_certified_public_currency_view(
         });
     }
 
-    let summary = proof.checkpoint().summary().clone();
-    let view = sync_public_currency_view_for_summary(peer, summary).await?;
     let checkpoint = proof
-        .verify(&view, validator_set)
+        .verify_checkpoint(validator_set)
+        .map_err(NetworkError::PublicCheckpoint)?;
+
+    client_sync_certified_public_currency_view_from_checkpoint(peer, checkpoint, validator_set)
+        .await
+}
+
+pub(crate) async fn client_sync_certified_public_currency_view_from_checkpoint(
+    peer: &QuicPeer,
+    checkpoint: CertifiedPublicCurrencyCheckpoint,
+    validator_set: &ValidatorSet,
+) -> Result<RemoteCertifiedPublicCurrencyView, NetworkError> {
+    let summary = checkpoint.checkpoint().summary().clone();
+    let view = sync_public_currency_view_for_summary(peer, summary).await?;
+    checkpoint
+        .verify_view(&view, validator_set)
         .map_err(NetworkError::PublicCheckpoint)?;
 
     Ok(RemoteCertifiedPublicCurrencyView {
