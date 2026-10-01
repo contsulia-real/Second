@@ -9,7 +9,8 @@ const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 use super::{
     MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord, PeerStore,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
-    RemotePublicCurrencyView, validate_peer_limit, validate_public_currency_limit,
+    RemotePublicCurrencyView, StateRecoveryProviderHandle, state_recovery_response,
+    validate_peer_limit, validate_public_currency_limit,
 };
 
 pub async fn client_ping(peer: &QuicPeer, nonce: u64) -> Result<NodeId, NetworkError> {
@@ -223,7 +224,7 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
-    serve_public_connection(peer, state, checkpoint_proof, None, None, None).await
+    serve_public_connection(peer, state, checkpoint_proof, None, None, None, None).await
 }
 
 pub(crate) async fn serve_public_network_connection(
@@ -233,6 +234,7 @@ pub(crate) async fn serve_public_network_connection(
     peer_store: &PeerStore,
     local_node_id: NodeId,
     local_peer_record: Option<&PeerRecord>,
+    state_recovery_provider: &StateRecoveryProviderHandle,
 ) -> Result<NodeId, NetworkError> {
     serve_public_connection(
         peer,
@@ -241,6 +243,7 @@ pub(crate) async fn serve_public_network_connection(
         Some(peer_store),
         Some(local_node_id),
         local_peer_record,
+        Some(state_recovery_provider),
     )
     .await
 }
@@ -252,6 +255,7 @@ async fn serve_public_connection(
     peer_store: Option<&PeerStore>,
     local_node_id: Option<NodeId>,
     local_peer_record: Option<&PeerRecord>,
+    state_recovery_provider: Option<&StateRecoveryProviderHandle>,
 ) -> Result<NodeId, NetworkError> {
     if checkpoint_proof
         .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
@@ -264,34 +268,40 @@ async fn serve_public_connection(
             return Ok(peer.remote_node_id());
         };
 
-        let response = match request.message() {
-            NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
-            NetworkMessage::GetPublicCurrencies { start, limit } => {
-                public_currency_page_response(state, *start, *limit)?
-            }
-            NetworkMessage::GetPublicCurrencySummary => NetworkMessage::PublicCurrencySummary {
-                summary: state.public_currency_summary(),
+        let recovery_response = state_recovery_provider
+            .and_then(|provider| state_recovery_response(peer, request.message(), provider));
+        let response = match recovery_response {
+            Some(response) => response?,
+            None => match request.message() {
+                NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
+                NetworkMessage::GetPublicCurrencies { start, limit } => {
+                    public_currency_page_response(state, *start, *limit)?
+                }
+                NetworkMessage::GetPublicCurrencySummary => NetworkMessage::PublicCurrencySummary {
+                    summary: state.public_currency_summary(),
+                },
+                NetworkMessage::GetPublicCurrencyCheckpoint => checkpoint_proof
+                    .cloned()
+                    .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
+                    .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
+                NetworkMessage::GetPeers { limit } => {
+                    validate_peer_limit(*limit)?;
+                    let store = peer_store.ok_or(NetworkError::UnexpectedMessage)?;
+                    let local_node_id = local_node_id.ok_or(NetworkError::UnexpectedMessage)?;
+                    let mut records = Vec::with_capacity(usize::from(*limit));
+                    if let Some(record) = local_peer_record {
+                        records.push(record.clone());
+                    }
+                    let remaining = limit.saturating_sub(records.len() as u16);
+                    if remaining > 0 {
+                        records.extend(
+                            store.recent(remaining, &[local_node_id, peer.remote_node_id()]),
+                        );
+                    }
+                    NetworkMessage::Peers { records }
+                }
+                _ => return Err(NetworkError::UnexpectedMessage),
             },
-            NetworkMessage::GetPublicCurrencyCheckpoint => checkpoint_proof
-                .cloned()
-                .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
-                .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint),
-            NetworkMessage::GetPeers { limit } => {
-                validate_peer_limit(*limit)?;
-                let store = peer_store.ok_or(NetworkError::UnexpectedMessage)?;
-                let local_node_id = local_node_id.ok_or(NetworkError::UnexpectedMessage)?;
-                let mut records = Vec::with_capacity(usize::from(*limit));
-                if let Some(record) = local_peer_record {
-                    records.push(record.clone());
-                }
-                let remaining = limit.saturating_sub(records.len() as u16);
-                if remaining > 0 {
-                    records
-                        .extend(store.recent(remaining, &[local_node_id, peer.remote_node_id()]));
-                }
-                NetworkMessage::Peers { records }
-            }
-            _ => return Err(NetworkError::UnexpectedMessage),
         };
 
         request.respond(&response).await?;

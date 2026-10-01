@@ -42,7 +42,8 @@ pub use network::{
     MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, NodeId, PeerRecord,
     PublicCurrencyPage, QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
     RemoteCertifiedPublicCurrencyView, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
-    RemotePublicCurrencyView, SECOND_QUIC_SERVER_NAME, client_peer_records, client_ping,
+    RemotePublicCurrencyView, RemoteStateRecoveryPayload, SECOND_QUIC_SERVER_NAME,
+    client_fetch_state_recovery, client_peer_records, client_ping,
     client_public_currency_checkpoint_proof, client_public_currency_page,
     client_public_currency_summary, client_sync_certified_public_currency_view,
     client_sync_public_currency_view, decode_network_message, encode_network_message,
@@ -58,7 +59,10 @@ pub use public_checkpoint::{
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
 pub use runtime::{DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError};
 pub use state::{ExecutionOutcome, SecondState};
-pub use state_recovery_checkpoint::{CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint};
+pub use state_recovery_checkpoint::{
+    CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint, StateRecoveryCheckpointProof,
+    StateRecoveryPayload,
+};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
 pub use validator::{ValidatorCredential, ValidatorSet};

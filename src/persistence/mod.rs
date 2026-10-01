@@ -7,7 +7,7 @@ mod snapshot_validation;
 mod store;
 mod validator_codec;
 
-pub(crate) use codec::encode_shared_recovery_state;
+pub(crate) use codec::{decode_shared_recovery_state, encode_shared_recovery_state};
 pub use store::StateStore;
 
 use std::collections::BTreeMap;
@@ -27,6 +27,7 @@ pub struct PersistedNodeState {
     pub retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     pub public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub checkpoint_floor_epoch: u64,
+    pub validator_safety_ready: bool,
     pub generation: u64,
     pub(crate) prepared_tasks: BTreeMap<TaskId, PreparedTask>,
     pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,

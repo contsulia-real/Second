@@ -24,6 +24,7 @@ mod public_state_summary;
 mod public_state_sync;
 mod runtime_public_sync;
 mod state_recovery_checkpoint;
+mod state_recovery_transport;
 mod task_id;
 mod transaction_request;
 mod validator_admission;

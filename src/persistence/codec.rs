@@ -40,6 +40,7 @@ pub(super) struct SnapshotContents<'a> {
     pub(super) retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
     pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
     pub(super) checkpoint_floor_epoch: u64,
+    pub(super) validator_safety_ready: bool,
     pub(super) validator_registry: &'a ValidatorRegistry,
     pub(super) prepared_tasks: &'a BTreeMap<TaskId, PreparedTask>,
     pub(super) validator_vote_locks: &'a BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
@@ -51,6 +52,7 @@ struct DecodedSnapshotPayload {
     retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     checkpoint_floor_epoch: u64,
+    validator_safety_ready: bool,
     validator_registry: ValidatorRegistry,
     prepared_tasks: BTreeMap<TaskId, PreparedTask>,
     validator_vote_locks: BTreeMap<(ValidatorId, FinalityScope), [u8; 32]>,
@@ -186,6 +188,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         retained_validator_sets: decoded.retained_validator_sets,
         public_checkpoint_proof: decoded.public_checkpoint_proof,
         checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
+        validator_safety_ready: decoded.validator_safety_ready,
         generation,
         prepared_tasks: decoded.prepared_tasks,
         validator_vote_locks: decoded.validator_vote_locks,
@@ -205,6 +208,7 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     let retained_validator_sets = contents.retained_validator_sets;
     let public_checkpoint_proof = contents.public_checkpoint_proof;
     let checkpoint_floor_epoch = contents.checkpoint_floor_epoch;
+    let validator_safety_ready = contents.validator_safety_ready;
     let validator_registry = contents.validator_registry;
     let prepared_tasks = contents.prepared_tasks;
     let validator_vote_locks = contents.validator_vote_locks;
@@ -232,23 +236,25 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
         None => out.push(0),
     }
 
+    out.push(u8::from(validator_safety_ready));
     encode_local_state(&mut out, prepared_tasks, validator_vote_locks)?;
 
     Ok(out)
 }
 
 pub(crate) fn encode_shared_recovery_state(
-    snapshot: &PersistedNodeState,
+    state: &SecondState,
+    validator_set: &ValidatorSet,
+    validator_registry: &ValidatorRegistry,
 ) -> Result<Vec<u8>, PersistenceError> {
-    snapshot
-        .validator_registry
-        .validate_current_set(&snapshot.validator_set)
+    validator_registry
+        .validate_current_set(validator_set)
         .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
 
     let mut out = Vec::new();
-    encode_second_state(&mut out, &snapshot.state)?;
-    encode_validator_set(&mut out, &snapshot.validator_set)?;
-    encode_validator_registry(&mut out, &snapshot.validator_registry)?;
+    encode_second_state(&mut out, state)?;
+    encode_validator_set(&mut out, validator_set)?;
+    encode_validator_registry(&mut out, validator_registry)?;
     Ok(out)
 }
 
@@ -315,9 +321,7 @@ fn encode_second_state(out: &mut Vec<u8>, state: &SecondState) -> Result<(), Per
     Ok(())
 }
 
-fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceError> {
-    let mut decoder = Decoder::new(payload);
-
+fn decode_second_state(decoder: &mut Decoder<'_>) -> Result<SecondState, PersistenceError> {
     let next_currency_address = decoder.read_u64()?;
 
     let account_count = decoder.read_len()?;
@@ -472,6 +476,39 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         }
     }
 
+    Ok(SecondState {
+        protocol: ProtocolState {
+            next_currency_address,
+            task_bindings,
+        },
+        prerequisite: PrerequisiteState { payment_executions },
+        business: BusinessState {
+            accounts,
+            payment_addresses,
+            currencies,
+        },
+    })
+}
+
+pub(crate) fn decode_shared_recovery_state(
+    bytes: &[u8],
+) -> Result<(SecondState, ValidatorSet, ValidatorRegistry), PersistenceError> {
+    let mut decoder = Decoder::new(bytes);
+    let state = decode_second_state(&mut decoder)?;
+    let validator_set = decode_validator_set(&mut decoder)?;
+    let validator_registry = decode_validator_registry(&mut decoder)?;
+    decoder.finish()?;
+    validator_registry
+        .validate_current_set(&validator_set)
+        .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+    Ok((state, validator_set, validator_registry))
+}
+
+fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceError> {
+    let mut decoder = Decoder::new(payload);
+
+    let state = decode_second_state(&mut decoder)?;
+
     let validator_set = decode_validator_set(&mut decoder)?;
     let retained_count = decoder.read_len()?;
     const MIN_VALIDATOR_SET_SIZE: usize = 8 + 8 + 8 + 32 * 3;
@@ -505,22 +542,15 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         _ => return Err(PersistenceError::InvalidSnapshot),
     };
 
+    let validator_safety_ready = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(PersistenceError::InvalidSnapshot),
+    };
     let (prepared_tasks, validator_vote_locks) = decode_local_state(&mut decoder)?;
 
     decoder.finish()?;
 
-    let state = SecondState {
-        protocol: ProtocolState {
-            next_currency_address,
-            task_bindings,
-        },
-        prerequisite: PrerequisiteState { payment_executions },
-        business: BusinessState {
-            accounts,
-            payment_addresses,
-            currencies,
-        },
-    };
     validate_vote_lock_registry(&validator_registry, &validator_vote_locks)?;
     validate_active_prepared_vote_lock_membership(
         &validator_set,
@@ -543,6 +573,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         retained_validator_sets,
         public_checkpoint_proof,
         checkpoint_floor_epoch,
+        validator_safety_ready,
         validator_registry,
         prepared_tasks,
         validator_vote_locks,

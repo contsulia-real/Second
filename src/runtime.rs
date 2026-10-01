@@ -17,12 +17,14 @@ const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NodeId, PeerDirection, PeerLease, PeerManager, PeerRecord,
     PeerRegistrationError, PeerStore, QuicClient, QuicPeer, QuicServer, QuicTransportIdentity,
-    client_peer_records, client_public_currency_checkpoint_proof,
-    client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
+    StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
+    client_public_currency_checkpoint_proof,
+    client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
+    serve_public_network_connection,
 };
 use crate::{
-    PersistenceError, PublicCurrencyCheckpointProof, RemoteCertifiedPublicCurrencyView,
-    SecondState, StateStore, ValidatorSet,
+    CertifiedStateRecoveryCheckpoint, PersistenceError, PublicCurrencyCheckpointProof,
+    RemoteCertifiedPublicCurrencyView, SecondState, StateStore, ValidatorRegistry, ValidatorSet,
 };
 
 #[derive(Debug)]
@@ -56,6 +58,7 @@ struct PublicNetworkContext {
     peer_store: PeerStore,
     local_node_id: NodeId,
     local_peer_record: Option<PeerRecord>,
+    state_recovery_provider: StateRecoveryProviderHandle,
 }
 
 pub struct NodeRuntime {
@@ -63,11 +66,13 @@ pub struct NodeRuntime {
     transport_identity: QuicTransportIdentity,
     state: Arc<SecondState>,
     validator_set: ValidatorSet,
+    validator_registry: ValidatorRegistry,
     checkpoint_floor_epoch: u64,
     public_checkpoint_proof: Option<Arc<PublicCurrencyCheckpointProof>>,
     peer_manager: PeerManager,
     peer_store: PeerStore,
     local_peer_record: Option<PeerRecord>,
+    state_recovery_provider: StateRecoveryProviderHandle,
     active_connections: Arc<AtomicUsize>,
 }
 
@@ -93,6 +98,7 @@ impl NodeRuntime {
         let peer_manager = PeerManager::new(transport_identity.node_id());
         let peer_store = PeerStore::load(peer_store_path(store))?;
         let validator_set = persisted.validator_set.clone();
+        let validator_registry = persisted.validator_registry.clone();
         let checkpoint_floor_epoch = persisted.checkpoint_floor_epoch;
 
         Ok(Self {
@@ -100,11 +106,13 @@ impl NodeRuntime {
             transport_identity,
             state: Arc::new(persisted.state),
             validator_set,
+            validator_registry,
             checkpoint_floor_epoch,
             public_checkpoint_proof: persisted.public_checkpoint_proof.map(Arc::new),
             peer_manager,
             peer_store,
             local_peer_record,
+            state_recovery_provider: new_state_recovery_provider_handle(),
             active_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -190,7 +198,25 @@ impl NodeRuntime {
             peer_store: self.peer_store.clone(),
             local_node_id: self.node_id(),
             local_peer_record: self.local_peer_record.clone(),
+            state_recovery_provider: self.state_recovery_provider.clone(),
         }
+    }
+
+    pub fn publish_state_recovery_checkpoint(
+        &self,
+        checkpoint: CertifiedStateRecoveryCheckpoint,
+    ) -> Result<(), NodeRuntimeError> {
+        let provider = Arc::new(StateRecoveryProvider::new(
+            &self.state,
+            &self.validator_set,
+            &self.validator_registry,
+            &checkpoint,
+        )?);
+        *self
+            .state_recovery_provider
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+        Ok(())
     }
 
     pub async fn bootstrap(
@@ -413,6 +439,7 @@ async fn serve_managed_peer(
         &context.peer_store,
         context.local_node_id,
         context.local_peer_record.as_ref(),
+        &context.state_recovery_provider,
     )
     .await;
 }

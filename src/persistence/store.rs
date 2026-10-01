@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::prepared_plan::PreparedTask;
 use crate::validator_signer::FinalityScope;
 use crate::{
-    CertifiedPublicCurrencyCheckpoint, CertifiedValidatorSetTransition, PersistenceError,
-    PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorTransitionError,
+    CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
+    CertifiedValidatorSetTransition, PersistenceError, PublicCurrencyCheckpointProof, SecondState,
+    StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorTransitionError,
 };
 
 use super::codec::{SnapshotContents, encode_snapshot};
@@ -72,6 +73,7 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
+                validator_safety_ready: true,
                 validator_registry: &validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -105,7 +107,40 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
+                validator_safety_ready: true,
                 validator_registry,
+                prepared_tasks: &prepared_tasks,
+                validator_vote_locks: &validator_vote_locks,
+            },
+        )
+    }
+
+    pub fn install_recovered_state(
+        &self,
+        payload: &StateRecoveryPayload,
+        checkpoint: &CertifiedStateRecoveryCheckpoint,
+        trusted_validator_set: &ValidatorSet,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        if self.load_unlocked()?.is_some() {
+            return Err(PersistenceError::AlreadyInitialized);
+        }
+
+        checkpoint.verify_payload(payload, trusted_validator_set)?;
+
+        let retained_validator_sets = BTreeMap::new();
+        let prepared_tasks = BTreeMap::new();
+        let validator_vote_locks = BTreeMap::new();
+        self.write_next_unlocked(
+            None,
+            SnapshotContents {
+                state: payload.state(),
+                validator_set: payload.validator_set(),
+                retained_validator_sets: &retained_validator_sets,
+                public_checkpoint_proof: None,
+                checkpoint_floor_epoch: 0,
+                validator_safety_ready: false,
+                validator_registry: payload.validator_registry(),
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
             },
@@ -144,6 +179,7 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -194,6 +230,7 @@ impl StateStore {
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -226,6 +263,7 @@ impl StateStore {
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: Some(&proof),
                 checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -258,6 +296,7 @@ impl StateStore {
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -306,6 +345,10 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint.as_ref(),
                 checkpoint_floor_epoch,
+                validator_safety_ready: latest
+                    .as_ref()
+                    .map(|snapshot| snapshot.validator_safety_ready)
+                    .unwrap_or(true),
                 validator_registry: &registry,
                 prepared_tasks,
                 validator_vote_locks: &vote_locks,
@@ -347,6 +390,7 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -378,6 +422,7 @@ impl StateStore {
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -424,6 +469,9 @@ impl StateStore {
             .ok_or(PersistenceError::MissingSnapshot)?;
 
         validate_vote_validator_set(&latest, &scope, validator_set)?;
+        if !latest.validator_safety_ready {
+            return Err(PersistenceError::ValidatorSafetyStateUnavailable);
+        }
 
         match latest
             .validator_vote_locks
@@ -448,6 +496,7 @@ impl StateStore {
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                validator_safety_ready: latest.validator_safety_ready,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,

@@ -28,6 +28,7 @@ pub enum ValidatorSigningError {
     Persistence(PersistenceError),
     Finality(FinalityError),
     ConsensusSigningKeyMismatch(ValidatorId),
+    LocalSafetyStateUnavailable,
     VoteLocked {
         validator_id: ValidatorId,
         locked_digest: [u8; 32],
@@ -195,13 +196,21 @@ impl ValidatorSigner {
         }
 
         let attempted_digest = statement.subject_digest();
-        match self.store.lock_finality_vote(
+        let lock_status = match self.store.lock_finality_vote(
             self.validator_id,
             scope,
             attempted_digest,
             validator_set,
             validate_latest,
-        )? {
+        ) {
+            Ok(status) => status,
+            Err(PersistenceError::ValidatorSafetyStateUnavailable) => {
+                return Err(ValidatorSigningError::LocalSafetyStateUnavailable);
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        match lock_status {
             VoteLockStatus::Inserted | VoteLockStatus::AlreadyLocked => {}
             VoteLockStatus::Conflict(locked_digest) => {
                 return Err(ValidatorSigningError::VoteLocked {

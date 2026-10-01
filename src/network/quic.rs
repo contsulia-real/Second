@@ -155,6 +155,10 @@ impl QuicPeer {
         self.remote_node_id
     }
 
+    pub(crate) fn channel_binding(&self) -> Result<[u8; 32], NetworkError> {
+        peer_channel_binding(&self.connection)
+    }
+
     pub fn close(&self) {
         self.close_with_reason(b"done");
     }

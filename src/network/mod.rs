@@ -4,14 +4,16 @@ mod peer_manager;
 mod peer_record;
 mod peer_store;
 mod quic;
+mod recovery;
 mod session;
 
 use std::fmt;
 
 use crate::{
-    CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCheckpointError,
-    PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
-    PublicStateError,
+    CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
+    FinalityError, PublicCheckpointError, PublicCurrencyCheckpointProof, PublicCurrencyState,
+    PublicCurrencySummary, PublicCurrencyView, PublicStateError, StateRecoveryCheckpointProof,
+    StateRecoveryPayload, ValidatorId,
 };
 
 pub use codec::{decode_network_message, encode_network_message};
@@ -21,6 +23,11 @@ pub(crate) use peer_record::validate_peer_limit;
 pub use peer_record::{MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, PeerRecord};
 pub(crate) use peer_store::PeerStore;
 pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
+pub use recovery::{MAX_STATE_RECOVERY_CHUNK_SIZE, client_fetch_state_recovery};
+pub(crate) use recovery::{
+    StateRecoveryProvider, StateRecoveryProviderHandle, new_state_recovery_provider_handle,
+    state_recovery_response, validate_chunk_limit,
+};
 pub use session::{
     client_peer_records, client_ping, client_public_currency_checkpoint_proof,
     client_public_currency_page, client_public_currency_summary,
@@ -89,6 +96,14 @@ pub struct RemotePublicCurrencySummary {
     pub summary: PublicCurrencySummary,
 }
 
+#[derive(Clone)]
+pub struct RemoteStateRecoveryPayload {
+    pub remote_node_id: NodeId,
+    pub payload: StateRecoveryPayload,
+    pub checkpoint: CertifiedStateRecoveryCheckpoint,
+    pub encoded_payload_len: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkMessage {
     Hello {
@@ -124,6 +139,28 @@ pub enum NetworkMessage {
     Peers {
         records: Vec<PeerRecord>,
     },
+    GetStateRecoveryManifest {
+        validator_id: ValidatorId,
+        signature: [u8; 64],
+    },
+    StateRecoveryManifest {
+        proof: StateRecoveryCheckpointProof,
+        payload_len: u64,
+    },
+    NoStateRecoveryCheckpoint,
+    GetStateRecoveryChunk {
+        validator_id: ValidatorId,
+        checkpoint_digest: [u8; 32],
+        offset: u64,
+        limit: u32,
+        signature: [u8; 64],
+    },
+    StateRecoveryChunk {
+        checkpoint_digest: [u8; 32],
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    StateRecoveryDenied,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +236,20 @@ pub enum NetworkError {
         actual_epoch: u64,
     },
     CheckpointDoesNotMatchServedState,
+    StateRecoveryUnauthorized,
+    MissingStateRecoveryCheckpoint,
+    InvalidStateRecoveryProof,
+    InvalidStateRecoveryChunk,
+    InvalidStateRecoveryPayload,
+    StateRecoveryFinality(FinalityError),
+    StateRecoveryPayloadTooLarge {
+        announced: u64,
+        maximum: u64,
+    },
+    InvalidStateRecoveryChunkLimit {
+        requested: u32,
+        maximum: u32,
+    },
     UnexpectedMessage,
     NonceMismatch {
         expected: u64,

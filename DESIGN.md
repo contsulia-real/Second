@@ -1018,7 +1018,15 @@ Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 author
 
 `StateRecoveryCheckpoint` 具有独立 `serial`，与 public checkpoint epoch、`ValidatorSet.version`、snapshot generation 均不是同一序列；checkpoint digest 使用独立 domain separation，并把 protocol version、serial、当前 validator-set version 与 shared-state digest 一起绑定。当前这一层只定义 checkpoint 身份/排序字段和同-serial anti-equivocation：`ValidatorSigner` 只能用持久 `ValidatorRegistry` 认可的当前 active ValidatorSet 对它签票，vote-lock scope 为 `(validator_set_version, serial)`；同一 scope 重放同 digest 允许，同 scope 不同 shared state 永久拒绝。serial 的全网发行/推进策略以及 recovery 安装时的持久 freshness floor 仍属于后续 recovery protocol，不在本轮偷偷定义。
 
-`CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是未来提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。网络 payload、授权下载、原子安装以及 Validator local safety-state 恢复仍未实现。
+`CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。
+
+privileged recovery 已复用现有 QUIC/TLS connection 与二进制 framing，但授权层与 authenticated-open public read 明确分离。`NodeId` / transport key 仍只证明 transport peer；请求 private recovery manifest/chunk 时，调用方必须额外声明当前 `ValidatorId`，并使用该 active ValidatorCredential 的 **identity key** 对 recovery request 签名。签名 domain 独立，并绑定 `CURRENT_NETWORK_PROTOCOL_VERSION + 当前 QUIC TLS exporter channel binding + ValidatorId + request kind`；chunk 请求还绑定 checkpoint digest、offset、limit。服务端只按自己当前 active `ValidatorSet` 的 identity public key 验证，错误 key、未知/retired ValidatorId 都统一拒绝。consensus key 继续只用于 finality，recovery key 继续只用于既定 recovery/rotation authority，不与会话认证职责复用。
+
+`StateRecoveryPayload` 的 bytes 就是 shared-state commitment 使用的同一份 canonical `SecondState + active ValidatorSet + ValidatorRegistry` 编码，不创建第二套私有 snapshot serializer。下载先取得 manifest 中的未验证 recovery checkpoint proof 与 payload length；客户端必须先用调用方已经信任的 exact `ValidatorSet` 验证 QC，再请求 payload chunk。payload 以最多 60 KiB 的 chunk 传输，避免被 64 KiB network frame 上限卡住；每个 chunk request 都重新做 channel-bound identity proof，并绑定 checkpoint digest/offset/limit。组装完毕后重新 decode canonical payload，再次验证 payload digest、exact ValidatorSet 与 certified checkpoint，一处不一致即 fail-closed。QUIC 已提供传输加密，不另造应用层加密格式。
+
+`NodeRuntime::publish_state_recovery_checkpoint` 只显式发布一个与 runtime 当前 shared state 匹配的 certified checkpoint，并把 immutable provider 放在内存中；当前不会因启动节点就自动选择/推进 recovery serial，也不会把“latest recovery checkpoint”偷偷写成新的持久 authority。provider 可以被新的 certified checkpoint 替换；正在下载旧 digest 的客户端若因此无法继续，应从 manifest 重新开始。
+
+`StateStore::install_recovered_state` 只允许写入**空 store**：先验证 trusted ValidatorSet、QC、payload exact set 与 shared-state digest，再通过现有 dual-slot writer 一次性安装。任何已有 snapshot 都返回 `AlreadyInitialized`，因此 recovery 不能成为任意 state overwrite API。安装结果只包含 recovered shared state；retained sets、PreparedTask lifecycle、vote-lock、attached public checkpoint proof 均为空，public checkpoint floor 当前从 0 开始。最重要的是 snapshot 会持久写入 `validator_safety_ready = false`；正常 genesis/既有节点为 true。所有 `ValidatorSigner` 的 vote-lock 入口都在 store lock 内检查此标记，所以只恢复 shared state 的 Validator **可以读取/继续恢复数据，但不能重新签任何 finality vote**。恢复本地 vote-lock / PreparedTask safety continuity 并安全地重新置为 ready 的流程仍未实现，也不存在绕过该门槛的公开 setter。
 
 ---
 
@@ -1045,8 +1053,10 @@ Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 author
 | validator_signer.rs | 永久 vote-lock 后的签票入口 |
 | public_state.rs | 公开 Currency summary / view |
 | public_checkpoint.rs | 公共 checkpoint 与 finality proof |
+| state_recovery_checkpoint.rs | shared recovery payload/checkpoint/QC commitment |
 | network/ | 二进制网络 framing / session / public state sync |
-| persistence/ | 私有 snapshot、prepared、vote-lock、registry 恢复 |
+| network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
+| persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
 | transaction.rs | 外部 transaction request 严格解析 |
 | main.rs | 当前 CLI / 可执行网络入口 |
 
@@ -1211,7 +1221,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有 `StateRecoveryCheckpoint` shared-state commitment + 当前 active ValidatorSet QC 基础上，继续设计 privileged recovery transport、授权下载、serial/freshness 持久规则、原子安装，以及 Validator 自己的 local safety-state 恢复；不能把 vote-lock / PreparedTask lifecycle 当作全网 shared snapshot 直接覆盖；
+- privileged recovery transport、active-Validator identity 授权、chunked shared payload 与空-store 原子安装已经具备；下一步仍需冻结 recovery serial 的发行/freshness 持久规则，以及 Validator 自己的 local safety-state 恢复/重新启用签票流程。`validator_safety_ready = false` 的恢复节点在该流程完成前必须一直 fail-closed；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；
