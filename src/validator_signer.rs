@@ -3,8 +3,8 @@ use ed25519_dalek::SigningKey;
 use crate::persistence::VoteLockStatus;
 use crate::{
     CURRENT_PROTOCOL_VERSION, FinalityError, FinalityStatement, PersistenceError,
-    PublicCurrencyCheckpoint, StateStore, TaskId, ValidatorId, ValidatorSet,
-    ValidatorSetTransition, ValidatorVote,
+    PublicCurrencyCheckpoint, StateRecoveryCheckpoint, StateStore, TaskId, ValidatorId,
+    ValidatorSet, ValidatorSetTransition, ValidatorVote,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -16,6 +16,10 @@ pub(crate) enum FinalityScope {
     },
     ValidatorSetTransition {
         current_validator_set_version: u64,
+    },
+    StateRecoveryCheckpoint {
+        validator_set_version: u64,
+        serial: u64,
     },
 }
 
@@ -85,6 +89,27 @@ impl ValidatorSigner {
                 }
                 if checkpoint.summary() != &latest.state.public_currency_summary() {
                     return Err(PersistenceError::CheckpointDoesNotMatchState);
+                }
+                Ok(())
+            },
+        )
+    }
+
+    pub fn sign_state_recovery_checkpoint(
+        &self,
+        checkpoint: &StateRecoveryCheckpoint,
+        validator_set: &ValidatorSet,
+    ) -> Result<ValidatorVote, ValidatorSigningError> {
+        self.sign_locked(
+            &checkpoint.finality_statement(),
+            validator_set,
+            FinalityScope::StateRecoveryCheckpoint {
+                validator_set_version: checkpoint.validator_set_version(),
+                serial: checkpoint.serial(),
+            },
+            |latest| {
+                if !checkpoint.matches_persisted(latest)? {
+                    return Err(PersistenceError::RecoveryCheckpointDoesNotMatchState);
                 }
                 Ok(())
             },

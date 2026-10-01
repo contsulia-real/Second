@@ -1002,13 +1002,23 @@ snapshot 中的 active PreparedTask 不能只满足字节格式正确：写入�
 
 所有持久 Validator vote-lock 的 `ValidatorId` 还必须存在于永久 `ValidatorRegistry` 历史中；已经 retired 的 Validator 仍可保留历史 lock，但从未被网络授权过的 ValidatorId 不能出现在 snapshot vote-lock 中。若 `PreparedTask` 仍 active，则其 vote-lock signer 还必须属于该 task 绑定的 exact active/retained ValidatorSet；task 已完成、只剩历史 lock 时不为此永久保留完整旧 membership。
 
-Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 authority 必须在同一 store 锁临界区绑定到 durable snapshot，而不是只信调用方传入的同版本对象：调用方提供的 `ValidatorSet` 必须与持久 `ValidatorRegistry` 的 current set 精确一致；PublicCheckpoint 的 summary 必须等于锁内最新 durable public Currency state，且其 epoch 不得低于已持久化的 `checkpoint_floor_epoch`；ValidatorSetTransition 的 next set 必须重新通过锁内最新永久 `ValidatorRegistry` history 校验。subject-specific 校验成功后才能持久化 vote-lock。已经存在的同 digest lock 仍允许确定性重放；同 scope 不同 digest 继续 fail-closed 为 double-sign conflict。PublicCheckpoint 的 vote-lock scope 是 `(validator_set_version, epoch)`，不能只用 epoch：ValidatorSet 切换后，即使 freshness epoch 数字相同，也属于新的 finality authority；同一 Validator 留任到新 set 后必须建立独立的新 scope，而不能复用旧 set 的 checkpoint lock。
+Validator 第一次为某个 finality scope 建立 vote-lock 时，签名 authority 必须在同一 store 锁临界区绑定到 durable snapshot，而不是只信调用方传入的同版本对象：调用方提供的 `ValidatorSet` 必须与持久 `ValidatorRegistry` 的 current set 精确一致；PublicCheckpoint 的 summary 必须等于锁内最新 durable public Currency state，且其 epoch 不得低于已持久化的 `checkpoint_floor_epoch`；ValidatorSetTransition 的 next set 必须重新通过锁内最新永久 `ValidatorRegistry` history 校验；StateRecoveryCheckpoint 的 shared-state digest 必须重新由锁内最新 durable shared state 计算并完全一致。subject-specific 校验成功后才能持久化 vote-lock。已经存在的同 digest lock 仍允许确定性重放；同 scope 不同 digest 继续 fail-closed 为 double-sign conflict。PublicCheckpoint 的 vote-lock scope 是 `(validator_set_version, epoch)`，StateRecoveryCheckpoint 的 vote-lock scope 是 `(validator_set_version, serial)`：两者都不能只靠 freshness 数字跨 ValidatorSet 复用，同一 Validator 留任到新 set 后必须建立独立的新 scope。
 
 正式 LegalTask 状态写入还必须防止 stale writer 覆盖已经 durable 的更新。`PreparedTaskBook` 对包含 `SecondState` 与 PreparedTask 集合的 read-modify-write 使用语义 compare-and-swap：写入 candidate state 时，锁内最新 snapshot 的 `SecondState` 必须仍等于本次计算 candidate 所基于的 base state，并且 PreparedTask map 必须仍等于本地 book 所基于的旧 map；仅修改 PreparedTask lifecycle 时也必须以旧 map 做 compare-base。任一比较不成立都 fail-closed，调用方必须重新加载最新持久状态，不能自动把两份冻结计划或业务状态合并。
 
 这里不使用 snapshot `generation` 作为业务 CAS token，因为 vote-lock、checkpoint floor 等独立持久元数据也会合法推进 generation；这些元数据更新不应无故让未冲突的 LegalTask writer 失败。store 锁负责原子检查+写入，语义 base-state / base-prepared 比较负责防 lost update。
 
 `StateStore` 本身不是资产或协议状态 mutation API。空 store 可以通过 `initialize` 一次性写入 bootstrap state；需要携带既有 ValidatorRegistry 历史时使用同样仅限空 store 的初始化入口。初始化完成后，不再提供接受任意 `SecondState` 并覆盖当前 snapshot 的公开 writer。checkpoint proof / checkpoint floor 更新只作用于锁内读取到的最新 snapshot metadata，不接受调用方附带另一份 state。后续 LegalTask 导致的 `SecondState` 演进只能由正式 `PreparedTaskBook` 的 prepare / finality / commit 持久化路径完成。
+
+### 17.4 State recovery commitment
+
+完整恢复分成“网络可共同认证的 shared state”和“Validator 自己必须连续保存的 local safety state”，二者不得混成一个 digest。`StateRecoveryCheckpoint` 当前承诺的 shared state 只包含：完整 `SecondState`（因此包括 committed TaskId bindings、PaymentAddress/ownership、payment execution prerequisite 等协议/业务事实）、当前 active `ValidatorSet`、永久 `ValidatorRegistry`。canonical bytes 复用 persistence 当前权威字段编码器；persistence codec 与 recovery commitment 不分别维护两套 `SecondState`/Validator 编码规则。
+
+以下字段明确**不进入** shared recovery digest：snapshot slot `generation`、attached public checkpoint proof、`checkpoint_floor_epoch`、active/retained PreparedTask 本地 lifecycle、`retained_validator_sets`、Validator vote-lock。`retained_validator_sets` 只为本节点仍活跃并绑定旧 set 的 PreparedTask 服务；vote-lock 与 PreparedTask phase 是 Validator 本地 safety/recovery 状态，不保证不同 Validator 相同。把这些字段塞进 quorum shared digest 会导致诚实 Validator 因各自本地签票历史不同而无法形成同一 QC，并且“签 recovery checkpoint 本身新增 vote-lock”会造成自引用 digest 循环。
+
+`StateRecoveryCheckpoint` 具有独立 `serial`，与 public checkpoint epoch、`ValidatorSet.version`、snapshot generation 均不是同一序列；checkpoint digest 使用独立 domain separation，并把 protocol version、serial、当前 validator-set version 与 shared-state digest 一起绑定。当前这一层只定义 checkpoint 身份/排序字段和同-serial anti-equivocation：`ValidatorSigner` 只能用持久 `ValidatorRegistry` 认可的当前 active ValidatorSet 对它签票，vote-lock scope 为 `(validator_set_version, serial)`；同一 scope 重放同 digest 允许，同 scope 不同 shared state 永久拒绝。serial 的全网发行/推进策略以及 recovery 安装时的持久 freshness floor 仍属于后续 recovery protocol，不在本轮偷偷定义。
+
+`CertifiedStateRecoveryCheckpoint` 复用通用 `FinalityCertificate`，因此阈值仍是当前 active ValidatorSet 的 `floor(2N/3)+1`。可信的是 quorum 对 shared-state commitment 的证明，不是未来提供 recovery payload 的某个 peer。retained old ValidatorSet 没有发布新 recovery checkpoint 的 authority；旧 set 只继续服务其绑定的历史 PreparedTask。网络 payload、授权下载、原子安装以及 Validator local safety-state 恢复仍未实现。
 
 ---
 
@@ -1201,7 +1211,7 @@ ValidatorId + TaskId
 
 后续重点：
 
-- 在现有静态 bootstrap sidecar + authenticated self-reachability refresh + MRU/failure-demotion peer selection + active-peer certified public sync 基础上，后续只在真实部署需要时再决定 NAT traversal、DNS seed/DHT、更复杂的 peer quality 指标，或单独设计完整 state recovery/synchronization；transport identity 仍只证明 key ownership，不等于 Validator authority；
+- 在现有 `StateRecoveryCheckpoint` shared-state commitment + 当前 active ValidatorSet QC 基础上，继续设计 privileged recovery transport、授权下载、serial/freshness 持久规则、原子安装，以及 Validator 自己的 local safety-state 恢复；不能把 vote-lock / PreparedTask lifecycle 当作全网 shared snapshot 直接覆盖；
 - 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
 - 如果需要完整 Byzantine consensus state machine，再单独设计 round / locking / view-change；当前 quorum certificate 本身不等于完整 BFT consensus；
 - LegalTask 的隐私安全网络传播方案目前未冻结，因此不能直接公开广播；

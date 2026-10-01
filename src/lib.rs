@@ -14,6 +14,7 @@ mod public_checkpoint;
 mod public_state;
 mod runtime;
 mod state;
+mod state_recovery_checkpoint;
 mod task;
 mod transaction;
 mod validator;
@@ -57,6 +58,7 @@ pub use public_checkpoint::{
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
 pub use runtime::{DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError};
 pub use state::{ExecutionOutcome, SecondState};
+pub use state_recovery_checkpoint::{CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint};
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
 pub use validator::{ValidatorCredential, ValidatorSet};

@@ -7,6 +7,7 @@ mod snapshot_validation;
 mod store;
 mod validator_codec;
 
+pub(crate) use codec::encode_shared_recovery_state;
 pub use store::StateStore;
 
 use std::collections::BTreeMap;

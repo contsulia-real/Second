@@ -555,7 +555,9 @@ fn validate_vote_validator_set(
                 return Err(PersistenceError::ValidatorRegistryMismatch);
             }
         }
-        FinalityScope::PublicCheckpoint { .. } | FinalityScope::ValidatorSetTransition { .. } => {
+        FinalityScope::PublicCheckpoint { .. }
+        | FinalityScope::ValidatorSetTransition { .. }
+        | FinalityScope::StateRecoveryCheckpoint { .. } => {
             snapshot
                 .validator_registry
                 .validate_current_set(validator_set)

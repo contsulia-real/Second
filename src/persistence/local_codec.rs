@@ -265,6 +265,14 @@ fn encode_scope(out: &mut Vec<u8>, scope: &FinalityScope) {
             out.push(3);
             out.extend_from_slice(&current_validator_set_version.to_be_bytes());
         }
+        FinalityScope::StateRecoveryCheckpoint {
+            validator_set_version,
+            serial,
+        } => {
+            out.push(4);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            out.extend_from_slice(&serial.to_be_bytes());
+        }
     }
 }
 
@@ -277,6 +285,10 @@ fn decode_scope(decoder: &mut Decoder<'_>) -> Result<FinalityScope, PersistenceE
         }),
         3 => Ok(FinalityScope::ValidatorSetTransition {
             current_validator_set_version: decoder.read_u64()?,
+        }),
+        4 => Ok(FinalityScope::StateRecoveryCheckpoint {
+            validator_set_version: decoder.read_u64()?,
+            serial: decoder.read_u64()?,
         }),
         _ => Err(PersistenceError::InvalidSnapshot),
     }

@@ -94,6 +94,7 @@ pub enum PersistenceError {
     GenerationOverflow,
     ConflictingSnapshotGeneration(u64),
     CheckpointDoesNotMatchState,
+    RecoveryCheckpointDoesNotMatchState,
     CheckpointValidatorSetMismatch { expected: u64, actual: u64 },
     CheckpointFinality(FinalityError),
     StaleCheckpointEpoch { minimum: u64, actual: u64 },

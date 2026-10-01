@@ -210,65 +210,7 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     let validator_vote_locks = contents.validator_vote_locks;
     let mut out = Vec::new();
 
-    if state
-        .business
-        .currencies
-        .values()
-        .any(|currency| currency.address.value() >= state.protocol.next_currency_address)
-    {
-        return Err(PersistenceError::InvalidSnapshot);
-    }
-
-    out.extend_from_slice(&state.protocol.next_currency_address.to_be_bytes());
-
-    push_len(&mut out, state.business.accounts.len())?;
-    for account in &state.business.accounts {
-        out.extend_from_slice(&account.bytes());
-    }
-
-    push_len(&mut out, state.business.payment_addresses.len())?;
-    for (address, record) in &state.business.payment_addresses {
-        out.extend_from_slice(&address.bytes());
-        out.extend_from_slice(&record.account.bytes());
-        out.push(match record.status {
-            PaymentAddressStatus::Active => 1,
-            PaymentAddressStatus::Retiring => 2,
-            PaymentAddressStatus::Retired => 3,
-        });
-    }
-
-    push_len(&mut out, state.business.currencies.len())?;
-    for currency in state.business.currencies.values() {
-        out.extend_from_slice(&currency.address.value().to_be_bytes());
-        out.push(match currency.role {
-            CurrencyRole::Circulation => 1,
-            CurrencyRole::Reserve => 2,
-        });
-        match currency.owner {
-            Some(owner) => {
-                out.push(1);
-                out.extend_from_slice(&owner.bytes());
-            }
-            None => out.push(0),
-        }
-    }
-
-    push_len(&mut out, state.protocol.task_bindings.len())?;
-    for (task_id, binding) in &state.protocol.task_bindings {
-        push_task_id(&mut out, task_id);
-        out.extend_from_slice(&binding.request_digest);
-        out.push(u8::from(binding.succeeded));
-    }
-
-    push_len(&mut out, state.prerequisite.payment_executions.len())?;
-    for (claim_id, execution) in &state.prerequisite.payment_executions {
-        push_task_id(&mut out, claim_id.task_id());
-        out.extend_from_slice(&claim_id.operation_index().to_be_bytes());
-        out.extend_from_slice(&execution.source.bytes());
-        out.extend_from_slice(&execution.destination.bytes());
-        out.extend_from_slice(&execution.amount.to_be_bytes());
-    }
-
+    encode_second_state(&mut out, state)?;
     encode_validator_set(&mut out, validator_set)?;
     push_len(&mut out, retained_validator_sets.len())?;
     for retained in retained_validator_sets.values() {
@@ -293,6 +235,84 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     encode_local_state(&mut out, prepared_tasks, validator_vote_locks)?;
 
     Ok(out)
+}
+
+pub(crate) fn encode_shared_recovery_state(
+    snapshot: &PersistedNodeState,
+) -> Result<Vec<u8>, PersistenceError> {
+    snapshot
+        .validator_registry
+        .validate_current_set(&snapshot.validator_set)
+        .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+
+    let mut out = Vec::new();
+    encode_second_state(&mut out, &snapshot.state)?;
+    encode_validator_set(&mut out, &snapshot.validator_set)?;
+    encode_validator_registry(&mut out, &snapshot.validator_registry)?;
+    Ok(out)
+}
+
+fn encode_second_state(out: &mut Vec<u8>, state: &SecondState) -> Result<(), PersistenceError> {
+    if state
+        .business
+        .currencies
+        .values()
+        .any(|currency| currency.address.value() >= state.protocol.next_currency_address)
+    {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    out.extend_from_slice(&state.protocol.next_currency_address.to_be_bytes());
+
+    push_len(out, state.business.accounts.len())?;
+    for account in &state.business.accounts {
+        out.extend_from_slice(&account.bytes());
+    }
+
+    push_len(out, state.business.payment_addresses.len())?;
+    for (address, record) in &state.business.payment_addresses {
+        out.extend_from_slice(&address.bytes());
+        out.extend_from_slice(&record.account.bytes());
+        out.push(match record.status {
+            PaymentAddressStatus::Active => 1,
+            PaymentAddressStatus::Retiring => 2,
+            PaymentAddressStatus::Retired => 3,
+        });
+    }
+
+    push_len(out, state.business.currencies.len())?;
+    for currency in state.business.currencies.values() {
+        out.extend_from_slice(&currency.address.value().to_be_bytes());
+        out.push(match currency.role {
+            CurrencyRole::Circulation => 1,
+            CurrencyRole::Reserve => 2,
+        });
+        match currency.owner {
+            Some(owner) => {
+                out.push(1);
+                out.extend_from_slice(&owner.bytes());
+            }
+            None => out.push(0),
+        }
+    }
+
+    push_len(out, state.protocol.task_bindings.len())?;
+    for (task_id, binding) in &state.protocol.task_bindings {
+        push_task_id(out, task_id);
+        out.extend_from_slice(&binding.request_digest);
+        out.push(u8::from(binding.succeeded));
+    }
+
+    push_len(out, state.prerequisite.payment_executions.len())?;
+    for (claim_id, execution) in &state.prerequisite.payment_executions {
+        push_task_id(out, claim_id.task_id());
+        out.extend_from_slice(&claim_id.operation_index().to_be_bytes());
+        out.extend_from_slice(&execution.source.bytes());
+        out.extend_from_slice(&execution.destination.bytes());
+        out.extend_from_slice(&execution.amount.to_be_bytes());
+    }
+
+    Ok(())
 }
 
 fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceError> {
