@@ -38,7 +38,7 @@ pub(crate) use recovery::{
     state_recovery_response, validate_chunk_limit,
 };
 pub(crate) use session::{
-    PublicNetworkServices, PublicNetworkSnapshot,
+    PublicNetworkServices, RuntimeNetworkSnapshot,
     client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
     serve_public_network_connection_from_request,
 };

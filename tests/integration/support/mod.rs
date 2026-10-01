@@ -127,6 +127,32 @@ pub fn verified_validator_admission(id: u64) -> VerifiedValidatorAdmission {
     .unwrap()
 }
 
+pub fn certified_validator_membership_transition(
+    current: &ValidatorSet,
+    next_version: u64,
+    next_ids: impl IntoIterator<Item = u64>,
+    admitted_ids: impl IntoIterator<Item = u64>,
+    signer_ids: impl IntoIterator<Item = u64>,
+) -> CertifiedValidatorSetTransition {
+    let registry = ValidatorRegistry::from_validator_set(current).unwrap();
+    let next =
+        ValidatorSet::new(next_version, next_ids.into_iter().map(validator_credential)).unwrap();
+    let admissions = admitted_ids
+        .into_iter()
+        .map(verified_validator_admission)
+        .collect();
+    let transition = ValidatorSetTransition::new(
+        CURRENT_PROTOCOL_VERSION,
+        current,
+        &registry,
+        next,
+        admissions,
+        Vec::new(),
+    )
+    .unwrap();
+    certify_validator_transition(current, transition, signer_ids)
+}
+
 pub fn certified_add_validator_transition(
     current: &ValidatorSet,
     next_version: u64,
@@ -134,23 +160,15 @@ pub fn certified_add_validator_transition(
     new_validator_id: u64,
     signer_ids: impl IntoIterator<Item = u64>,
 ) -> CertifiedValidatorSetTransition {
-    let registry = ValidatorRegistry::from_validator_set(current).unwrap();
-    let mut credentials = existing_ids
-        .into_iter()
-        .map(validator_credential)
-        .collect::<Vec<_>>();
-    credentials.push(validator_credential(new_validator_id));
-    let next = ValidatorSet::new(next_version, credentials).unwrap();
-    let transition = ValidatorSetTransition::new(
-        CURRENT_PROTOCOL_VERSION,
+    let mut next_ids = existing_ids.into_iter().collect::<Vec<_>>();
+    next_ids.push(new_validator_id);
+    certified_validator_membership_transition(
         current,
-        &registry,
-        next,
-        vec![verified_validator_admission(new_validator_id)],
-        Vec::new(),
+        next_version,
+        next_ids,
+        [new_validator_id],
+        signer_ids,
     )
-    .unwrap();
-    certify_validator_transition(current, transition, signer_ids)
 }
 
 pub fn certify_validator_transition(

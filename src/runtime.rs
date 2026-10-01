@@ -16,8 +16,8 @@ const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
-    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, PublicNetworkSnapshot,
-    QuicClient, QuicPeer, QuicRequestStream, QuicServer, QuicTransportIdentity,
+    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
+    QuicRequestStream, QuicServer, QuicTransportIdentity, RuntimeNetworkSnapshot,
     StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
     client_public_currency_checkpoint_proof,
     client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
@@ -486,9 +486,11 @@ async fn serve_managed_peer(
             .load()
             .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
             .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
-        Ok(PublicNetworkSnapshot {
+        Ok(RuntimeNetworkSnapshot {
             state: persisted.state,
             checkpoint_proof: persisted.public_checkpoint_proof,
+            validator_set: persisted.validator_set,
+            validator_registry: persisted.validator_registry,
         })
     };
     let services = PublicNetworkServices::new(

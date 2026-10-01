@@ -20,10 +20,17 @@ pub(crate) fn new_state_recovery_provider_handle() -> StateRecoveryProviderHandl
 }
 
 pub(crate) struct StateRecoveryProvider {
-    validator_set: ValidatorSet,
     proof: crate::StateRecoveryCheckpointProof,
     checkpoint_digest: [u8; 32],
     payload: Vec<u8>,
+}
+
+struct StateRecoveryRequestContext<'a> {
+    state: &'a SecondState,
+    validator_set: &'a ValidatorSet,
+    validator_registry: &'a ValidatorRegistry,
+    validator_id: ValidatorId,
+    signature: [u8; 64],
 }
 
 impl StateRecoveryProvider {
@@ -56,23 +63,44 @@ impl StateRecoveryProvider {
         }
 
         Ok(Self {
-            validator_set: validator_set.clone(),
             proof: checkpoint.to_unverified_proof(),
             checkpoint_digest: checkpoint.checkpoint().digest(),
             payload: encoded,
         })
     }
 
+    fn matches_shared_state(
+        &self,
+        state: &SecondState,
+        validator_set: &ValidatorSet,
+        validator_registry: &ValidatorRegistry,
+    ) -> Result<bool, NetworkError> {
+        let payload =
+            StateRecoveryPayload::from_shared_parts(state, validator_set, validator_registry)
+                .map_err(|_| NetworkError::InvalidStateRecoveryPayload)?;
+        self.proof
+            .checkpoint()
+            .matches_payload(&payload)
+            .map_err(|_| NetworkError::InvalidStateRecoveryPayload)
+    }
+
     fn manifest_response(
         &self,
         peer: &QuicPeer,
-        validator_id: ValidatorId,
-        signature: [u8; 64],
+        auth: StateRecoveryRequestContext<'_>,
     ) -> Result<NetworkMessage, NetworkError> {
         let binding = peer.channel_binding()?;
-        let message = manifest_auth_bytes(binding, validator_id);
-        if !verify_identity_signature(&self.validator_set, validator_id, signature, &message) {
+        let message = manifest_auth_bytes(binding, auth.validator_id);
+        if !verify_identity_signature(
+            auth.validator_set,
+            auth.validator_id,
+            auth.signature,
+            &message,
+        ) {
             return Ok(NetworkMessage::StateRecoveryDenied);
+        }
+        if !self.matches_shared_state(auth.state, auth.validator_set, auth.validator_registry)? {
+            return Ok(NetworkMessage::NoStateRecoveryCheckpoint);
         }
 
         Ok(NetworkMessage::StateRecoveryManifest {
@@ -84,17 +112,25 @@ impl StateRecoveryProvider {
     fn chunk_response(
         &self,
         peer: &QuicPeer,
-        validator_id: ValidatorId,
+        auth: StateRecoveryRequestContext<'_>,
         checkpoint_digest: [u8; 32],
         offset: u64,
         limit: u32,
-        signature: [u8; 64],
     ) -> Result<NetworkMessage, NetworkError> {
         validate_chunk_limit(limit)?;
         let binding = peer.channel_binding()?;
-        let message = chunk_auth_bytes(binding, validator_id, checkpoint_digest, offset, limit);
-        if !verify_identity_signature(&self.validator_set, validator_id, signature, &message) {
+        let message =
+            chunk_auth_bytes(binding, auth.validator_id, checkpoint_digest, offset, limit);
+        if !verify_identity_signature(
+            auth.validator_set,
+            auth.validator_id,
+            auth.signature,
+            &message,
+        ) {
             return Ok(NetworkMessage::StateRecoveryDenied);
+        }
+        if !self.matches_shared_state(auth.state, auth.validator_set, auth.validator_registry)? {
+            return Ok(NetworkMessage::NoStateRecoveryCheckpoint);
         }
         if checkpoint_digest != self.checkpoint_digest {
             return Err(NetworkError::InvalidStateRecoveryChunk);
@@ -114,11 +150,15 @@ impl StateRecoveryProvider {
     }
 }
 
-pub(crate) fn state_recovery_response(
+pub(crate) fn state_recovery_response<F>(
     peer: &QuicPeer,
     message: &NetworkMessage,
     handle: &StateRecoveryProviderHandle,
-) -> Option<Result<NetworkMessage, NetworkError>> {
+    load_current_validator_set: F,
+) -> Option<Result<NetworkMessage, NetworkError>>
+where
+    F: FnOnce() -> Result<(SecondState, ValidatorSet, ValidatorRegistry), NetworkError>,
+{
     match message {
         NetworkMessage::GetStateRecoveryManifest {
             validator_id,
@@ -129,7 +169,20 @@ pub(crate) fn state_recovery_response(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
             Some(match provider {
-                Some(provider) => provider.manifest_response(peer, *validator_id, *signature),
+                Some(provider) => {
+                    load_current_validator_set().and_then(|(state, validator_set, registry)| {
+                        provider.manifest_response(
+                            peer,
+                            StateRecoveryRequestContext {
+                                state: &state,
+                                validator_set: &validator_set,
+                                validator_registry: &registry,
+                                validator_id: *validator_id,
+                                signature: *signature,
+                            },
+                        )
+                    })
+                }
                 None => Ok(NetworkMessage::NoStateRecoveryCheckpoint),
             })
         }
@@ -145,14 +198,23 @@ pub(crate) fn state_recovery_response(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
             Some(match provider {
-                Some(provider) => provider.chunk_response(
-                    peer,
-                    *validator_id,
-                    *checkpoint_digest,
-                    *offset,
-                    *limit,
-                    *signature,
-                ),
+                Some(provider) => {
+                    load_current_validator_set().and_then(|(state, validator_set, registry)| {
+                        provider.chunk_response(
+                            peer,
+                            StateRecoveryRequestContext {
+                                state: &state,
+                                validator_set: &validator_set,
+                                validator_registry: &registry,
+                                validator_id: *validator_id,
+                                signature: *signature,
+                            },
+                            *checkpoint_digest,
+                            *offset,
+                            *limit,
+                        )
+                    })
+                }
                 None => Ok(NetworkMessage::NoStateRecoveryCheckpoint),
             })
         }

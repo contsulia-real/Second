@@ -1,19 +1,21 @@
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCurrencyCheckpointProof,
-    PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorSet,
+    PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorRegistry, ValidatorSet,
 };
 
 use super::quic::{QuicPeer, QuicRequestStream};
 
 const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 
-pub(crate) struct PublicNetworkSnapshot {
+pub(crate) struct RuntimeNetworkSnapshot {
     pub(crate) state: SecondState,
     pub(crate) checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+    pub(crate) validator_set: ValidatorSet,
+    pub(crate) validator_registry: ValidatorRegistry,
 }
 
-type PublicNetworkSnapshotLoader<'a> =
-    &'a (dyn Fn() -> Result<PublicNetworkSnapshot, NetworkError> + Send + Sync);
+type RuntimeNetworkSnapshotLoader<'a> =
+    &'a (dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync);
 
 #[derive(Clone, Copy)]
 pub(crate) struct PublicNetworkServices<'a> {
@@ -21,7 +23,7 @@ pub(crate) struct PublicNetworkServices<'a> {
     local_node_id: NodeId,
     local_peer_record: Option<&'a PeerRecord>,
     state_recovery_provider: &'a StateRecoveryProviderHandle,
-    public_snapshot_loader: PublicNetworkSnapshotLoader<'a>,
+    runtime_snapshot_loader: RuntimeNetworkSnapshotLoader<'a>,
 }
 
 impl<'a> PublicNetworkServices<'a> {
@@ -30,14 +32,14 @@ impl<'a> PublicNetworkServices<'a> {
         local_node_id: NodeId,
         local_peer_record: Option<&'a PeerRecord>,
         state_recovery_provider: &'a StateRecoveryProviderHandle,
-        public_snapshot_loader: PublicNetworkSnapshotLoader<'a>,
+        runtime_snapshot_loader: RuntimeNetworkSnapshotLoader<'a>,
     ) -> Self {
         Self {
             peer_store,
             local_node_id,
             local_peer_record,
             state_recovery_provider,
-            public_snapshot_loader,
+            runtime_snapshot_loader,
         }
     }
 }
@@ -301,7 +303,20 @@ async fn serve_public_connection(
         };
 
         let recovery_response = services.as_ref().and_then(|services| {
-            state_recovery_response(peer, request.message(), services.state_recovery_provider)
+            state_recovery_response(
+                peer,
+                request.message(),
+                services.state_recovery_provider,
+                || {
+                    (services.runtime_snapshot_loader)().map(|snapshot| {
+                        (
+                            snapshot.state,
+                            snapshot.validator_set,
+                            snapshot.validator_registry,
+                        )
+                    })
+                },
+            )
         });
         let response = match recovery_response {
             Some(response) => response?,
@@ -385,8 +400,8 @@ fn public_currency_response_for_snapshot(
 
 fn load_runtime_public_snapshot(
     services: &PublicNetworkServices<'_>,
-) -> Result<PublicNetworkSnapshot, NetworkError> {
-    let snapshot = (services.public_snapshot_loader)()?;
+) -> Result<RuntimeNetworkSnapshot, NetworkError> {
+    let snapshot = (services.runtime_snapshot_loader)()?;
     if snapshot.checkpoint_proof.as_ref().is_some_and(|proof| {
         proof.checkpoint().summary() != &snapshot.state.public_currency_summary()
     }) {

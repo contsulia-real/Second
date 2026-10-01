@@ -2,12 +2,12 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use second::{
-    CertifiedStateRecoveryCheckpoint, NetworkError, NodeRuntime, PersistenceError,
+    CertifiedStateRecoveryCheckpoint, NetworkError, NodeRuntime, Operation, PersistenceError,
     PreparedTaskBook, QuicClient, QuicTransportIdentity, SecondState, StateRecoveryCheckpoint,
     StateStore, ValidatorId, ValidatorSigner, ValidatorSigningError, client_fetch_state_recovery,
 };
 
-use crate::support::{self, key, signed_vote, validator_set};
+use crate::support::{self, certificate_from_keys, key, signed_vote, validator_set, verified_task};
 
 fn certified_checkpoint(store: &StateStore, serial: u64) -> CertifiedStateRecoveryCheckpoint {
     let persisted = store.load().unwrap().unwrap();
@@ -258,6 +258,114 @@ async fn runtime_recovery_publish_uses_durable_membership_after_online_transitio
     assert_eq!(
         StateRecoveryCheckpoint::from_payload(50, &recovered.payload).unwrap(),
         *checkpoint.checkpoint()
+    );
+
+    peer.close();
+    runtime_task.abort();
+    let _ = runtime_task.await;
+    drop(runtime);
+    support::cleanup_node_runtime(store, base);
+}
+
+#[tokio::test]
+async fn runtime_recovery_provider_expires_when_shared_state_or_membership_changes() {
+    let initial = validator_set(7, 1..=4);
+    let next = validator_set(8, [1, 2, 3, 5]);
+    let account = support::account(1);
+    let mut state = SecondState::genesis([account], 1).with_reserve(2).unwrap();
+    let base = support::temp_base("state-recovery-provider-lifecycle");
+    let store = StateStore::new(&base);
+    store.initialize(&state, &initial).unwrap();
+
+    let checkpoint = certified_checkpoint(&store, 51);
+    let runtime = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
+    );
+    runtime
+        .publish_state_recovery_checkpoint(checkpoint.clone())
+        .unwrap();
+    let runtime_task = support::spawn_node_runtime(&runtime);
+
+    let client = QuicClient::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        runtime.transport_certificate_der(),
+        QuicTransportIdentity::generate().unwrap(),
+    )
+    .unwrap();
+    let peer = client.connect(runtime.local_addr().unwrap()).await.unwrap();
+
+    let recovered = client_fetch_state_recovery(&peer, ValidatorId::new(1), &key(3), &initial)
+        .await
+        .unwrap();
+    assert_eq!(
+        StateRecoveryCheckpoint::from_payload(51, &recovered.payload).unwrap(),
+        *checkpoint.checkpoint()
+    );
+
+    let task = verified_task(92, vec![Operation::Issue { account, count: 2 }]);
+    let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    prepared.prepare(&mut state, &task, 2, &initial).unwrap();
+    let statement = prepared
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
+    let certificate = certificate_from_keys(
+        statement,
+        &initial,
+        (1_u64..=3).map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+    prepared
+        .commit(&mut state, task.task_id(), &certificate)
+        .unwrap();
+
+    assert!(matches!(
+        client_fetch_state_recovery(&peer, ValidatorId::new(1), &key(3), &initial).await,
+        Err(NetworkError::MissingStateRecoveryCheckpoint)
+    ));
+
+    let refreshed = certified_checkpoint(&store, 52);
+    runtime
+        .publish_state_recovery_checkpoint(refreshed.clone())
+        .unwrap();
+    let recovered = client_fetch_state_recovery(&peer, ValidatorId::new(1), &key(3), &initial)
+        .await
+        .unwrap();
+    assert_eq!(
+        StateRecoveryCheckpoint::from_payload(52, &recovered.payload).unwrap(),
+        *refreshed.checkpoint()
+    );
+
+    let certified_transition =
+        support::certified_validator_membership_transition(&initial, 8, [1, 2, 3, 5], [5], 1..=3);
+    store
+        .activate_validator_set_transition(&certified_transition)
+        .unwrap();
+    assert_eq!(store.load().unwrap().unwrap().validator_set, next);
+
+    assert!(matches!(
+        client_fetch_state_recovery(&peer, ValidatorId::new(4), &key(12), &next).await,
+        Err(NetworkError::StateRecoveryUnauthorized)
+    ));
+    assert!(matches!(
+        client_fetch_state_recovery(&peer, ValidatorId::new(5), &key(15), &next).await,
+        Err(NetworkError::MissingStateRecoveryCheckpoint)
+    ));
+
+    let current = certified_checkpoint(&store, 1);
+    runtime
+        .publish_state_recovery_checkpoint(current.clone())
+        .unwrap();
+
+    assert!(matches!(
+        client_fetch_state_recovery(&peer, ValidatorId::new(4), &key(12), &next).await,
+        Err(NetworkError::StateRecoveryUnauthorized)
+    ));
+    let recovered = client_fetch_state_recovery(&peer, ValidatorId::new(5), &key(15), &next)
+        .await
+        .unwrap();
+    assert_eq!(recovered.payload.validator_set(), &next);
+    assert_eq!(
+        StateRecoveryCheckpoint::from_payload(1, &recovered.payload).unwrap(),
+        *current.checkpoint()
     );
 
     peer.close();
