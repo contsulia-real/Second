@@ -154,7 +154,7 @@ pub(crate) fn state_recovery_response<F>(
     peer: &QuicPeer,
     message: &NetworkMessage,
     handle: &StateRecoveryProviderHandle,
-    load_current_validator_set: F,
+    load_current_shared_state: F,
 ) -> Option<Result<NetworkMessage, NetworkError>>
 where
     F: FnOnce() -> Result<(SecondState, ValidatorSet, ValidatorRegistry), NetworkError>,
@@ -170,7 +170,7 @@ where
                 .clone();
             Some(match provider {
                 Some(provider) => {
-                    load_current_validator_set().and_then(|(state, validator_set, registry)| {
+                    load_current_shared_state().and_then(|(state, validator_set, registry)| {
                         provider.manifest_response(
                             peer,
                             StateRecoveryRequestContext {
@@ -199,7 +199,7 @@ where
                 .clone();
             Some(match provider {
                 Some(provider) => {
-                    load_current_validator_set().and_then(|(state, validator_set, registry)| {
+                    load_current_shared_state().and_then(|(state, validator_set, registry)| {
                         provider.chunk_response(
                             peer,
                             StateRecoveryRequestContext {
