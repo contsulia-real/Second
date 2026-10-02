@@ -57,8 +57,8 @@ fn write_validator_files(base: &Path, identity_seed: u8) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn validator_cli_starts_real_runtime_and_serves_public_network() {
-    let base = temp_base("validator-cli");
+fn node_enables_validator_capability_when_sidecars_are_complete() {
+    let base = temp_base("node-validator-capability");
     let store = StateStore::new(&base);
     store
         .initialize(&SecondState::genesis([], 1), &validator_set())
@@ -66,14 +66,14 @@ fn validator_cli_starts_real_runtime_and_serves_public_network() {
     let (config_path, keyring_path) = write_validator_files(&base, 31);
 
     let executable = env!("CARGO_BIN_EXE_second");
-    let mut validator = Command::new(executable)
-        .args(["validator", "127.0.0.1:0", base.to_str().unwrap()])
+    let mut node = Command::new(executable)
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let stdout = validator.stdout.take().unwrap();
+    let stdout = node.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
@@ -82,23 +82,23 @@ fn validator_cli_starts_real_runtime_and_serves_public_network() {
     assert_eq!(
         fields.len(),
         8,
-        "unexpected validator startup line: {listening}"
+        "unexpected validator-capable node startup line: {listening}"
     );
     assert_eq!(fields[0], "LISTENING");
-    assert_eq!(fields[2], "VALIDATOR");
-    assert_eq!(fields[3], "1");
-    assert_eq!(fields[4], "NODE");
-    assert_eq!(fields[6], "CERT");
+    assert_eq!(fields[2], "NODE");
+    assert_eq!(fields[4], "CERT");
+    assert_eq!(fields[6], "VALIDATOR");
+    assert_eq!(fields[7], "1");
 
     let ping = Command::new(executable)
-        .args(["ping", fields[1], "77", fields[7]])
+        .args(["ping", fields[1], "77", fields[5]])
         .output()
         .unwrap();
     if !ping.status.success() {
-        let _ = validator.kill();
-        let _ = validator.wait();
+        let _ = node.kill();
+        let _ = node.wait();
         panic!(
-            "validator public runtime ping failed: {}",
+            "validator-capable node public runtime ping failed: {}",
             String::from_utf8_lossy(&ping.stderr)
         );
     }
@@ -106,10 +106,8 @@ fn validator_cli_starts_real_runtime_and_serves_public_network() {
     assert!(ping_stdout.contains("PONG "));
     assert!(ping_stdout.contains("nonce=77"));
 
-    validator
-        .kill()
-        .expect("validator exited before test shutdown");
-    validator.wait().unwrap();
+    node.kill().expect("node exited before test shutdown");
+    node.wait().unwrap();
 
     support::cleanup_node_runtime(store, base);
     fs::remove_file(config_path).unwrap();
@@ -117,8 +115,8 @@ fn validator_cli_starts_real_runtime_and_serves_public_network() {
 }
 
 #[test]
-fn validator_cli_rejects_keyring_that_does_not_match_registry_before_binding() {
-    let base = temp_base("validator-cli-bad-key");
+fn node_rejects_validator_keyring_that_does_not_match_registry_before_binding() {
+    let base = temp_base("node-validator-bad-key");
     let store = StateStore::new(&base);
     store
         .initialize(&SecondState::genesis([], 1), &validator_set())
@@ -126,7 +124,7 @@ fn validator_cli_rejects_keyring_that_does_not_match_registry_before_binding() {
     let (config_path, keyring_path) = write_validator_files(&base, 41);
 
     let output = Command::new(env!("CARGO_BIN_EXE_second"))
-        .args(["validator", "127.0.0.1:0", base.to_str().unwrap()])
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -138,6 +136,30 @@ fn validator_cli_rejects_keyring_that_does_not_match_registry_before_binding() {
     store.remove_files().unwrap();
     fs::remove_file(config_path).unwrap();
     fs::remove_file(keyring_path).unwrap();
+}
+
+#[test]
+fn node_rejects_partial_validator_capability_before_binding() {
+    let base = temp_base("node-validator-partial");
+    let store = StateStore::new(&base);
+    store
+        .initialize(&SecondState::genesis([], 1), &validator_set())
+        .unwrap();
+    let (config_path, keyring_path) = write_validator_files(&base, 31);
+    fs::remove_file(&keyring_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_second"))
+        .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("validator capability is partially configured"));
+    assert!(!support::transport_identity_path(&base).exists());
+
+    store.remove_files().unwrap();
+    fs::remove_file(config_path).unwrap();
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {

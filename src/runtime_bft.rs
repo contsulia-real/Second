@@ -100,27 +100,6 @@ struct ManagedValidatorBftPeer {
 }
 
 impl NodeRuntime {
-    pub fn load_validator_and_bind(
-        listen_address: std::net::SocketAddr,
-        store: &StateStore,
-        keys: ValidatorRuntimeKeys,
-        config: ValidatorRuntimeConfig,
-    ) -> Result<Self, NodeRuntimeError> {
-        let mut runtime = Self::load_and_bind(listen_address, store)?;
-        let persisted = runtime
-            .store
-            .load()?
-            .ok_or(NodeRuntimeError::SnapshotMissing)?;
-        runtime.validator_bft = Some(ValidatorBftRuntime::new(
-            keys,
-            config,
-            runtime.store.clone(),
-            persisted.validator_set,
-            persisted.retained_validator_sets.into_values(),
-        )?);
-        Ok(runtime)
-    }
-
     pub fn validator_id(&self) -> Option<ValidatorId> {
         self.validator_bft
             .as_ref()

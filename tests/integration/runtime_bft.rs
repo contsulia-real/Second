@@ -5,14 +5,30 @@ use std::time::Duration;
 
 use second::{
     BftConsensusEvent, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
-    NetworkError, NodeRuntime, Operation, PreparationError, PreparedTaskBook,
-    PublicCurrencyCheckpoint, QuicClient, QuicTransportIdentity, SecondState, StateStore,
-    ValidatorBftRuntimeError, ValidatorConsensusKeyRotationRequest, ValidatorCredential,
-    ValidatorId, ValidatorRegistry, ValidatorRotationAuthority, ValidatorRuntimeKeys, ValidatorSet,
-    ValidatorSetTransition, ValidatorSigner, authenticate_validator_bft_peer, client_ping,
+    NetworkError, NodeRuntime, NodeRuntimeCapabilities, Operation, PreparationError,
+    PreparedTaskBook, PublicCurrencyCheckpoint, QuicClient, QuicTransportIdentity, SecondState,
+    StateStore, ValidatorBftRuntimeError, ValidatorConsensusKeyRotationRequest,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRotationAuthority,
+    ValidatorRuntimeConfig, ValidatorRuntimeKeys, ValidatorSet, ValidatorSetTransition,
+    ValidatorSigner, authenticate_validator_bft_peer, client_ping,
 };
 
 use crate::support::{self, key, peer_record, temp_base, validator_set};
+
+fn bind_validator_runtime(
+    store: &StateStore,
+    keys: ValidatorRuntimeKeys,
+    config: ValidatorRuntimeConfig,
+) -> NodeRuntime {
+    let persisted = store.load().unwrap().unwrap();
+    NodeRuntime::bind_loaded(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        store,
+        persisted,
+        NodeRuntimeCapabilities::default().with_validator(keys, config),
+    )
+    .unwrap()
+}
 
 fn validator_runtime_fixture(
     prefix: &str,
@@ -38,19 +54,15 @@ fn validator_runtime_fixture_with_timeouts(
     let store = StateStore::new(&base);
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
     store.initialize(&state, &validator_set(1, 1..=4)).unwrap();
-    let runtime = Arc::new(
-        NodeRuntime::load_validator_and_bind(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-            &store,
-            ValidatorRuntimeKeys::new(
-                ValidatorId::new(validator_id),
-                key((validator_id * 3) as u8),
-                key((validator_id * 3 + 1) as u8),
-            ),
-            support::validator_runtime_config(timeouts),
-        )
-        .unwrap(),
-    );
+    let runtime = Arc::new(bind_validator_runtime(
+        &store,
+        ValidatorRuntimeKeys::new(
+            ValidatorId::new(validator_id),
+            key((validator_id * 3) as u8),
+            key((validator_id * 3 + 1) as u8),
+        ),
+        support::validator_runtime_config(timeouts),
+    ));
     (runtime, store, base)
 }
 
@@ -308,19 +320,15 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
             store
                 .initialize(&SecondState::genesis([alice], 1), &validators)
                 .unwrap();
-            let runtime = Arc::new(
-                NodeRuntime::load_validator_and_bind(
-                    SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                    &store,
-                    ValidatorRuntimeKeys::new(
-                        ValidatorId::new(validator_id),
-                        key((validator_id * 3) as u8),
-                        key((validator_id * 3 + 1) as u8),
-                    ),
-                    support::default_validator_runtime_config(),
-                )
-                .unwrap(),
-            );
+            let runtime = Arc::new(bind_validator_runtime(
+                &store,
+                ValidatorRuntimeKeys::new(
+                    ValidatorId::new(validator_id),
+                    key((validator_id * 3) as u8),
+                    key((validator_id * 3 + 1) as u8),
+                ),
+                support::default_validator_runtime_config(),
+            ));
             (runtime, store, base)
         })
         .collect::<Vec<_>>();
@@ -546,15 +554,11 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
                 key((validator_id * 3 + 1) as u8),
             )
             .with_consensus_key(rotated_consensus_key(validator_id));
-            let runtime = Arc::new(
-                NodeRuntime::load_validator_and_bind(
-                    SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                    &store,
-                    keys,
-                    support::default_validator_runtime_config(),
-                )
-                .unwrap(),
-            );
+            let runtime = Arc::new(bind_validator_runtime(
+                &store,
+                keys,
+                support::default_validator_runtime_config(),
+            ));
             (runtime, store, base)
         })
         .collect::<Vec<_>>();
@@ -762,13 +766,11 @@ async fn retained_prepared_task_refuses_current_consensus_key_without_historical
         .activate_validator_set_transition(&certified_transition)
         .unwrap();
 
-    let runtime = NodeRuntime::load_validator_and_bind(
-        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+    let runtime = bind_validator_runtime(
         &store,
         ValidatorRuntimeKeys::new(ValidatorId::new(1), key(3), rotated_consensus_key(1)),
         support::default_validator_runtime_config(),
-    )
-    .unwrap();
+    );
 
     assert!(matches!(
         runtime.start_prepared_task_consensus(task.task_id()),

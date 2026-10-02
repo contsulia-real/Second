@@ -74,7 +74,9 @@ pub use public_checkpoint::{
     PublicCurrencyCheckpointProof,
 };
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
-pub use runtime::{DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError};
+pub use runtime::{
+    DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeCapabilities, NodeRuntimeError,
+};
 pub use runtime_bft::{
     ValidatorBftRuntimeError, ValidatorBftSendFailure, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
 };

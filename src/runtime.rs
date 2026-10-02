@@ -24,11 +24,13 @@ use crate::network::{
     outbound_bind_address, serve_public_network_connection,
     serve_public_network_connection_from_request,
 };
-use crate::runtime_bft::{ValidatorBftRuntime, ValidatorBftRuntimeError};
+use crate::runtime_bft::{
+    ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
+};
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
-    PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView, StateStore,
-    TaskEncodingError,
+    PersistedNodeState, PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView,
+    StateStore, TaskEncodingError,
 };
 
 #[derive(Debug)]
@@ -108,6 +110,22 @@ struct PublicNetworkContext {
     state_recovery_provider: StateRecoveryProviderHandle,
 }
 
+#[derive(Default)]
+pub struct NodeRuntimeCapabilities {
+    validator: Option<(ValidatorRuntimeKeys, ValidatorRuntimeConfig)>,
+}
+
+impl NodeRuntimeCapabilities {
+    pub fn with_validator(
+        mut self,
+        keys: ValidatorRuntimeKeys,
+        config: ValidatorRuntimeConfig,
+    ) -> Self {
+        self.validator = Some((keys, config));
+        self
+    }
+}
+
 pub struct NodeRuntime {
     server: QuicServer,
     pub(crate) transport_identity: QuicTransportIdentity,
@@ -125,7 +143,32 @@ impl NodeRuntime {
         listen_address: SocketAddr,
         store: &StateStore,
     ) -> Result<Self, NodeRuntimeError> {
-        store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+        let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+        Self::bind_loaded(
+            listen_address,
+            store,
+            persisted,
+            NodeRuntimeCapabilities::default(),
+        )
+    }
+
+    pub fn bind_loaded(
+        listen_address: SocketAddr,
+        store: &StateStore,
+        persisted: PersistedNodeState,
+        capabilities: NodeRuntimeCapabilities,
+    ) -> Result<Self, NodeRuntimeError> {
+        let validator_bft = match capabilities.validator {
+            Some((keys, config)) => Some(ValidatorBftRuntime::new(
+                keys,
+                config,
+                store.clone(),
+                persisted.validator_set,
+                persisted.retained_validator_sets.into_values(),
+            )?),
+            None => None,
+        };
+
         let transport_identity =
             QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
@@ -149,7 +192,7 @@ impl NodeRuntime {
             peer_store,
             local_peer_record,
             state_recovery_provider: new_state_recovery_provider_handle(),
-            validator_bft: None,
+            validator_bft,
             active_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
