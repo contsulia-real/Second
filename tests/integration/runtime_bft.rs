@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use second::{
     BftConsensusEvent, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
-    ExecutionOutcome, NetworkError, NodeRuntime, Operation, PreparationError, PreparedTaskBook,
+    NetworkError, NodeRuntime, Operation, PreparationError, PreparedTaskBook,
     PublicCurrencyCheckpoint, QuicClient, QuicTransportIdentity, SecondState, StateStore,
     ValidatorBftRuntimeError, ValidatorConsensusKeyRotationRequest, ValidatorCredential,
     ValidatorId, ValidatorRegistry, ValidatorRotationAuthority, ValidatorRuntimeKeys, ValidatorSet,
@@ -405,17 +405,11 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
         "one private task source must be pulled, independently prepared, and finalized by all validators",
     );
 
-    let expected_digest = PreparedTaskBook::new(fixtures[1].1.clone())
-        .unwrap()
-        .prepared_plan_digest(task_id.clone())
-        .unwrap();
     for (_, store, _) in &fixtures {
         let book = PreparedTaskBook::new(store.clone()).unwrap();
-        assert!(book.is_prepared(task_id.clone()));
-        assert_eq!(
-            book.prepared_plan_digest(task_id.clone()).unwrap(),
-            expected_digest
-        );
+        assert!(!book.is_prepared(task_id.clone()));
+        let committed = store.load().unwrap().unwrap();
+        assert_eq!(committed.state.current_supply(), 1);
     }
 
     for runtime_task in &runtime_tasks {
@@ -722,18 +716,11 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
         );
     }
 
-    for ((_, store, _), certificate) in fixtures.iter().zip(certificates.iter()) {
-        let persisted = store.load().unwrap().unwrap();
-        let mut state = persisted.state;
+    for (_, store, _) in &fixtures {
         let mut book = PreparedTaskBook::new(store.clone()).unwrap();
         assert_eq!(
             book.cancel(task.task_id()),
-            Err(PreparationError::CancellationClosed(task.task_id()))
-        );
-        assert_eq!(
-            book.commit(&mut state, task.task_id(), certificate.as_ref().unwrap(),)
-                .unwrap(),
-            ExecutionOutcome::Succeeded
+            Err(PreparationError::NotPrepared(task.task_id()))
         );
         let committed = store.load().unwrap().unwrap();
         assert!(committed.retained_validator_sets.is_empty());

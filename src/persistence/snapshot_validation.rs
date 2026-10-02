@@ -48,6 +48,38 @@ pub(super) fn validate_active_prepared_vote_lock_membership(
     Ok(())
 }
 
+pub(super) fn validate_prepared_finality_proofs(
+    active_validator_set: &ValidatorSet,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+) -> Result<(), PersistenceError> {
+    for prepared in prepared_tasks.values() {
+        match (prepared.phase, &prepared.finality_votes) {
+            (PreparedTaskPhase::Finalized, Some(_)) => {}
+            (PreparedTaskPhase::Finalized, None)
+            | (PreparedTaskPhase::Prepared | PreparedTaskPhase::Voting, Some(_)) => {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            (PreparedTaskPhase::Prepared | PreparedTaskPhase::Voting, None) => continue,
+        }
+
+        let validator_set = resolve_validator_set(
+            active_validator_set,
+            retained_validator_sets,
+            prepared.validator_set_version,
+        )
+        .ok_or(PersistenceError::InvalidSnapshot)?;
+        let certificate = prepared
+            .finality_certificate()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        certificate
+            .verify(validator_set)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_retained_validator_sets(
     active_validator_set: &ValidatorSet,
     retained_validator_sets: &BTreeMap<u64, ValidatorSet>,

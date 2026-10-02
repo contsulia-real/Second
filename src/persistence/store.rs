@@ -7,9 +7,9 @@ use crate::ConsensusScope;
 use crate::prepared_plan::{PreparedTask, PreparedTaskPhase};
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
-    CertifiedValidatorSetTransition, PersistenceError, PublicCurrencyCheckpointProof, SecondState,
-    StateRecoveryCheckpoint, StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorTransitionError,
+    CertifiedValidatorSetTransition, FinalityCertificate, PersistenceError,
+    PublicCurrencyCheckpointProof, SecondState, StateRecoveryCheckpoint, StateRecoveryPayload,
+    TaskId, ValidatorId, ValidatorRegistry, ValidatorSet, ValidatorTransitionError,
 };
 
 use super::bft_store::{
@@ -619,11 +619,11 @@ impl StateStore {
         )
     }
 
-    pub(crate) fn advance_prepared_task_phase(
+    pub(crate) fn finalize_prepared_task(
         &self,
         task_id: &TaskId,
         expected_plan_digest: [u8; 32],
-        phase: PreparedTaskPhase,
+        certificate: &FinalityCertificate,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let mut latest = self
@@ -637,14 +637,31 @@ impl StateStore {
         let actual_plan_digest = prepared
             .plan_digest()
             .map_err(|_| PersistenceError::InvalidSnapshot)?;
-        if actual_plan_digest != expected_plan_digest {
+        if actual_plan_digest != expected_plan_digest
+            || certificate.statement().subject_digest() != expected_plan_digest
+            || certificate.statement().validator_set_version() != prepared.validator_set_version
+        {
             return Err(PersistenceError::StalePreparedTasks);
         }
-        if phase <= prepared.phase {
+
+        let validator_set = resolve_validator_set(
+            &latest.validator_set,
+            &latest.retained_validator_sets,
+            prepared.validator_set_version,
+        )
+        .ok_or(PersistenceError::InvalidSnapshot)?;
+        certificate
+            .verify(validator_set)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+
+        if prepared.phase == PreparedTaskPhase::Finalized {
+            if prepared.finality_votes.is_none() {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
             return Ok(latest.generation);
         }
-        prepared.advance_phase(phase);
 
+        prepared.finalize_with_votes(certificate.votes().to_vec());
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {

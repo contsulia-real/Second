@@ -5,8 +5,9 @@ use sha2::{Digest, Sha256};
 use crate::payment::EstablishedTransfer;
 use crate::state::{BusinessState, PrerequisiteState};
 use crate::{
-    AccountAddress, ClaimError, CurrencyAddress, CurrencyClaimBook, LegalTask, OperationClaimId,
-    PaymentAddress, PreparationError, SecondState, TaskId,
+    AccountAddress, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, CurrencyClaimBook,
+    FinalityCertificate, FinalityStatement, LegalTask, OperationClaimId, PaymentAddress,
+    PreparationError, SecondState, TaskId, ValidatorVote,
 };
 
 const PREPARED_TASK_DOMAIN: &[u8] = b"SECOND_PREPARED_TASK_V1\0";
@@ -168,6 +169,7 @@ pub(crate) struct PreparedTask {
     pub(crate) source_task: LegalTask,
     pub(crate) validator_set_version: u64,
     pub(crate) phase: PreparedTaskPhase,
+    pub(crate) finality_votes: Option<Vec<ValidatorVote>>,
     pub(crate) operations: Vec<PreparedOperation>,
 }
 
@@ -185,6 +187,7 @@ impl PreparedTask {
             source_task,
             validator_set_version,
             phase: PreparedTaskPhase::Prepared,
+            finality_votes: None,
             operations,
         }
     }
@@ -195,6 +198,7 @@ impl PreparedTask {
         source_task: LegalTask,
         validator_set_version: u64,
         phase: PreparedTaskPhase,
+        finality_votes: Option<Vec<ValidatorVote>>,
         operations: Vec<PreparedOperation>,
     ) -> Self {
         Self {
@@ -203,8 +207,30 @@ impl PreparedTask {
             source_task,
             validator_set_version,
             phase,
+            finality_votes,
             operations,
         }
+    }
+
+    pub(crate) fn finality_certificate(
+        &self,
+    ) -> Result<Option<FinalityCertificate>, PreparationError> {
+        let Some(votes) = &self.finality_votes else {
+            return Ok(None);
+        };
+        Ok(Some(FinalityCertificate::from_untrusted_parts(
+            FinalityStatement::new(
+                CURRENT_PROTOCOL_VERSION,
+                self.validator_set_version,
+                self.plan_digest()?,
+            ),
+            votes.clone(),
+        )))
+    }
+
+    pub(crate) fn finalize_with_votes(&mut self, votes: Vec<ValidatorVote>) {
+        self.phase = PreparedTaskPhase::Finalized;
+        self.finality_votes = Some(votes);
     }
 
     pub(crate) fn advance_phase(&mut self, phase: PreparedTaskPhase) -> bool {

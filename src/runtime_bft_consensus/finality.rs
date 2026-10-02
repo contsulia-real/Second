@@ -75,7 +75,17 @@ pub(super) fn ingest_finality_certificate(
     let certified = session
         .target
         .certify(certificate.votes().to_vec(), &session.validator_set)?;
-    session.target.persist_certified(&session.store)?;
+    session
+        .target
+        .persist_certified(&session.store, &certificate)?;
+    if let CertifiedConsensusTarget::PreparedTask { task_id, .. } = &certified {
+        crate::PreparedTaskBook::commit_certified_from_store(
+            &session.store,
+            task_id.clone(),
+            &certificate,
+        )
+        .map_err(BftConsensusRuntimeError::Preparation)?;
+    }
 
     session.finality_certificate = Some(certificate.clone());
     relay_finality_certificate(session, certificate, output);
@@ -100,7 +110,17 @@ pub(super) fn certify_if_ready(
     let certificate = FinalityCertificate::new(statement, votes.clone(), &session.validator_set)
         .map_err(BftConsensusRuntimeError::Finality)?;
     let certified = session.target.certify(votes, &session.validator_set)?;
-    session.target.persist_certified(&session.store)?;
+    session
+        .target
+        .persist_certified(&session.store, &certificate)?;
+    if let CertifiedConsensusTarget::PreparedTask { task_id, .. } = &certified {
+        crate::PreparedTaskBook::commit_certified_from_store(
+            &session.store,
+            task_id.clone(),
+            &certificate,
+        )
+        .map_err(BftConsensusRuntimeError::Preparation)?;
+    }
 
     session.finality_certificate = Some(certificate.clone());
     session.certified_emitted = true;

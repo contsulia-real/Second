@@ -6,7 +6,7 @@ use crate::payment::EstablishedTransfer;
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::{
     AccountAddress, BftLocalState, BftValue, CurrencyAddress, PaymentAddress, PersistenceError,
-    TaskId, ValidatorId,
+    TaskId, ValidatorId, ValidatorVote,
 };
 
 use super::codec::{Decoder, push_len, push_task_id};
@@ -34,6 +34,17 @@ pub(super) fn encode_local_state(
             PreparedTaskPhase::Voting => 2,
             PreparedTaskPhase::Finalized => 3,
         });
+        match &prepared.finality_votes {
+            Some(votes) => {
+                out.push(1);
+                push_len(out, votes.len())?;
+                for vote in votes {
+                    out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
+                    out.extend_from_slice(&vote.signature_bytes());
+                }
+            }
+            None => out.push(0),
+        }
 
         push_len(out, prepared.operations.len())?;
         for operation in &prepared.operations {
@@ -90,6 +101,25 @@ pub(super) fn decode_local_state(
             3 => PreparedTaskPhase::Finalized,
             _ => return Err(PersistenceError::InvalidSnapshot),
         };
+        let finality_votes = match decoder.read_u8()? {
+            0 => None,
+            1 => {
+                let vote_count = decoder.read_len()?;
+                const FINALITY_VOTE_SIZE: usize = 8 + 64;
+                if vote_count > decoder.remaining() / FINALITY_VOTE_SIZE {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+                let mut votes = Vec::with_capacity(vote_count);
+                for _ in 0..vote_count {
+                    votes.push(ValidatorVote::from_untrusted_parts(
+                        ValidatorId::new(decoder.read_u64()?),
+                        decoder.read_array_64()?,
+                    ));
+                }
+                Some(votes)
+            }
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
         let operation_count = decoder.read_len()?;
         const MIN_PREPARED_OPERATION_SIZE: usize = 1 + 8;
         if operation_count > decoder.remaining() / MIN_PREPARED_OPERATION_SIZE {
@@ -110,6 +140,7 @@ pub(super) fn decode_local_state(
                     source_task,
                     validator_set_version,
                     phase,
+                    finality_votes,
                     operations,
                 ),
             )

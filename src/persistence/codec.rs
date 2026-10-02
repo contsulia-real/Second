@@ -17,8 +17,9 @@ use super::RecoveryCheckpointFloor;
 use super::local_codec::{decode_local_state, encode_local_state};
 use super::snapshot_validation::{
     validate_active_prepared_vote_lock_membership, validate_bft_local_state_registry,
-    validate_prepared_plans_against_state, validate_prepared_snapshot_links,
-    validate_retained_validator_sets, validate_vote_lock_registry,
+    validate_prepared_finality_proofs, validate_prepared_plans_against_state,
+    validate_prepared_snapshot_links, validate_retained_validator_sets,
+    validate_vote_lock_registry,
 };
 use super::validator_codec::{
     decode_validator_registry, decode_validator_set, encode_validator_registry,
@@ -26,7 +27,7 @@ use super::validator_codec::{
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V1\0";
 pub(super) const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
@@ -90,6 +91,11 @@ pub(super) fn encode_snapshot(
         contents.validator_set,
         contents.retained_validator_sets,
         contents.validator_registry,
+        contents.prepared_tasks,
+    )?;
+    validate_prepared_finality_proofs(
+        contents.validator_set,
+        contents.retained_validator_sets,
         contents.prepared_tasks,
     )?;
     validate_vote_lock_registry(contents.validator_registry, contents.validator_vote_locks)?;
@@ -205,7 +211,6 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         &decoded.validator_registry,
         &decoded.prepared_tasks,
     )?;
-
     Ok(PersistedNodeState {
         state: decoded.state,
         validator_set: decoded.validator_set,
@@ -640,6 +645,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         &prepared_tasks,
         &validator_vote_locks,
     )?;
+    validate_prepared_finality_proofs(&validator_set, &retained_validator_sets, &prepared_tasks)?;
     validate_prepared_snapshot_links(
         &state.protocol.task_bindings,
         &state.business.payment_addresses,
@@ -753,6 +759,12 @@ impl<'a> Decoder<'a> {
 
     pub(super) fn read_array_32(&mut self) -> Result<[u8; 32], PersistenceError> {
         self.read_exact(32)?
+            .try_into()
+            .map_err(|_| PersistenceError::InvalidSnapshot)
+    }
+
+    pub(super) fn read_array_64(&mut self) -> Result<[u8; 64], PersistenceError> {
+        self.read_exact(64)?
             .try_into()
             .map_err(|_| PersistenceError::InvalidSnapshot)
     }

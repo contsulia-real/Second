@@ -1,5 +1,3 @@
-use crate::prepared_plan::PreparedTaskPhase;
-
 use crate::{
     BftProposalSubject, CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint,
     CertifiedStateRecoveryCheckpoint, CertifiedValidatorSetTransition, FinalityCertificate,
@@ -145,17 +143,17 @@ impl ValidatorConsensusTarget {
         })
     }
 
-    pub(crate) fn persist_certified(&self, store: &StateStore) -> Result<(), ConsensusTargetError> {
+    pub(crate) fn persist_certified(
+        &self,
+        store: &StateStore,
+        certificate: &FinalityCertificate,
+    ) -> Result<(), ConsensusTargetError> {
         if let Self::PreparedTask {
             task_id,
             plan_digest,
         } = self
         {
-            store.advance_prepared_task_phase(
-                task_id,
-                *plan_digest,
-                PreparedTaskPhase::Finalized,
-            )?;
+            store.finalize_prepared_task(task_id, *plan_digest, certificate)?;
         }
         Ok(())
     }

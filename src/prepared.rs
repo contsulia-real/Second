@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 
 use ed25519_dalek::SigningKey;
@@ -230,7 +233,15 @@ impl PreparedTaskBook {
         }
 
         certificate.verify(&validator_set)?;
-        self.advance_phase_durably(task_id.clone(), PreparedTaskPhase::Finalized)?;
+        let plan_digest = prepared.plan_digest()?;
+        self.store
+            .finalize_prepared_task(&task_id, plan_digest, certificate)?;
+        self.tasks = self.store.load_prepared_tasks()?;
+        let prepared = self
+            .tasks
+            .get(&task_id)
+            .cloned()
+            .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
 
         let mut candidate = state.clone();
         let outcome = self.commit_inner(&mut candidate, &prepared)?;
@@ -252,6 +263,38 @@ impl PreparedTaskBook {
         self.tasks = remaining;
         self.release_task_claims(task_id);
         Ok(outcome)
+    }
+
+    pub(crate) fn recover_finalized_from_store(store: &StateStore) -> Result<(), PreparationError> {
+        let durable = store.load_prepared_tasks()?;
+        for (task_id, prepared) in durable {
+            if let Some(certificate) = prepared.finality_certificate()? {
+                Self::commit_certified_from_store(store, task_id, &certificate)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_certified_from_store(
+        store: &StateStore,
+        task_id: TaskId,
+        certificate: &FinalityCertificate,
+    ) -> Result<ExecutionOutcome, PreparationError> {
+        const MAX_STALE_RETRIES: usize = 3;
+
+        for attempt in 0..=MAX_STALE_RETRIES {
+            let persisted = store.load()?.ok_or(PersistenceError::MissingSnapshot)?;
+            let mut state = persisted.state;
+            let mut book = Self::new(store.clone())?;
+            match book.commit(&mut state, task_id.clone(), certificate) {
+                Err(PreparationError::Persistence(
+                    PersistenceError::StaleState | PersistenceError::StalePreparedTasks,
+                )) if attempt < MAX_STALE_RETRIES => continue,
+                result => return result,
+            }
+        }
+
+        unreachable!("bounded commit retry loop always returns")
     }
 
     pub fn prepared_plan_digest(&self, task_id: TaskId) -> Result<[u8; 32], PreparationError> {
@@ -334,30 +377,6 @@ impl PreparedTaskBook {
 
     pub fn is_prepared(&self, task_id: TaskId) -> bool {
         self.tasks.contains_key(&task_id)
-    }
-
-    fn advance_phase_durably(
-        &mut self,
-        task_id: TaskId,
-        phase: PreparedTaskPhase,
-    ) -> Result<(), PreparationError> {
-        let current = self
-            .tasks
-            .get(&task_id)
-            .ok_or(PreparationError::NotPrepared(task_id.clone()))?;
-
-        if phase <= current.phase {
-            return Ok(());
-        }
-
-        let plan_digest = current.plan_digest()?;
-        self.store
-            .advance_prepared_task_phase(&task_id, plan_digest, phase)?;
-        self.tasks
-            .get_mut(&task_id)
-            .ok_or(PreparationError::NotPrepared(task_id))?
-            .advance_phase(phase);
-        Ok(())
     }
 
     fn remove_prepared_durably(&mut self, task_id: TaskId) -> Result<(), PreparationError> {

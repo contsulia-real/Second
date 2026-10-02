@@ -49,6 +49,8 @@ impl NodeRuntime {
     }
 
     pub(crate) fn start_durable_prepared_consensus(&self) -> Result<(), NodeRuntimeError> {
+        PreparedTaskBook::recover_finalized_from_store(&self.store)?;
+
         for task_id in self.store.load_prepared_tasks()?.into_keys() {
             self.start_prepared_task_consensus(task_id)?;
         }
