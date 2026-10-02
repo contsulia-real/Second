@@ -25,10 +25,12 @@ mod runtime_consensus_target;
 mod runtime_governance;
 mod runtime_public_sync;
 mod runtime_submission;
+mod runtime_task_status;
 mod runtime_tasks;
 mod state;
 mod state_recovery_checkpoint;
 mod task;
+mod task_status;
 mod transaction;
 mod validator;
 mod validator_admission;
@@ -60,14 +62,15 @@ pub use ids::{
 };
 pub use network::{
     BftNetworkMessage, CURRENT_NETWORK_PROTOCOL_VERSION, GovernanceRejection,
-    LegalTaskSubmissionRejection, MAX_LEGAL_TASK_SUBMISSION_SIZE, MAX_NETWORK_FRAME_SIZE,
-    MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError,
-    NetworkMessage, NodeId, PeerRecord, PublicCurrencyPage, QuicClient, QuicPeer,
+    LegalTaskStatusRejection, LegalTaskSubmissionRejection, MAX_LEGAL_TASK_SUBMISSION_SIZE,
+    MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE,
+    NetworkError, NetworkMessage, NodeId, PeerRecord, PublicCurrencyPage, QuicClient, QuicPeer,
     QuicRequestStream, QuicServer, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
-    RemoteLegalTaskSubmission, RemotePublicCurrencyPage, RemotePublicCurrencySummary,
-    RemotePublicCurrencyView, RemoteRecoveryCheckpointSubmission, RemoteStateRecoveryPayload,
-    RemoteValidatorTransitionSubmission, SECOND_QUIC_SERVER_NAME, ValidatorBftPeer,
-    authenticate_validator_bft_peer, client_fetch_state_recovery, client_peer_records, client_ping,
+    RemoteLegalTaskStatus, RemoteLegalTaskSubmission, RemotePublicCurrencyPage,
+    RemotePublicCurrencySummary, RemotePublicCurrencyView, RemoteRecoveryCheckpointSubmission,
+    RemoteStateRecoveryPayload, RemoteValidatorTransitionSubmission, SECOND_QUIC_SERVER_NAME,
+    ValidatorBftPeer, authenticate_validator_bft_peer, client_fetch_state_recovery,
+    client_legal_task_status, client_peer_records, client_ping,
     client_public_currency_checkpoint_proof, client_public_currency_delta,
     client_public_currency_page, client_public_currency_summary, client_submit_legal_task,
     client_submit_recovery_checkpoint, client_submit_validator_transition,
@@ -102,6 +105,7 @@ pub use state_recovery_checkpoint::{
     StateRecoveryPayload,
 };
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
+pub use task_status::LegalTaskStatus;
 pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
 pub use validator::{ValidatorCredential, ValidatorSet};
 pub use validator_admission::{ValidatorAdmissionRequest, VerifiedValidatorAdmission};

@@ -30,6 +30,7 @@ use crate::runtime_bft::{
 };
 use crate::runtime_governance::serve_governance_request_from_request;
 use crate::runtime_submission::serve_legal_task_submission_from_request;
+use crate::runtime_task_status::serve_legal_task_status_from_request;
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
     PersistedNodeState, PersistedPublicNodeState, PersistenceError, PreparationError,
@@ -570,6 +571,7 @@ impl NodeRuntime {
             let peer_manager = self.peer_manager.clone();
             let validator_bft = self.validator_bft.clone();
             let task_submission_context = self.task_submission_context();
+            let task_status_context = self.task_status_context();
             let governance_context = self.governance_context();
             let active_submissions = Arc::clone(&self.active_submissions);
             tokio::spawn(async move {
@@ -579,6 +581,27 @@ impl NodeRuntime {
                 let Ok(Some(first_request)) = peer.accept_request().await else {
                     return;
                 };
+
+                if matches!(
+                    first_request.message(),
+                    NetworkMessage::LegalTaskStatusQuery { .. }
+                ) {
+                    let Some(context) = task_status_context else {
+                        let _ = first_request
+                            .respond(&NetworkMessage::LegalTaskStatusRejected {
+                                reason: crate::network::LegalTaskStatusRejection::Unavailable,
+                            })
+                            .await;
+                        return;
+                    };
+                    if serve_legal_task_status_from_request(context, first_request)
+                        .await
+                        .is_err()
+                    {
+                        peer.close_with_reason(b"LegalTask status query failed");
+                    }
+                    return;
+                }
 
                 if matches!(
                     first_request.message(),

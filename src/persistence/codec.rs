@@ -33,7 +33,7 @@ use super::validator_codec::{
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 4;
+const SNAPSHOT_VERSION: u32 = 1;
 const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V1\0";
 pub(super) const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;

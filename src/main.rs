@@ -16,10 +16,11 @@ use std::process::ExitCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use second::{
-    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, LegalTaskSubmissionOutcome,
-    LegalTaskSubmissionRejection, NetworkError, NodeRuntime, NodeRuntimeError, PublicCurrencyView,
-    PublicStateStore, QuicClient, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
-    StateStore, client_ping, client_public_currency_page, client_submit_legal_task,
+    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, LegalTask, LegalTaskStatus,
+    LegalTaskStatusRejection, LegalTaskSubmissionOutcome, LegalTaskSubmissionRejection,
+    NetworkError, NodeRuntime, NodeRuntimeError, PublicCurrencyView, PublicStateStore, QuicClient,
+    QuicTransportIdentity, RemoteCertifiedPublicCurrencyView, StateStore, client_legal_task_status,
+    client_ping, client_public_currency_page, client_submit_legal_task,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     parse_transaction_request_json,
 };
@@ -109,6 +110,17 @@ async fn run() -> Result<(), String> {
             )
             .await
         }
+        [command, address, transaction_file, authorizer_public_key, server_certificate]
+            if command == "task-status" =>
+        {
+            task_status(
+                address,
+                transaction_file,
+                authorizer_public_key,
+                server_certificate,
+            )
+            .await
+        }
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
         [command, address, server_certificate] if command == "sync-public" => {
             sync_public(address, server_certificate).await
@@ -134,7 +146,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second public-init <destination-snapshot-base> <trust-snapshot-base> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second public-init <destination-snapshot-base> <trust-snapshot-base> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second task-status <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -294,15 +306,7 @@ async fn submit(
     authorizer_public_key: &str,
     server_certificate: &str,
 ) -> Result<(), String> {
-    let request = local_file::read_bounded(
-        Path::new(transaction_file),
-        MAX_TRANSACTION_REQUEST_JSON_SIZE,
-        "transaction request",
-    )?;
-    let authorizer_public_key = local_file::decode_standard_base64_32(authorizer_public_key)
-        .map_err(|error| format!("invalid authorizer public key: {error}"))?;
-    let task = parse_transaction_request_json(&request, authorizer_public_key)
-        .map_err(|error| format!("invalid transaction request: {error:?}"))?;
+    let task = load_transaction_task(transaction_file, authorizer_public_key)?;
 
     let client = quic_client(server_certificate)?;
     let peer = client
@@ -321,6 +325,62 @@ async fn submit(
     };
     println!("ACCEPTED task={} state={state}", submitted.task_id);
     Ok(())
+}
+
+async fn task_status(
+    address: &str,
+    transaction_file: &str,
+    authorizer_public_key: &str,
+    server_certificate: &str,
+) -> Result<(), String> {
+    let task = load_transaction_task(transaction_file, authorizer_public_key)?;
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?)
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
+    let result = client_legal_task_status(&peer, &task).await;
+    peer.close();
+    client.wait_idle().await;
+
+    let remote = result.map_err(task_status_error)?;
+    let state = match remote.status {
+        LegalTaskStatus::Unknown => "unknown",
+        LegalTaskStatus::Bound => "bound",
+        LegalTaskStatus::Prepared => "prepared",
+        LegalTaskStatus::Voting => "voting",
+        LegalTaskStatus::Finalized => "finalized",
+        LegalTaskStatus::Succeeded => "succeeded",
+    };
+    println!("TASK task={} state={state}", remote.task_id);
+    Ok(())
+}
+
+fn task_status_error(error: NetworkError) -> String {
+    match error {
+        NetworkError::LegalTaskStatusRejected(LegalTaskStatusRejection::Unavailable) => {
+            "target node does not provide private LegalTask status".to_owned()
+        }
+        NetworkError::LegalTaskStatusRejected(LegalTaskStatusRejection::Rejected) => {
+            "LegalTask status query was rejected".to_owned()
+        }
+        other => format!("LegalTask status query failed: {other:?}"),
+    }
+}
+
+fn load_transaction_task(
+    transaction_file: &str,
+    authorizer_public_key: &str,
+) -> Result<LegalTask, String> {
+    let request = local_file::read_bounded(
+        Path::new(transaction_file),
+        MAX_TRANSACTION_REQUEST_JSON_SIZE,
+        "transaction request",
+    )?;
+    let authorizer_public_key = local_file::decode_standard_base64_32(authorizer_public_key)
+        .map_err(|error| format!("invalid authorizer public key: {error}"))?;
+    parse_transaction_request_json(&request, authorizer_public_key)
+        .map_err(|error| format!("invalid transaction request: {error:?}"))
 }
 
 fn submission_error(error: NetworkError) -> String {

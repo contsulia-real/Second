@@ -10,12 +10,13 @@ mod quic;
 mod recovery;
 mod session;
 mod submission;
+mod task_status;
 
 use std::fmt;
 
 use crate::{
     BftError, CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
-    FinalityError, LegalTaskSubmissionOutcome, PublicCheckpointError,
+    FinalityError, LegalTaskStatus, LegalTaskSubmissionOutcome, PublicCheckpointError,
     PublicCurrencyCheckpointProof, PublicCurrencyDelta, PublicCurrencyState, PublicCurrencySummary,
     PublicCurrencyView, PublicStateError, StateRecoveryCheckpointProof, StateRecoveryPayload,
     TaskId, ValidatorId, ValidatorSetTransitionProof,
@@ -67,8 +68,10 @@ pub use submission::{
 pub(crate) use submission::{
     rejected as legal_task_submission_rejected, validate_submission_chunk, validate_submission_open,
 };
+pub(crate) use task_status::rejected as legal_task_status_rejected;
+pub use task_status::{RemoteLegalTaskStatus, client_legal_task_status};
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 4;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -138,6 +141,12 @@ pub struct RemoteStateRecoveryPayload {
 pub enum LegalTaskSubmissionRejection {
     Unavailable,
     Busy,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegalTaskStatusRejection {
+    Unavailable,
     Rejected,
 }
 
@@ -249,6 +258,17 @@ pub enum NetworkMessage {
     LegalTaskSubmissionRejected {
         reason: LegalTaskSubmissionRejection,
     },
+    LegalTaskStatusQuery {
+        task_id: TaskId,
+        request_digest: [u8; 32],
+    },
+    LegalTaskStatusResult {
+        task_id: TaskId,
+        status: LegalTaskStatus,
+    },
+    LegalTaskStatusRejected {
+        reason: LegalTaskStatusRejection,
+    },
     ValidatorTransitionSubmit {
         validator_id: ValidatorId,
         validator_set_version: u64,
@@ -299,6 +319,8 @@ pub enum NetworkError {
     UnknownMessageType(u8),
     InvalidLegalTaskSubmission,
     LegalTaskSubmissionRejected(LegalTaskSubmissionRejection),
+    InvalidLegalTaskStatus,
+    LegalTaskStatusRejected(LegalTaskStatusRejection),
     InvalidGovernanceRequest,
     GovernanceUnauthorized,
     GovernanceRejected(GovernanceRejection),

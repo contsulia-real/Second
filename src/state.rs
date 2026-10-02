@@ -188,6 +188,12 @@ impl SecondState {
             .get(&task_id)
             .map(|binding| binding.request_digest)
     }
+    pub fn task_succeeded(&self, task_id: TaskId) -> Option<bool> {
+        self.protocol
+            .task_bindings
+            .get(&task_id)
+            .map(|binding| binding.succeeded)
+    }
 
     pub(crate) fn allocate_currency_range(
         &mut self,
