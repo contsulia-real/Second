@@ -7,8 +7,11 @@ use crate::{
     StateRecoveryCheckpoint, TaskId, ValidatorId, ValidatorSet, ValidatorSetTransition,
 };
 
+use super::PersistedNodeState;
 use super::codec::SnapshotContents;
-use super::store::{StateStore, next_recovery_checkpoint_serial, validate_vote_validator_set};
+use super::snapshot_validation::resolve_validator_set;
+use super::store::StateStore;
+use super::store_recovery::next_recovery_checkpoint_serial;
 
 impl StateStore {
     pub fn prepared_bft_proposal_subject(
@@ -535,6 +538,39 @@ fn validate_bft_round(state: &BftLocalState, round: u64) -> Result<(), Persisten
             current: state.round(),
             attempted: round,
         });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_vote_validator_set(
+    snapshot: &PersistedNodeState,
+    scope: &ConsensusScope,
+    validator_set: &ValidatorSet,
+) -> Result<(), PersistenceError> {
+    match scope {
+        ConsensusScope::PreparedTask(task_id) => {
+            let prepared = snapshot
+                .prepared_tasks
+                .get(task_id)
+                .ok_or(PersistenceError::StalePreparedTasks)?;
+            let expected = resolve_validator_set(
+                &snapshot.validator_set,
+                &snapshot.retained_validator_sets,
+                prepared.validator_set_version,
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+            if expected != validator_set {
+                return Err(PersistenceError::ValidatorRegistryMismatch);
+            }
+        }
+        ConsensusScope::PublicCheckpoint { .. }
+        | ConsensusScope::ValidatorSetTransition { .. }
+        | ConsensusScope::StateRecoveryCheckpoint { .. } => {
+            snapshot
+                .validator_registry
+                .validate_current_set(validator_set)
+                .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        }
     }
     Ok(())
 }

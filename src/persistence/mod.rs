@@ -8,6 +8,11 @@ mod safety_recovery;
 mod slot;
 mod snapshot_validation;
 mod store;
+mod store_finality;
+mod store_prepared;
+mod store_public_checkpoint;
+mod store_recovery;
+mod store_transition;
 mod validator_codec;
 
 pub(crate) use codec::{decode_shared_recovery_state, encode_shared_recovery_state};

@@ -1152,7 +1152,9 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | public_state.rs | 公开 Currency summary / view |
 | public_checkpoint.rs | 公共 checkpoint 与 finality proof |
 | state_recovery_checkpoint.rs | shared recovery payload/checkpoint/QC commitment |
-| network/ | 二进制网络 framing / session / public state sync |
+| network/codec.rs | network frame/version 校验与 message tag 领域分流；不承载各服务的具体 payload codec |
+| network/codec/{core,public,recovery,bft,legal,governance}.rs | 按协议服务职责分离的 wire payload codec；各 message 语义只有对应领域的一份实现 |
+| network/ | QUIC/session/public state sync 与各网络服务 runtime transport |
 | network/bft_codec.rs | bounded BFT Proposal/Vote/QC/FinalityVote/FinalityCertificate binary envelope codec |
 | network/submission.rs | 外部 signed LegalTask 的 bounded chunked client/service transport 与 submission response 语义 |
 | task_status.rs | 从现有 TaskId binding / PreparedTask lifecycle 派生的 LegalTask status 枚举；不持久化第二份状态 |
@@ -1168,7 +1170,13 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | runtime_consensus_target.rs | PreparedTask / PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 到既有 proposal/finality 类型的单一适配层 |
 | runtime_tasks.rs | Validator 间 PreparedTask 私有 source pull / install / retry 与 durable task 恢复编排 |
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
-| persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
+| persistence/store.rs | `StateStore` 单一 slot/lock/load/write authority 与初始化入口 |
+| persistence/store_recovery.rs | shared-state recovery、recovery checkpoint floor 与 validator safety recovery persistence |
+| persistence/store_transition.rs | ValidatorSet transition activation 与 retained-set lookup persistence |
+| persistence/store_public_checkpoint.rs | public checkpoint/floor/delta metadata persistence |
+| persistence/store_prepared.rs | PreparedTask lifecycle、business commit 与 retained-set derivation persistence |
+| persistence/store_finality.rs | finality vote-lock persistence |
+| persistence/ | 单一 Full snapshot schema/codec、BFT store 与以上领域化 `StateStore` impl；不维护第二份状态真值 |
 | transaction.rs | 外部 transaction request 严格解析 |
 | local_file.rs | CLI 本地 bounded file 读取、标准 Base64 32-byte key 解码、create-new/public-private sidecar writer 与 suffix helper |
 | node_capabilities.rs | `second node` 启动时的本地 capability composition；Validator sidecar 成对存在/缺失规则与 fail-closed 装配 |
