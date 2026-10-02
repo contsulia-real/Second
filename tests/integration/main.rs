@@ -5,6 +5,7 @@ mod authorization;
 mod bft_core;
 mod bft_driver;
 mod bft_transport;
+mod cli_network_init;
 mod cli_network_observe;
 mod cli_node_capabilities;
 mod cli_public_network;

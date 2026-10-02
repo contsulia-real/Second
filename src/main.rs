@@ -1,5 +1,6 @@
 mod bootstrap_config;
 mod local_file;
+mod network_init;
 mod node_capabilities;
 mod validator_config;
 mod validator_keyring;
@@ -38,6 +39,12 @@ async fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
 
     match args.as_slice() {
+        [command, validator_id, keyring_file] if command == "validator-keygen" => {
+            validator_keygen(parse_u64("validator id", validator_id)?, keyring_file)
+        }
+        [command, config_file, output_dir] if command == "init-network" => {
+            init_network(config_file, output_dir)
+        }
         [command, address, nonce, server_certificate] if command == "ping" => {
             ping(address, parse_u64("nonce", nonce)?, server_certificate).await
         }
@@ -77,10 +84,38 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second validator-keygen <validator-id> <keyring-file> | second init-network <config-json> <output-dir> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
+}
+
+fn validator_keygen(validator_id: u64, keyring_file: &str) -> Result<(), String> {
+    let credential = validator_keyring::generate(Path::new(keyring_file), validator_id)?;
+    println!(
+        "VALIDATOR-CREDENTIAL validator={} identity={} consensus={} recovery={} keyring={}",
+        credential.id().value(),
+        STANDARD.encode(credential.identity_public_key()),
+        STANDARD.encode(credential.consensus_public_key()),
+        STANDARD.encode(credential.recovery_public_key()),
+        keyring_file,
+    );
+    Ok(())
+}
+
+fn init_network(config_file: &str, output_dir: &str) -> Result<(), String> {
+    let nodes = network_init::init_network(Path::new(config_file), Path::new(output_dir))?;
+    for node in &nodes {
+        println!(
+            "INITIALIZED validator={} address={} snapshot={} node={} cert={}",
+            node.validator_id.value(),
+            node.listen_address,
+            node.snapshot_base.display(),
+            node.node_id,
+            network_init::certificate_base64(node),
+        );
+    }
+    Ok(())
 }
 
 async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {

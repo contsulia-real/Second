@@ -27,7 +27,7 @@ pub use bft::{ValidatorBftPeer, authenticate_validator_bft_peer, serve_validator
 pub(crate) use bft_codec::MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
 pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
-pub use identity::QuicTransportIdentity;
+pub use identity::{QuicTransportIdentity, transport_identity_path};
 pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
 pub(crate) use peer_record::validate_peer_limit;
 pub use peer_record::{MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, PeerRecord};

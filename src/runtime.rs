@@ -23,7 +23,7 @@ use crate::network::{
     client_public_currency_checkpoint_proof,
     client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
     outbound_bind_address, serve_public_network_connection,
-    serve_public_network_connection_from_request,
+    serve_public_network_connection_from_request, transport_identity_path,
 };
 use crate::runtime_bft::{
     ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
@@ -173,7 +173,7 @@ impl NodeRuntime {
         };
 
         let transport_identity =
-            QuicTransportIdentity::load_or_generate(transport_identity_path(store))?;
+            QuicTransportIdentity::load_or_generate(transport_identity_path(store.base_path()))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
         let local_address = server.local_addr()?;
         let local_peer_record = if local_address.ip().is_unspecified() {
@@ -647,11 +647,5 @@ impl Drop for ActiveConnectionPermit {
 fn peer_store_path(store: &StateStore) -> PathBuf {
     let mut path = OsString::from(store.base_path().as_os_str());
     path.push(".peers");
-    PathBuf::from(path)
-}
-
-fn transport_identity_path(store: &StateStore) -> PathBuf {
-    let mut path = OsString::from(store.base_path().as_os_str());
-    path.push(".transport");
     PathBuf::from(path)
 }

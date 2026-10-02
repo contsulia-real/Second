@@ -29,6 +29,10 @@ pub struct QuicTransportIdentity {
     node_id: NodeId,
 }
 
+pub fn transport_identity_path(snapshot_base: &Path) -> PathBuf {
+    append_suffix(snapshot_base, ".transport")
+}
+
 impl QuicTransportIdentity {
     pub fn generate() -> Result<Self, NetworkError> {
         let key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(identity_error)?;

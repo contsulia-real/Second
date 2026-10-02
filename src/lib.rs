@@ -67,7 +67,7 @@ pub use network::{
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     decode_bft_network_message, decode_network_message, encode_bft_network_message,
     encode_network_message, serve_ping_session, serve_public_currency_connection,
-    serve_validator_bft_connection,
+    serve_validator_bft_connection, transport_identity_path,
 };
 pub use payment::PaymentAddressStatus;
 pub use persistence::{PersistedNodeState, StateStore};

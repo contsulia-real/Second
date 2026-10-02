@@ -18,15 +18,8 @@ impl PeerRecord {
         address: SocketAddr,
         certificate_der: Vec<u8>,
     ) -> Result<Self, NetworkError> {
-        if address.port() == 0
-            || address.ip().is_unspecified()
-            || matches!(
-                address,
-                SocketAddr::V6(address) if address.flowinfo() != 0 || address.scope_id() != 0
-            )
-            || certificate_der.is_empty()
-            || certificate_der.len() > MAX_PEER_CERTIFICATE_SIZE
-        {
+        Self::validate_address(address)?;
+        if certificate_der.is_empty() || certificate_der.len() > MAX_PEER_CERTIFICATE_SIZE {
             return Err(NetworkError::InvalidPeerRecord);
         }
 
@@ -35,6 +28,20 @@ impl PeerRecord {
             address,
             certificate_der,
         })
+    }
+
+    pub fn validate_address(address: SocketAddr) -> Result<(), NetworkError> {
+        if address.port() == 0
+            || address.ip().is_unspecified()
+            || matches!(
+                address,
+                SocketAddr::V6(address) if address.flowinfo() != 0 || address.scope_id() != 0
+            )
+        {
+            Err(NetworkError::InvalidPeerRecord)
+        } else {
+            Ok(())
+        }
     }
 
     pub const fn node_id(&self) -> NodeId {

@@ -638,6 +638,38 @@ commit
 
 Genesis 本身的初始账户、地址起点和 Reserve 初始化不属于 LegalTask 执行，不要求经过 Finality。
 
+Genesis 现在有正式 provisioning 路径，而不是要求部署者用测试代码直接构造 snapshot。`second validator-keygen <validator-id> <keyring-file>` 只生成该 Validator 的 identity / consensus / recovery 三把相互独立的 Ed25519 private key，并把它们写成与 runtime 完全相同的 strict keyring schema；命令输出对应 public `ValidatorCredential` 供部署者审阅。**key generation 本身不产生 Validator authority。** 某个 Validator 只有被显式列入随后使用的 Genesis 配置并进入 Genesis `ValidatorSet`，才获得该网络的验证权；因此“持有 key”和“被网络授权”仍是两件不同的事。
+
+`second init-network <config-json> <output-dir>` 是从空目录创建一套可直接启动的 Genesis deployment 的正式入口。配置采用 strict JSON、拒绝未知字段，当前字段为：
+
+~~~json
+{
+  "validator_set_version": 1,
+  "first_currency_address": 1,
+  "reserve_count": 0,
+  "accounts": ["acct_..."],
+  "authorizer_public_keys_base64": ["..."],
+  "bft_timeouts_ms": {
+    "proposal": 1000,
+    "prevote": 1000,
+    "precommit": 1000
+  },
+  "validators": [
+    {
+      "validator_id": 1,
+      "listen_address": "203.0.113.10:4433",
+      "keyring_file": "validator-1.keys.json"
+    }
+  ]
+}
+~~~
+
+`keyring_file` 的相对路径相对于 init config 所在目录解析。初始化在发布任何最终 output 之前完成全部 preflight：Authorizer key 必须是有效且可组成非空 `AuthorizerSet` 的 Ed25519 public key；账户地址必须 canonical 且不重复；BFT timeout 必须全部大于 0；ValidatorId 和 listen address 不得重复；listen address 必须是可拨的非 wildcard、非零端口地址；keyring 内 ValidatorId 必须与配置一致；Genesis keyring 必须恰好只有一把 consensus key，因为 Genesis 尚不存在 historical consensus-key history；所有 Validator credential 最后统一通过 `ValidatorSet::new` 校验跨 Validator 的 key reuse / duplicate identity。
+
+通过 preflight 后，init 先在与最终目录相邻的 `<output-dir>.new` staging directory 构建整套部署。每个 Validator 得到 `<output-dir>/validator-<id>/second` snapshot base，并生成与其配套的 `.validator.keys.json`、`.validator.json`、独立 `.transport` 和 `.bootstrap.json`。每个节点 snapshot 使用完全相同的 Genesis `SecondState + ValidatorSet`；Validator keyring 继续保持私有 sidecar，transport identity 则独立生成，不与 Validator identity / consensus / recovery key 复用。所有 transport identity 先生成，随后才能根据真实 NodeId + certificate pin + 配置的 listen address 生成 bootstrap records。当前 `init-network` 最多 provision 33 个 Genesis Validator：每个节点的 bootstrap file 可以完整列出另外最多 32 个 exact-set Validator，使现有 Validator BFT maintenance 在没有额外 discovery 假设的情况下拥有完整拨号候选。这个 33 是当前 deployment/runtime discovery 能力边界，**不是 `ValidatorSet` 的协议级数量上限**；若未来需要更大的 ValidatorSet，必须先扩展 privileged Validator endpoint discovery / candidate retention，而不是由 init 工具生成一个已知无法保证 exact-set connectivity 的部署。
+
+只有 staging 中所有 snapshot、sidecar、transport identity 和 bootstrap file 都成功生成后，目录才通过同 parent rename 发布为最终 output；最终目录已存在时 `init-network` 直接拒绝，绝不覆盖现有 deployment；遗留 `.new` staging 也要求 operator 明确清理后才能重试，避免把不完整初始化误认为已发布网络。Genesis 的 AuthorizerSet/BFT timeout 属于各 Validator 的本地 runtime config，而不是 Second 共享资产状态；Genesis Validator authority 的共享根仍只有 snapshot 中的 Genesis ValidatorSet/Registry。
+
 PreparedTask 的生命周期固定为：
 
 ~~~text
@@ -903,6 +935,8 @@ Validator capability 使用两份严格 sidecar，且都不属于协议状态。
 `GetPeers { limit }` 当前上限为 32。若本节点存在可宣称的 local PeerRecord，响应第一项优先返回自己的当前 record，剩余名额再从 PeerStore 中按最近认证成功顺序返回记录，并排除当前请求方；这样不需要增加第二套 advertisement 消息或签名格式，远端可利用当前 authenticated QUIC connection 把“response 中 NodeId 等于 remote NodeId 的 record”识别为 NodeId holder 自己的 reachability 声明。`NodeRuntime::bootstrap` 先尝试本地持久 PeerStore，再把调用方提供的 bootstrap records 作为 fallback；连接任一 peer 成功后可继续请求更多 candidate，只有 responder 自己的 record 可以直接按 owner-authenticated reachability 更新 PeerStore，其他第三方 record 仍必须逐个通过真实 QUIC/TLS + Hello authentication 后才持久化。不同 endpoint/certificate 的同一 NodeId candidate 可以分别尝试，避免一个过期或恶意记录阻断后续正确 endpoint。
 
 长期 `second node` 的初始 bootstrap 来源固定为可选 sidecar `<snapshot-base>.bootstrap.json`。文件不存在表示没有静态 bootstrap，不阻止仅依靠已有 PeerStore 或 inbound peer 启动；文件一旦存在则必须是严格 JSON 数组，每项只含 `node_id`（64 位小写 hex）、`address`（SocketAddr）和 `certificate_base64`，未知字段、非法 NodeId/address/certificate、超过 32 条记录都会在创建 transport identity 之前使节点启动失败。该 sidecar 是本地 deployment hint，不属于 snapshot、protocol state 或 authority。
+`init-network` 生成 bootstrap 时复用上述同一个 `PeerRecord` address/certificate validation 与同一个 sidecar schema，不维护 provisioning 专用的第二套 reachability 格式。由于 transport identity 已在 init 阶段持久化到最终 snapshot-base 对应的 `.transport` 内容中，第一次 `second node` 启动只是加载该 identity；因此 init 输出的 NodeId/certificate pin 与实际 daemon 启动后的 NodeId/certificate 必须一致，后续重启也必须保持一致。
+
 
 runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护目标；这是实现策略，不是协议常量。节点每 2 秒运行维护 tick，连接不足时从 PeerStore + 静态 bootstrap + 已连接 peer 返回的候选继续扩展；没有取得新连接时，dial retry 从 1 秒指数退避到最多 60 秒，取得进展后重置。PeerStore 的选择策略保持有界且简单：直接认证成功或 owner-authenticated reachability 刷新会把记录提升到 MRU 端；对已持久记录的拨号失败会把该精确 record 降到最旧端，后续优先尝试近期成功/刷新的 peer，而不是永久反复先撞同一个坏 endpoint。QUIC client 与 server transport 都对已建立的长期 session 使用 2 秒 keepalive，并保留 5 秒 idle timeout；连接 admission、128 connection 容量与 peer/session 生命周期仍负责资源边界，keepalive 不授予任何额外 authority，也不会绕过 admission。当前仍没有 DHT、DNS seed 或 NAT traversal。
 
@@ -1102,6 +1136,7 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | network/ | 二进制网络 framing / session / public state sync |
 | network/bft_codec.rs | bounded BFT Proposal/Vote/QC/FinalityVote/FinalityCertificate binary envelope codec |
 | network/submission.rs | 外部 signed LegalTask 的 bounded chunked client/service transport 与 submission response 语义 |
+| network_init.rs | strict Genesis deployment config、Validator keyring/credential preflight、snapshot/transport/bootstrap staging 与最终发布 |
 | network/bft.rs | channel-bound active+retained Validator identity authority、exact-set envelope 授权与 bounded one-way BFT transport |
 | runtime_bft.rs | Validator-only peer 维护、active+retained authority、inbound queue、普通 BFT / finality 独立保留 in-flight 容量的 exact-set fanout 与 send-failure 生命周期 |
 | runtime_bft/keys.rs | Validator runtime identity key 与按 consensus public key 索引的 active/retained signing keyring |
@@ -1113,11 +1148,11 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
 | persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
 | transaction.rs | 外部 transaction request 严格解析 |
-| local_file.rs | CLI 本地 bounded file 读取与标准 Base64 32-byte key 解码共享 helper |
+| local_file.rs | CLI 本地 bounded file 读取、标准 Base64 32-byte key 解码、create-new/public-private sidecar writer 与 suffix helper |
 | node_capabilities.rs | `second node` 启动时的本地 capability composition；Validator sidecar 成对存在/缺失规则与 fail-closed 装配 |
-| validator_config.rs | Validator capability 非秘密 Authorizer / BFT timeout strict sidecar loader |
-| validator_keyring.rs | Validator operator identity/recovery/current+historical consensus private keyring loader 与 durable authority 校验 |
-| main.rs | 唯一长期 `second node` 入口与短命 CLI 工具入口 |
+| validator_config.rs | Validator capability 非秘密 Authorizer / BFT timeout strict sidecar 的统一 load/write schema |
+| validator_keyring.rs | Validator keygen、统一 keyring read/write schema、runtime identity/recovery/current+historical consensus durable authority 校验 |
+| main.rs | 唯一长期 `second node` 入口，以及 validator-keygen / init-network / submit / 查询等短命 CLI 工具入口 |
 
 新增能力应优先落入对应领域模块，不继续向无关大文件堆职责。
 
@@ -1276,14 +1311,17 @@ ValidatorId + TaskId
 
 ## 21. 当前仍需继续完成/审核的部分
 
-当前代码已经覆盖大量协议骨架，但仍不能把整个系统称为完成。
+当前代码已经具备从空目录 provision Genesis deployment、启动多 Validator 节点、外部提交 signed LegalTask、私有 exact-set bootstrap、BFT finality、自动 durable commit、公开状态读取以及既有 recovery primitives 的真实主链路。这里不再把已经完成的 BFT / recovery / PreparedTask bootstrap 重复列成“后续重点”。
 
-后续重点：
+当前真正仍未完成或仍需独立决策的部分：
 
-- privileged recovery transport、active-Validator identity 授权、chunked shared payload、空-store 原子安装、按 ValidatorSet 独立且必须 certified 后才能 `+1` 的 recovery serial head，以及基于独立 quorum key-rotation transition 的 local signing safety fence 已具备；recovery serial 不再依赖未定义的本地计数器，也没有被本轮 BFT liveness 工作重做。per-scope BFT core 的 round/prevote/precommit/durable locking、precommit-QC→FinalityVote gate、deterministic proposer、Validator-only BFT transport、timeout/view-change driver，以及 PreparedTask / PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 的 NodeRuntime multi-peer orchestration 已接到同一条 consensus 路径；PreparedTask 在本地 prepare 或重启恢复后自动启动，并按 exact retained ValidatorSet + historical consensus key 完成旧 scope，缺失对应历史 key 时 fail-closed；FinalityVote/FinalityCertificate 也沿该 Validator-only 通道验证和收敛，PreparedTask finality 成功后由 runtime 自动 durable commit，崩溃窗口由持久化 quorum proof 在重启时恢复。完成 scope 在第一张有效 FinalityCertificate 本地形成或验收后立即结束 active session：该次 drive 已产生的证书仍正常 fanout，随后不再保留完整 driver/store/vote 状态，而压缩为本地最多 64 个 recent-completed subject + 已验证 FinalityCertificate。对已经 commit 并因此从 durable retained ValidatorSet 中释放的历史 PreparedTask，recent-completed entry 还短暂保留该具体 scope 的 exact ValidatorSet，仅作为该 scope 的 certificate relay / late-message validation authority；它不写回 snapshot，也不授权同一旧 version 的其他 PreparedTask，cache 淘汰后下一次 authority refresh 即移除这份临时权限。这样一个节点先 commit 并释放 durable retained set 时，仍能把最终证书送到稍慢的同 scope Validator，而不会重新恢复旧 membership。重复 FinalityCertificate 不再刷新 deadline 或重新进入 active relay，避免 completed peer 之间形成证书回声/延长生命周期；落后 peer 之后若继续发送该 scope 的非-certificate envelope，recent-completed cache 会先立即补发一次证书，之后最多按原 precommit timeout 节流重发。identity/recovery authority 本身丢失时仍走旧 ValidatorId 退休 + 新 ValidatorId admission，而不是绕过 quorum；
-- 如果 owner 隐私需要“公开可验证证明”，再单独决定具体密码学机制；
-- PreparedTask 私有 bootstrap 已冻结并实现：只在 exact ValidatorSet 的既有 Validator-only authenticated transport 上传播原始 signed `LegalTask` source，不传播发送者计算出的 PreparedPlan 作为真值；proposer availability hint + 按需分块 pull 处理初次发现、重连和漏包，接收方必须本地重新验证 Authorizer、独立 prepare 并确认 canonical plan digest 与 proposal subject 完全一致后才能打开 signer。PreparedTask source 随 task 生命周期 durable 保存以支持重启后服务 pull，但不进入 plan digest；Validator runtime 统一提供 AuthorizerSet / BFT timeout / time source，本地新 prepare 与重启恢复的 durable PreparedTask 自动启动现有 consensus scope；
-- 持续检查 persistence / network / executor 等大模块是否开始职责混杂，避免形成 God File。
+- **Validator/governance operator control surface**：Validator admission、consensus-key rotation、certified ValidatorSet transition、recovery checkpoint / safety-recovery 等协议 primitive 已存在，但尚未像 `submit` / `init-network` 一样形成完整的正式 operator CLI/control surface。后续接线必须复用现有 certified authority 与 persistence 路径，不能另造管理员旁路。
+- **公开观察结果是否能升级成本地持久状态**：`sync-public` / `observe-public-network` 当前只产生经过验证的 public view，不包含 owner、PaymentAddress、claims、PreparedTask 等私有/协议状态，因此不能覆盖本地 `SecondState`。若未来需要 public-state bootstrap 或另一类轻节点，需要先定义清楚它的状态职责与信任边界。
+- **owner 隐私的公开可验证证明**：只有产品真的要求“隐藏 owner 同时向公开节点证明某些 ownership 性质”时，再选择具体密码学机制；当前不要预装 commitment / ZK 体系。
+- **真实部署网络发现需求**：当前 static bootstrap + authenticated peer discovery 足以启动最多 33 个、endpoint 明确可拨且每个 Validator 都能获得完整 exact-set bootstrap 的 Genesis deployment；若要 provision 更大的 ValidatorSet，需要先解决 Validator endpoint candidate retention/discovery 的当前 32-record implementation limit。DNS seed、DHT、NAT traversal、显式 advertise endpoint 仍只在真实部署拓扑证明需要时再决定，不能因为传统区块链常见就默认加入。
+- **治理身份与 RecoverySet 的现实世界规则**：协议内 Validator authority 已明确，但现实世界“一人一 Validator”、RecoverySet 成员资格/更换等仍是治理问题，不能由实现自行猜测。
+- 持续检查 persistence / network / runtime 等当前修改路径是否出现职责混杂；发现 God File 或重复真值时在相关任务内收敛。
+
 
 ---
 

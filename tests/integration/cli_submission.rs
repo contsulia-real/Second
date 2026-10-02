@@ -7,13 +7,11 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use second::{
-    CURRENT_PROTOCOL_VERSION, LegalTask, LegalTaskPayload, Operation, SecondState, StateStore,
-};
-use serde_json::json;
+use second::{SecondState, StateStore};
 
 use crate::support::{
-    self, account, key, single_validator_set, task_id, temp_base, write_validator_sidecars,
+    self, account, key, single_validator_set, temp_base, write_issue_transaction_request,
+    write_validator_sidecars,
 };
 
 #[test]
@@ -38,7 +36,8 @@ fn validator_node_accepts_external_submission_commits_and_replays_idempotently()
         &[authorizer.verifying_key().to_bytes()],
     );
     let request_path = base.with_extension("request.json");
-    let submitted_task_id = write_issue_request(&request_path, recipient, 7001, &authorizer);
+    let submitted_task_id =
+        write_issue_transaction_request(&request_path, recipient, 7001, &authorizer, 1);
 
     let (mut node, address, certificate) = start_node(&base);
     let authorizer_public_key = STANDARD.encode(authorizer.verifying_key().to_bytes());
@@ -131,7 +130,7 @@ fn public_only_node_rejects_external_submission() {
 
     let authorizer = key(9);
     let request_path = base.with_extension("request.json");
-    write_issue_request(&request_path, recipient, 7002, &authorizer);
+    write_issue_transaction_request(&request_path, recipient, 7002, &authorizer, 1);
 
     let (mut node, address, certificate) = start_node(&base);
     let output = submit(
@@ -148,41 +147,6 @@ fn public_only_node_rejects_external_submission() {
     stop_node(&mut node);
     support::cleanup_node_runtime(store, base);
     fs::remove_file(request_path).unwrap();
-}
-
-fn write_issue_request(
-    path: &Path,
-    recipient: second::AccountAddress,
-    task_number: u128,
-    authorizer: &ed25519_dalek::SigningKey,
-) -> second::TaskId {
-    let task_id = task_id(task_number);
-    let task = LegalTask::sign(
-        LegalTaskPayload::new(
-            task_id.clone(),
-            CURRENT_PROTOCOL_VERSION,
-            None,
-            vec![Operation::Issue {
-                account: recipient,
-                count: 1,
-            }],
-        ),
-        authorizer,
-    )
-    .unwrap();
-    let request = json!({
-        "request_id": task_id.as_str(),
-        "version": CURRENT_PROTOCOL_VERSION,
-        "expires_at": null,
-        "operations": [{
-            "type": "issue",
-            "recipient": recipient.to_string(),
-            "amount": 1
-        }],
-        "signature": task.signature_base64url()
-    });
-    fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
-    task_id
 }
 
 fn start_node(base: &Path) -> (Child, String, String) {

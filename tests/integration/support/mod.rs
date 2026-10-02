@@ -135,6 +135,42 @@ pub fn task_id(value: u128) -> TaskId {
     TaskId::parse(&format!("t{value:032x}")).unwrap()
 }
 
+pub fn write_issue_transaction_request(
+    path: &Path,
+    recipient: AccountAddress,
+    task_number: u128,
+    authorizer: &SigningKey,
+    count: u64,
+) -> TaskId {
+    let task_id = task_id(task_number);
+    let task = LegalTask::sign(
+        LegalTaskPayload::new(
+            task_id.clone(),
+            CURRENT_PROTOCOL_VERSION,
+            None,
+            vec![Operation::Issue {
+                account: recipient,
+                count,
+            }],
+        ),
+        authorizer,
+    )
+    .unwrap();
+    let request = json!({
+        "request_id": task_id.as_str(),
+        "version": CURRENT_PROTOCOL_VERSION,
+        "expires_at": null,
+        "operations": [{
+            "type": "issue",
+            "recipient": recipient.to_string(),
+            "amount": count
+        }],
+        "signature": task.signature_base64url()
+    });
+    fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
+    task_id
+}
+
 pub fn verified_task(task_number: u128, operations: Vec<Operation>) -> VerifiedLegalTask {
     verified_task_with_expiry(task_number, None, operations)
 }

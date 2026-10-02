@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -7,9 +6,11 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use second::{MAX_PEER_RECORDS, NodeId, PeerRecord};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+use crate::local_file::{append_suffix, write_new};
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BootstrapRecordFile {
     node_id: String,
@@ -48,10 +49,29 @@ pub(crate) fn load(snapshot_base: &str) -> Result<Vec<PeerRecord>, String> {
         .collect()
 }
 
+pub(crate) fn write(snapshot_base: &Path, records: &[PeerRecord]) -> Result<(), String> {
+    if records.len() > usize::from(MAX_PEER_RECORDS) {
+        return Err(format!(
+            "bootstrap record count {} exceeds maximum {}",
+            records.len(),
+            MAX_PEER_RECORDS
+        ));
+    }
+    let file = records
+        .iter()
+        .map(|record| BootstrapRecordFile {
+            node_id: record.node_id().to_string(),
+            address: record.address().to_string(),
+            certificate_base64: STANDARD.encode(record.certificate_der()),
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|error| format!("failed to encode bootstrap records: {error}"))?;
+    write_new(&bootstrap_path(snapshot_base), &bytes, "bootstrap file")
+}
+
 pub(crate) fn bootstrap_path(snapshot_base: &Path) -> PathBuf {
-    let mut path = OsString::from(snapshot_base.as_os_str());
-    path.push(".bootstrap.json");
-    PathBuf::from(path)
+    append_suffix(snapshot_base, ".bootstrap.json")
 }
 
 fn parse_record(
