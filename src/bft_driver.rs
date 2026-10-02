@@ -130,10 +130,9 @@ impl BftDriver {
             .store
             .bft_local_state(self.signer.validator_id(), &self.scope)?;
         Ok(match state {
-            None => BftDriverPhase::Proposal,
-            Some(state) if state.prevote().is_none() => BftDriverPhase::Proposal,
-            Some(state) if state.precommit().is_none() => BftDriverPhase::Prevote,
-            Some(_) => BftDriverPhase::Precommit,
+            Some(state) if state.precommit().is_some() => BftDriverPhase::Precommit,
+            Some(state) if state.prevote().is_some() => BftDriverPhase::Prevote,
+            _ => BftDriverPhase::Proposal,
         })
     }
 
@@ -268,16 +267,26 @@ impl BftDriver {
             });
         }
 
-        let current = self.current_round()?;
+        if let BftValue::Digest(digest) = statement.value() {
+            self.require_validated_subject(digest)?;
+        }
+
+        let mut current = self.current_round()?;
+        if statement.round() > current {
+            self.store.catch_up_bft_round(
+                self.signer.validator_id(),
+                &self.scope,
+                statement.round(),
+                &self.validator_set,
+            )?;
+            self.prune_after_round_advance(statement.round());
+            current = statement.round();
+        }
         if statement.round() != current {
             return Err(BftDriverError::RoundMismatch {
                 current,
                 actual: statement.round(),
             });
-        }
-
-        if let BftValue::Digest(digest) = statement.value() {
-            self.require_validated_subject(digest)?;
         }
 
         match (statement.phase(), statement.value()) {

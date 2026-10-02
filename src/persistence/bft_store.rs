@@ -165,6 +165,40 @@ impl StateStore {
         self.write_bft_local_states_unlocked(&latest)
     }
 
+    pub(crate) fn catch_up_bft_round(
+        &self,
+        validator_id: ValidatorId,
+        scope: &ConsensusScope,
+        target_round: u64,
+        validator_set: &ValidatorSet,
+    ) -> Result<u64, PersistenceError> {
+        let _guard = self.lock()?;
+        let mut latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        validate_vote_validator_set(&latest, scope, validator_set)?;
+        if !validator_set.contains(validator_id) {
+            return Err(PersistenceError::Bft(BftError::UnknownValidator(
+                validator_id,
+            )));
+        }
+        open_prepared_voting(&mut latest, scope)?;
+
+        let state = latest
+            .bft_local_states
+            .entry((validator_id, scope.clone()))
+            .or_insert_with(|| BftLocalState::new(validator_set.version()));
+        validate_bft_state_version(state, validator_set)?;
+        if target_round <= state.round() {
+            return Err(PersistenceError::BftRoundMustAdvance {
+                current: state.round(),
+                attempted: target_round,
+            });
+        }
+        state.set_round(target_round);
+        self.write_bft_local_states_unlocked(&latest)
+    }
+
     pub fn accept_bft_nil_precommit_qc(
         &self,
         validator_id: ValidatorId,

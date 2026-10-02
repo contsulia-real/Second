@@ -170,7 +170,7 @@ fn public_checkpoint(store: &StateStore, epoch: u64) -> PublicCurrencyCheckpoint
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint() {
     let mut fixtures = (1..=4)
         .map(|validator_id| {
@@ -336,7 +336,7 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull() {
     let validators = validator_set(1, 1..=4);
     let alice = support::account(31);
@@ -422,7 +422,8 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
     );
 
     let mut certificates = vec![None; fixtures.len()];
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let mut send_failures = vec![Vec::new(); fixtures.len()];
+    let completed = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             for (index, (runtime, _, _)) in fixtures.iter().enumerate() {
                 for event in runtime.drain_bft_consensus_events().unwrap() {
@@ -435,7 +436,9 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
                             certificate.verify(&validators).unwrap();
                             certificates[index] = Some(certificate);
                         }
-                        BftConsensusEvent::SendFailed { .. } => {}
+                        event @ BftConsensusEvent::SendFailed { .. } => {
+                            send_failures[index].push(event);
+                        }
                         event => panic!("unexpected task propagation consensus event: {event:?}"),
                     }
                 }
@@ -446,10 +449,40 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect(
-        "one private task source must be pulled, independently prepared, and finalized by all validators",
-    );
+    .await;
+    if completed.is_err() {
+        let states = fixtures
+            .iter()
+            .enumerate()
+            .map(|(index, (runtime, store, _))| {
+                let validator_id = ValidatorId::new((index + 1) as u64);
+                let prepared = PreparedTaskBook::new(store.clone())
+                    .unwrap()
+                    .is_prepared(task_id.clone());
+                let subject = store.prepared_bft_proposal_subject(task_id.clone());
+                let bft_state = subject.as_ref().ok().and_then(|subject| {
+                    store
+                        .bft_local_state(validator_id, subject.scope())
+                        .unwrap()
+                });
+                (
+                    validator_id,
+                    runtime.connected_validator_ids(),
+                    prepared,
+                    subject,
+                    bft_state,
+                    runtime.drain_bft_consensus_events().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let task_finished = runtime_tasks
+            .iter()
+            .map(|task| task.is_finished())
+            .collect::<Vec<_>>();
+        panic!(
+            "private task pull stalled; certificates={certificates:?}; send_failures={send_failures:?}; states={states:?}; task_finished={task_finished:?}"
+        );
+    }
 
     for (_, store, _) in &fixtures {
         let book = PreparedTaskBook::new(store.clone()).unwrap();
@@ -562,7 +595,7 @@ async fn public_only_runtime_denies_validator_bft_without_breaking_public_sessio
     support::cleanup_node_runtime(public_store, public_base);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_authority() {
     let current = validator_set(4, 1..=4);
     let certified_transition = certified_rotated_validator_set(&current);

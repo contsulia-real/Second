@@ -669,7 +669,12 @@ impl BftConsensusCoordinator {
                     if actual < current && !inbound_message.message.is_digest_precommit_evidence() {
                         return Ok(None);
                     }
-                    if actual > current {
+                    if actual > current
+                        && !matches!(
+                            &inbound_message.message,
+                            BftNetworkMessage::QuorumCertificate(_)
+                        )
+                    {
                         if session.pending_future.contains(&inbound_message) {
                             return Ok(None);
                         }

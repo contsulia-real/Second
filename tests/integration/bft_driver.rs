@@ -167,6 +167,53 @@ fn nil_precommit_qc_advances_a_validator_that_missed_the_round() {
 }
 
 #[test]
+fn future_prevote_qc_catches_up_before_signing_precommit() {
+    let validators = validator_set(7, 1..=4);
+    let store = StateStore::new(temp_base("bft-driver-future-prevote-qc"));
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    store.initialize(&state, &validators).unwrap();
+
+    let checkpoint =
+        PublicCurrencyCheckpoint::new(CURRENT_PROTOCOL_VERSION, 4, state.public_currency_summary());
+    let subject = store
+        .public_checkpoint_bft_proposal_subject(&checkpoint)
+        .unwrap();
+    let scope = subject.scope().clone();
+    let digest = subject.digest();
+    let mut driver = BftDriver::new(
+        ValidatorSigner::new(ValidatorId::new(1), key(4), store.clone()),
+        store.clone(),
+        validators.clone(),
+        scope.clone(),
+    )
+    .unwrap();
+    driver.register_subject(&subject).unwrap();
+
+    let future_prevote_qc = bft_qc(
+        scope.clone(),
+        2,
+        BftPhase::Prevote,
+        BftValue::Digest(digest),
+        [1, 2, 3],
+        &validators,
+    );
+    let action = driver
+        .accept_quorum_certificate(&future_prevote_qc)
+        .unwrap();
+    let BftDriverAction::Vote { statement, vote } = action else {
+        panic!("future prevote QC must produce local precommit");
+    };
+    assert_eq!(statement.round(), 2);
+    assert_eq!(statement.phase(), BftPhase::Precommit);
+    assert_eq!(statement.value(), BftValue::Digest(digest));
+    assert_eq!(vote.validator_id(), ValidatorId::new(1));
+    assert_eq!(driver.current_round().unwrap(), 2);
+    assert_eq!(driver.phase().unwrap(), BftDriverPhase::Precommit);
+
+    store.remove_files().unwrap();
+}
+
+#[test]
 fn late_digest_precommit_qc_finalizes_after_local_round_advance() {
     let validators = validator_set(7, 1..=4);
     let store = StateStore::new(temp_base("bft-driver-late-finality"));
