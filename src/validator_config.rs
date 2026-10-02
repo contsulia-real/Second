@@ -1,14 +1,12 @@
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::VerifyingKey;
 use second::{AuthorizerSet, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, ValidatorRuntimeConfig};
 use serde::Deserialize;
+
+use crate::local_file::{decode_standard_base64_32, read_bounded};
 
 const MAX_VALIDATOR_CONFIG_SIZE: usize = 64 * 1024;
 
@@ -39,7 +37,7 @@ pub(crate) fn load(snapshot_base: &str) -> Result<ValidatorRuntimeConfig, String
         .iter()
         .enumerate()
         .map(|(index, value)| {
-            let bytes = decode_32(value).map_err(|error| {
+            let bytes = decode_standard_base64_32(value).map_err(|error| {
                 format!(
                     "invalid validator config {} authorizer_public_keys_base64[{index}]: {error}",
                     path.display()
@@ -70,25 +68,6 @@ pub(crate) fn load(snapshot_base: &str) -> Result<ValidatorRuntimeConfig, String
     ))
 }
 
-fn read_bounded(path: &Path, maximum: usize, label: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("failed to read {label} {}: {error}", path.display()))?;
-    let limit = u64::try_from(maximum)
-        .expect("validator sidecar size limit must fit u64")
-        .saturating_add(1);
-    let mut bytes = Vec::new();
-    file.take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("failed to read {label} {}: {error}", path.display()))?;
-    if bytes.len() > maximum {
-        return Err(format!(
-            "{label} {} is too large; maximum is {maximum} bytes",
-            path.display()
-        ));
-    }
-    Ok(bytes)
-}
-
 pub(crate) fn config_path(snapshot_base: &Path) -> PathBuf {
     let mut path = OsString::from(snapshot_base.as_os_str());
     path.push(".validator.json");
@@ -103,15 +82,6 @@ fn nonzero_duration(path: &Path, field: &str, milliseconds: u64) -> Result<Durat
         ));
     }
     Ok(Duration::from_millis(milliseconds))
-}
-
-fn decode_32(value: &str) -> Result<[u8; 32], &'static str> {
-    let decoded = STANDARD
-        .decode(value)
-        .map_err(|_| "must be valid standard base64")?;
-    decoded
-        .try_into()
-        .map_err(|_| "must decode to exactly 32 bytes")
 }
 
 fn system_unix_seconds() -> u64 {

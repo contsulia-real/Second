@@ -9,6 +9,7 @@ mod cli_network_observe;
 mod cli_node_capabilities;
 mod cli_public_network;
 mod cli_snapshot;
+mod cli_submission;
 mod concurrent_execution;
 mod core_protocol;
 mod currency_claims;

@@ -1,4 +1,5 @@
 mod bootstrap_config;
+mod local_file;
 mod node_capabilities;
 mod validator_config;
 mod validator_keyring;
@@ -6,16 +7,21 @@ mod validator_keyring;
 use std::env;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::process::ExitCode;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use second::{
-    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError,
-    QuicClient, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView, StateStore, client_ping,
-    client_public_currency_page, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view,
+    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, LegalTaskSubmissionOutcome,
+    LegalTaskSubmissionRejection, NetworkError, NodeRuntime, NodeRuntimeError, QuicClient,
+    QuicTransportIdentity, RemoteCertifiedPublicCurrencyView, StateStore, client_ping,
+    client_public_currency_page, client_submit_legal_task,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    parse_transaction_request_json,
 };
+
+const MAX_TRANSACTION_REQUEST_JSON_SIZE: usize = 16 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -34,6 +40,17 @@ async fn run() -> Result<(), String> {
     match args.as_slice() {
         [command, address, nonce, server_certificate] if command == "ping" => {
             ping(address, parse_u64("nonce", nonce)?, server_certificate).await
+        }
+        [command, address, transaction_file, authorizer_public_key, server_certificate]
+            if command == "submit" =>
+        {
+            submit(
+                address,
+                transaction_file,
+                authorizer_public_key,
+                server_certificate,
+            )
+            .await
         }
         [command, snapshot_base] if command == "snapshot-status" => snapshot_status(snapshot_base),
         [command, address, server_certificate] if command == "sync-public" => {
@@ -60,7 +77,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second node <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -107,6 +124,56 @@ async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
         .run(&bootstrap_records)
         .await
         .map_err(|error| format!("node runtime stopped: {error:?}"))
+}
+
+async fn submit(
+    address: &str,
+    transaction_file: &str,
+    authorizer_public_key: &str,
+    server_certificate: &str,
+) -> Result<(), String> {
+    let request = local_file::read_bounded(
+        Path::new(transaction_file),
+        MAX_TRANSACTION_REQUEST_JSON_SIZE,
+        "transaction request",
+    )?;
+    let authorizer_public_key = local_file::decode_standard_base64_32(authorizer_public_key)
+        .map_err(|error| format!("invalid authorizer public key: {error}"))?;
+    let task = parse_transaction_request_json(&request, authorizer_public_key)
+        .map_err(|error| format!("invalid transaction request: {error:?}"))?;
+
+    let client = quic_client(server_certificate)?;
+    let peer = client
+        .connect(parse_socket_address(address)?)
+        .await
+        .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
+    let result = client_submit_legal_task(&peer, &task).await;
+    peer.close();
+    client.wait_idle().await;
+
+    let submitted = result.map_err(submission_error)?;
+    let state = match submitted.outcome {
+        LegalTaskSubmissionOutcome::Prepared => "prepared",
+        LegalTaskSubmissionOutcome::AlreadyPending => "pending",
+        LegalTaskSubmissionOutcome::AlreadySucceeded => "succeeded",
+    };
+    println!("ACCEPTED task={} state={state}", submitted.task_id);
+    Ok(())
+}
+
+fn submission_error(error: NetworkError) -> String {
+    match error {
+        NetworkError::LegalTaskSubmissionRejected(LegalTaskSubmissionRejection::Unavailable) => {
+            "target node does not provide LegalTask submission".to_owned()
+        }
+        NetworkError::LegalTaskSubmissionRejected(LegalTaskSubmissionRejection::Busy) => {
+            "target node is temporarily at its LegalTask submission capacity".to_owned()
+        }
+        NetworkError::LegalTaskSubmissionRejected(LegalTaskSubmissionRejection::Rejected) => {
+            "LegalTask submission was rejected".to_owned()
+        }
+        other => format!("LegalTask submission failed: {other:?}"),
+    }
 }
 
 async fn ping(address: &str, nonce: u64, server_certificate: &str) -> Result<(), String> {

@@ -8,9 +8,7 @@ pub use config::ValidatorRuntimeConfig;
 pub use keys::ValidatorRuntimeKeys;
 
 use task_sync::PreparedTaskSyncState;
-pub(crate) use task_sync::{
-    MAX_PREPARED_TASK_SOURCE_SIZE, PreparedTaskChunk, PreparedTaskChunkResult,
-};
+pub(crate) use task_sync::{PreparedTaskChunk, PreparedTaskChunkResult};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};

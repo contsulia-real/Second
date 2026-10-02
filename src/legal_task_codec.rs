@@ -3,6 +3,8 @@ use crate::{
     TaskEncodingError, TaskId,
 };
 
+pub(crate) const MAX_ENCODED_LEGAL_TASK_SIZE: usize = 2 * 1024 * 1024;
+
 pub(crate) fn encode_legal_task(task: &LegalTask) -> Result<Vec<u8>, TaskEncodingError> {
     let payload = task.payload();
     let mut out = Vec::with_capacity(256);

@@ -13,7 +13,7 @@ use second::{
     ValidatorSigner, authenticate_validator_bft_peer, client_ping,
 };
 
-use crate::support::{self, key, peer_record, temp_base, validator_set};
+use crate::support::{self, key, peer_record, single_validator_set, temp_base, validator_set};
 
 fn bind_validator_runtime(
     store: &StateStore,
@@ -64,6 +64,44 @@ fn validator_runtime_fixture_with_timeouts(
         support::validator_runtime_config(timeouts),
     ));
     (runtime, store, base)
+}
+
+#[tokio::test]
+async fn exact_pending_legal_task_retry_is_idempotent() {
+    let base = temp_base("runtime-submit-retry");
+    let store = StateStore::new(&base);
+    let alice = support::account(70);
+    store
+        .initialize(
+            &SecondState::genesis([alice], 1),
+            &single_validator_set(1, 1, 31, 32, 33),
+        )
+        .unwrap();
+    let runtime = Arc::new(bind_validator_runtime(
+        &store,
+        ValidatorRuntimeKeys::new(ValidatorId::new(1), key(31), key(32)),
+        support::default_validator_runtime_config(),
+    ));
+    let task = support::verified_task(
+        1400,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    let signed = task.signed_task().clone();
+
+    assert_eq!(
+        runtime.submit_legal_task(signed.clone()).unwrap(),
+        second::LegalTaskSubmissionOutcome::Prepared
+    );
+    assert_eq!(
+        runtime.submit_legal_task(signed).unwrap(),
+        second::LegalTaskSubmissionOutcome::AlreadyPending
+    );
+
+    drop(runtime);
+    support::cleanup_node_runtime(store, base);
 }
 
 fn rotated_consensus_key(validator_id: u64) -> ed25519_dalek::SigningKey {
@@ -380,7 +418,7 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
             .0
             .submit_legal_task(task.signed_task().clone())
             .unwrap(),
-        second::PreparationOutcome::Prepared
+        second::LegalTaskSubmissionOutcome::Prepared
     );
 
     let mut certificates = vec![None; fixtures.len()];

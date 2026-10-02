@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub(crate) const MAX_ACTIVE_CONNECTIONS: usize = 128;
+const MAX_ACTIVE_LEGAL_TASK_SUBMISSIONS: usize = 8;
 pub const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
 const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -27,6 +28,7 @@ use crate::network::{
 use crate::runtime_bft::{
     ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
 };
+use crate::runtime_tasks::serve_legal_task_submission_from_request;
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
     PersistedNodeState, PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView,
@@ -136,6 +138,7 @@ pub struct NodeRuntime {
     state_recovery_provider: StateRecoveryProviderHandle,
     pub(crate) validator_bft: Option<ValidatorBftRuntime>,
     pub(crate) active_connections: Arc<AtomicUsize>,
+    active_submissions: Arc<AtomicUsize>,
 }
 
 impl NodeRuntime {
@@ -194,6 +197,7 @@ impl NodeRuntime {
             state_recovery_provider: new_state_recovery_provider_handle(),
             validator_bft,
             active_connections: Arc::new(AtomicUsize::new(0)),
+            active_submissions: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -447,6 +451,8 @@ impl NodeRuntime {
             let context = self.public_network_context();
             let peer_manager = self.peer_manager.clone();
             let validator_bft = self.validator_bft.clone();
+            let task_submission_context = self.task_submission_context();
+            let active_submissions = Arc::clone(&self.active_submissions);
             tokio::spawn(async move {
                 let Ok(peer) = incoming.handshake().await else {
                     return;
@@ -454,6 +460,38 @@ impl NodeRuntime {
                 let Ok(Some(first_request)) = peer.accept_request().await else {
                     return;
                 };
+
+                if matches!(
+                    first_request.message(),
+                    NetworkMessage::LegalTaskSubmissionOpen { .. }
+                ) {
+                    let Some(context) = task_submission_context else {
+                        let _ = first_request
+                            .respond(&NetworkMessage::LegalTaskSubmissionRejected {
+                                reason: crate::network::LegalTaskSubmissionRejection::Unavailable,
+                            })
+                            .await;
+                        return;
+                    };
+                    let Some(_submission_permit) = ActiveConnectionPermit::try_acquire_with_limit(
+                        &active_submissions,
+                        MAX_ACTIVE_LEGAL_TASK_SUBMISSIONS,
+                    ) else {
+                        let _ = first_request
+                            .respond(&NetworkMessage::LegalTaskSubmissionRejected {
+                                reason: crate::network::LegalTaskSubmissionRejection::Busy,
+                            })
+                            .await;
+                        return;
+                    };
+                    if serve_legal_task_submission_from_request(context, &peer, first_request)
+                        .await
+                        .is_err()
+                    {
+                        peer.close_with_reason(b"LegalTask submission failed");
+                    }
+                    return;
+                }
 
                 if matches!(
                     first_request.message(),
@@ -581,9 +619,16 @@ pub(crate) struct ActiveConnectionPermit {
 
 impl ActiveConnectionPermit {
     pub(crate) fn try_acquire(active_connections: &Arc<AtomicUsize>) -> Option<Self> {
+        Self::try_acquire_with_limit(active_connections, MAX_ACTIVE_CONNECTIONS)
+    }
+
+    pub(crate) fn try_acquire_with_limit(
+        active_connections: &Arc<AtomicUsize>,
+        maximum: usize,
+    ) -> Option<Self> {
         active_connections
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_ACTIVE_CONNECTIONS).then_some(active + 1)
+                (active < maximum).then_some(active + 1)
             })
             .ok()?;
 

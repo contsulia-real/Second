@@ -1,17 +1,17 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::{
-    CurrencyAddress, CurrencyRole, PublicCurrencyCheckpointProof, PublicCurrencyState,
-    PublicCurrencySummary, StateRecoveryCheckpointProof, ValidatorId,
+    CurrencyAddress, CurrencyRole, LegalTaskSubmissionOutcome, PublicCurrencyCheckpointProof,
+    PublicCurrencyState, PublicCurrencySummary, StateRecoveryCheckpointProof, TaskId, ValidatorId,
     public_checkpoint::CheckpointProofCodecError,
     state_recovery_checkpoint::StateRecoveryProofCodecError,
 };
 
 use super::{
-    CURRENT_NETWORK_PROTOCOL_VERSION, MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE,
-    MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, MAX_STATE_RECOVERY_CHUNK_SIZE, NetworkError,
-    NetworkMessage, NodeId, PeerRecord, validate_chunk_limit, validate_peer_limit,
-    validate_public_currency_limit,
+    CURRENT_NETWORK_PROTOCOL_VERSION, LegalTaskSubmissionRejection, MAX_NETWORK_FRAME_SIZE,
+    MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE,
+    MAX_PUBLIC_CURRENCY_PAGE, MAX_STATE_RECOVERY_CHUNK_SIZE, NetworkError, NetworkMessage, NodeId,
+    PeerRecord, validate_chunk_limit, validate_peer_limit, validate_public_currency_limit,
 };
 
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
@@ -283,6 +283,41 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
             Ok(payload)
         }
         NetworkMessage::BftDenied => Ok(vec![22]),
+        NetworkMessage::LegalTaskSubmissionOpen { total_len } => {
+            let mut payload = Vec::with_capacity(5);
+            payload.push(23);
+            payload.extend_from_slice(&total_len.to_be_bytes());
+            Ok(payload)
+        }
+        NetworkMessage::LegalTaskSubmissionChunk { offset, bytes } => {
+            if bytes.is_empty() || bytes.len() > MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE {
+                return Err(NetworkError::InvalidLegalTaskSubmission);
+            }
+            let mut payload = Vec::with_capacity(5 + bytes.len());
+            payload.push(24);
+            payload.extend_from_slice(&offset.to_be_bytes());
+            payload.extend_from_slice(bytes);
+            Ok(payload)
+        }
+        NetworkMessage::LegalTaskSubmissionContinue { next_offset } => {
+            let mut payload = Vec::with_capacity(5);
+            payload.push(25);
+            payload.extend_from_slice(&next_offset.to_be_bytes());
+            Ok(payload)
+        }
+        NetworkMessage::LegalTaskSubmissionAccepted { task_id, outcome } => {
+            let task_id_len = u8::try_from(task_id.len())
+                .map_err(|_| NetworkError::InvalidLegalTaskSubmission)?;
+            let mut payload = Vec::with_capacity(3 + task_id.len());
+            payload.push(26);
+            payload.push(task_id_len);
+            payload.extend_from_slice(task_id.as_bytes());
+            payload.push(encode_submission_outcome(*outcome));
+            Ok(payload)
+        }
+        NetworkMessage::LegalTaskSubmissionRejected { reason } => {
+            Ok(vec![27, encode_submission_rejection(*reason)])
+        }
     }
 }
 
@@ -381,7 +416,105 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
             require_message_length(22, payload, 1)?;
             Ok(NetworkMessage::BftDenied)
         }
+        23 => decode_submission_open(payload),
+        24 => decode_submission_chunk(payload),
+        25 => decode_submission_continue(payload),
+        26 => decode_submission_accepted(payload),
+        27 => decode_submission_rejected(payload),
         other => Err(NetworkError::UnknownMessageType(other)),
+    }
+}
+
+fn decode_submission_open(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(23, payload, 5)?;
+    let total_len = u32::from_be_bytes(
+        payload[1..5]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidLegalTaskSubmission)?,
+    );
+    Ok(NetworkMessage::LegalTaskSubmissionOpen { total_len })
+}
+
+fn decode_submission_chunk(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() <= 5 || payload.len() > 5 + MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE {
+        return Err(NetworkError::InvalidLegalTaskSubmission);
+    }
+    let offset = u32::from_be_bytes(
+        payload[1..5]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidLegalTaskSubmission)?,
+    );
+    Ok(NetworkMessage::LegalTaskSubmissionChunk {
+        offset,
+        bytes: payload[5..].to_vec(),
+    })
+}
+
+fn decode_submission_continue(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(25, payload, 5)?;
+    let next_offset = u32::from_be_bytes(
+        payload[1..5]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidLegalTaskSubmission)?,
+    );
+    Ok(NetworkMessage::LegalTaskSubmissionContinue { next_offset })
+}
+
+fn decode_submission_accepted(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() < 4 {
+        return Err(NetworkError::InvalidLegalTaskSubmission);
+    }
+    let task_id_len = usize::from(payload[1]);
+    let expected_len = 3_usize
+        .checked_add(task_id_len)
+        .ok_or(NetworkError::InvalidLegalTaskSubmission)?;
+    if payload.len() != expected_len {
+        return Err(NetworkError::InvalidLegalTaskSubmission);
+    }
+    let task_id = TaskId::from_ascii_bytes(&payload[2..2 + task_id_len])
+        .map_err(|_| NetworkError::InvalidLegalTaskSubmission)?;
+    let outcome = decode_submission_outcome(payload[2 + task_id_len])?;
+    Ok(NetworkMessage::LegalTaskSubmissionAccepted { task_id, outcome })
+}
+
+fn decode_submission_rejected(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(27, payload, 2)?;
+    Ok(NetworkMessage::LegalTaskSubmissionRejected {
+        reason: decode_submission_rejection(payload[1])?,
+    })
+}
+
+const fn encode_submission_outcome(outcome: LegalTaskSubmissionOutcome) -> u8 {
+    match outcome {
+        LegalTaskSubmissionOutcome::Prepared => 1,
+        LegalTaskSubmissionOutcome::AlreadyPending => 2,
+        LegalTaskSubmissionOutcome::AlreadySucceeded => 3,
+    }
+}
+
+fn decode_submission_outcome(value: u8) -> Result<LegalTaskSubmissionOutcome, NetworkError> {
+    match value {
+        1 => Ok(LegalTaskSubmissionOutcome::Prepared),
+        2 => Ok(LegalTaskSubmissionOutcome::AlreadyPending),
+        3 => Ok(LegalTaskSubmissionOutcome::AlreadySucceeded),
+        _ => Err(NetworkError::InvalidLegalTaskSubmission),
+    }
+}
+
+const fn encode_submission_rejection(reason: LegalTaskSubmissionRejection) -> u8 {
+    match reason {
+        LegalTaskSubmissionRejection::Unavailable => 1,
+        LegalTaskSubmissionRejection::Busy => 2,
+        LegalTaskSubmissionRejection::Rejected => 3,
+    }
+}
+
+fn decode_submission_rejection(value: u8) -> Result<LegalTaskSubmissionRejection, NetworkError> {
+    match value {
+        1 => Ok(LegalTaskSubmissionRejection::Unavailable),
+        2 => Ok(LegalTaskSubmissionRejection::Busy),
+        3 => Ok(LegalTaskSubmissionRejection::Rejected),
+        _ => Err(NetworkError::InvalidLegalTaskSubmission),
     }
 }
 

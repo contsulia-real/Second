@@ -12,7 +12,7 @@ use finality::{
     rebroadcast_finality_votes, remember_finality_qc, schedule_finality_relay,
 };
 
-use crate::runtime_bft::InboundBftMessage;
+use crate::runtime_bft::{InboundBftMessage, ValidatorBftRuntime};
 use crate::runtime_consensus_target::{
     CertifiedConsensusTarget, ConsensusTargetError, ValidatorConsensusTarget,
 };
@@ -126,11 +126,51 @@ impl ValidatorConsensusRuntime {
     }
 }
 
+pub(crate) fn start_prepared_task_consensus_for(
+    store: &crate::StateStore,
+    runtime: &ValidatorBftRuntime,
+    task_id: TaskId,
+) -> Result<(), NodeRuntimeError> {
+    let target = ValidatorConsensusTarget::prepared_task(store, task_id)
+        .map_err(BftConsensusRuntimeError::from)?;
+    start_validator_consensus_target_for(store, runtime, target)
+}
+
+fn start_validator_consensus_target_for(
+    store: &crate::StateStore,
+    runtime: &ValidatorBftRuntime,
+    target: ValidatorConsensusTarget,
+) -> Result<(), NodeRuntimeError> {
+    runtime.refresh_authority()?;
+    let active_validator_set = runtime.validator_set();
+    let validator_set = target
+        .validator_set(store, &active_validator_set)
+        .map_err(BftConsensusRuntimeError::from)?;
+    let signer = runtime.signer_for(&validator_set)?;
+    let prepared_subject = matches!(target, ValidatorConsensusTarget::PreparedTask { .. })
+        .then(|| target.proposal_subject(store))
+        .transpose()
+        .map_err(BftConsensusRuntimeError::from)?;
+    runtime.consensus().register(
+        signer,
+        store.clone(),
+        validator_set.clone(),
+        target,
+        runtime.bft_timeouts(),
+    )?;
+    if let Some(subject) = prepared_subject {
+        runtime.announce_prepared_task(&validator_set, subject.scope().clone(), subject.digest());
+    }
+    Ok(())
+}
+
 impl NodeRuntime {
     pub fn start_prepared_task_consensus(&self, task_id: TaskId) -> Result<(), NodeRuntimeError> {
-        let target = ValidatorConsensusTarget::prepared_task(&self.store, task_id)
-            .map_err(BftConsensusRuntimeError::from)?;
-        self.start_validator_consensus_target(target)
+        let runtime = self
+            .validator_bft
+            .as_ref()
+            .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
+        start_prepared_task_consensus_for(&self.store, runtime, task_id)
     }
 
     pub fn start_public_checkpoint_consensus(
@@ -168,31 +208,7 @@ impl NodeRuntime {
             .validator_bft
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
-        runtime.refresh_authority()?;
-        let active_validator_set = runtime.validator_set();
-        let validator_set = target
-            .validator_set(&self.store, &active_validator_set)
-            .map_err(BftConsensusRuntimeError::from)?;
-        let signer = runtime.signer_for(&validator_set)?;
-        let prepared_subject = matches!(target, ValidatorConsensusTarget::PreparedTask { .. })
-            .then(|| target.proposal_subject(&self.store))
-            .transpose()
-            .map_err(BftConsensusRuntimeError::from)?;
-        runtime.consensus().register(
-            signer,
-            self.store.clone(),
-            validator_set.clone(),
-            target,
-            runtime.bft_timeouts(),
-        )?;
-        if let Some(subject) = prepared_subject {
-            runtime.announce_prepared_task(
-                &validator_set,
-                subject.scope().clone(),
-                subject.digest(),
-            );
-        }
-        Ok(())
+        start_validator_consensus_target_for(&self.store, runtime, target)
     }
 
     pub fn drain_bft_consensus_events(&self) -> Result<Vec<BftConsensusEvent>, NodeRuntimeError> {

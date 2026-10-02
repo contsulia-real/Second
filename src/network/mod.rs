@@ -8,14 +8,15 @@ mod peer_store;
 mod quic;
 mod recovery;
 mod session;
+mod submission;
 
 use std::fmt;
 
 use crate::{
     BftError, CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
-    FinalityError, PublicCheckpointError, PublicCurrencyCheckpointProof, PublicCurrencyState,
-    PublicCurrencySummary, PublicCurrencyView, PublicStateError, StateRecoveryCheckpointProof,
-    StateRecoveryPayload, ValidatorId,
+    FinalityError, LegalTaskSubmissionOutcome, PublicCheckpointError,
+    PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
+    PublicStateError, StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId,
 };
 
 pub(crate) use bft::{
@@ -49,8 +50,14 @@ pub use session::{
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     serve_ping_session, serve_public_currency_connection,
 };
+pub use submission::{
+    MAX_LEGAL_TASK_SUBMISSION_SIZE, RemoteLegalTaskSubmission, client_submit_legal_task,
+};
+pub(crate) use submission::{
+    rejected as legal_task_submission_rejected, validate_submission_chunk, validate_submission_open,
+};
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 1;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -114,6 +121,13 @@ pub struct RemoteStateRecoveryPayload {
     pub payload: StateRecoveryPayload,
     pub checkpoint: CertifiedStateRecoveryCheckpoint,
     pub encoded_payload_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegalTaskSubmissionRejection {
+    Unavailable,
+    Busy,
+    Rejected,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,6 +198,23 @@ pub enum NetworkMessage {
     BftMessage {
         bytes: Vec<u8>,
     },
+    LegalTaskSubmissionOpen {
+        total_len: u32,
+    },
+    LegalTaskSubmissionChunk {
+        offset: u32,
+        bytes: Vec<u8>,
+    },
+    LegalTaskSubmissionContinue {
+        next_offset: u32,
+    },
+    LegalTaskSubmissionAccepted {
+        task_id: TaskId,
+        outcome: LegalTaskSubmissionOutcome,
+    },
+    LegalTaskSubmissionRejected {
+        reason: LegalTaskSubmissionRejection,
+    },
     BftDenied,
 }
 
@@ -208,6 +239,8 @@ pub enum NetworkError {
     },
     EmptyPayload,
     UnknownMessageType(u8),
+    InvalidLegalTaskSubmission,
+    LegalTaskSubmissionRejected(LegalTaskSubmissionRejection),
     InvalidMessageLength {
         message_type: u8,
         expected: usize,

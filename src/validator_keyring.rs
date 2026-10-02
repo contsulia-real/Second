@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::SigningKey;
 use second::{PersistedNodeState, ValidatorId, ValidatorRuntimeKeys};
 use serde::Deserialize;
+
+use crate::local_file::{decode_standard_base64_32, read_bounded};
 
 const MAX_VALIDATOR_KEYRING_SIZE: usize = 64 * 1024;
 
@@ -139,25 +137,6 @@ pub(crate) fn load(
     Ok(runtime_keys)
 }
 
-fn read_bounded(path: &Path, maximum: usize, label: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("failed to read {label} {}: {error}", path.display()))?;
-    let limit = u64::try_from(maximum)
-        .expect("validator sidecar size limit must fit u64")
-        .saturating_add(1);
-    let mut bytes = Vec::new();
-    file.take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("failed to read {label} {}: {error}", path.display()))?;
-    if bytes.len() > maximum {
-        return Err(format!(
-            "{label} {} is too large; maximum is {maximum} bytes",
-            path.display()
-        ));
-    }
-    Ok(bytes)
-}
-
 pub(crate) fn keyring_path(snapshot_base: &Path) -> PathBuf {
     let mut path = OsString::from(snapshot_base.as_os_str());
     path.push(".validator.keys.json");
@@ -165,15 +144,9 @@ pub(crate) fn keyring_path(snapshot_base: &Path) -> PathBuf {
 }
 
 fn decode_signing_key(path: &Path, field: &str, value: &str) -> Result<SigningKey, String> {
-    let decoded = STANDARD.decode(value).map_err(|_| {
+    let bytes = decode_standard_base64_32(value).map_err(|error| {
         format!(
-            "invalid validator keyring {} {field}: must be valid standard base64",
-            path.display()
-        )
-    })?;
-    let bytes: [u8; 32] = decoded.try_into().map_err(|_| {
-        format!(
-            "invalid validator keyring {} {field}: must decode to exactly 32 bytes",
+            "invalid validator keyring {} {field}: {error}",
             path.display()
         )
     })?;

@@ -890,7 +890,7 @@ transport authentication 只证明“当前 QUIC peer 持有这个 NodeId 对应
 
 Validator capability 使用两份严格 sidecar，且都不属于协议状态。`<snapshot-base>.validator.json` 只保存非秘密运行配置：`authorizer_public_keys_base64` 与 `bft_timeouts_ms.{proposal,prevote,precommit}`；Authorizer key 必须是标准 Base64 编码的 32-byte Ed25519 public key，三个 timeout 均以毫秒表示且必须大于 0。`<snapshot-base>.validator.keys.json` 是私钥 keyring，只保存 `validator_id`、identity private key、recovery private key 和一个或多个 current/historical consensus private key；每个私钥都是标准 Base64 编码的 32-byte Ed25519 seed。两份文件都采用 strict JSON、拒绝未知字段，并以 64 KiB 为读取上限，读取层本身不会先无界分配整个文件。keyring 在 Unix 上要求 `0600` 或更严格；Windows 当前依赖部署账户的文件 ACL，不伪造一套并不存在的跨平台权限模型。
 
-`second node` 启动时先加载一次 durable snapshot，再组合 capability：两份 Validator sidecar 都不存在时只启用基础 public Node 能力；两份都存在时先完成 keyring 与 durable `ValidatorRegistry` / active+retained ValidatorSet 校验，再把 Validator capability 装入同一个 `NodeRuntime`；只存在其中一份属于不完整部署配置，必须在创建 transport identity 和绑定 socket 之前 fail-closed。`validator_id` 必须已经存在于 durable `ValidatorRegistry`；identity/recovery private key 导出的 public key 必须分别匹配该 Validator 的 registry credential；每个提供的 consensus private key 都必须属于该 Validator 的永久 consensus-key history；当前 active ValidatorSet 与所有仍被 PreparedTask 引用的 retained ValidatorSet 中，该 Validator 需要使用的每一把 consensus key 都必须存在。若该 Validator 在当前 snapshot 中既没有 active authority 也没有 retained PreparedTask authority，同样拒绝启用 Validator capability。recovery private key 在正常 BFT loop 中不参与会话认证或签共识票；当前只验证其 operator keyring 语义，既有 recovery/key-rotation 流程仍是它唯一的协议职责。启用 Validator capability 的 Node 复用同一 public network、PeerStore、bootstrap、connection budget 与 NodeRuntime，同时运行 Validator-only BFT；启动后先补完 durable finalized PreparedTask commit，再恢复未完成 PreparedTask scope。当前仍没有外部 LegalTask submission CLI/API；未来 submission 应作为 Node service/control surface 加入，而不是再造一个互斥 daemon mode。
+`second node` 启动时先加载一次 durable snapshot，再组合 capability：两份 Validator sidecar 都不存在时只启用基础 public Node 能力；两份都存在时先完成 keyring 与 durable `ValidatorRegistry` / active+retained ValidatorSet 校验，再把 Validator capability 装入同一个 `NodeRuntime`；只存在其中一份属于不完整部署配置，必须在创建 transport identity 和绑定 socket 之前 fail-closed。`validator_id` 必须已经存在于 durable `ValidatorRegistry`；identity/recovery private key 导出的 public key 必须分别匹配该 Validator 的 registry credential；每个提供的 consensus private key 都必须属于该 Validator 的永久 consensus-key history；当前 active ValidatorSet 与所有仍被 PreparedTask 引用的 retained ValidatorSet 中，该 Validator 需要使用的每一把 consensus key 都必须存在。若该 Validator 在当前 snapshot 中既没有 active authority 也没有 retained PreparedTask authority，同样拒绝启用 Validator capability。recovery private key 在正常 BFT loop 中不参与会话认证或签共识票；当前只验证其 operator keyring 语义，既有 recovery/key-rotation 流程仍是它唯一的协议职责。启用 Validator capability 的 Node 复用同一 public network、PeerStore、bootstrap、connection budget 与 NodeRuntime，同时运行 Validator-only BFT；启动后先补完 durable finalized PreparedTask commit，再恢复未完成 PreparedTask scope。外部 LegalTask submission 已作为同一个 Node listener 上的 privileged service surface 提供，不存在第二个 daemon、第二个监听端口或第二套 transport/runtime。CLI 入口为 `second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64>`：transaction JSON 从文件读取，避免把私有业务内容直接塞入命令行参数；CLI 中单独提供的 Authorizer public key 只用于把该 JSON 严格解析成原始 signed `LegalTask`，服务端不会把这个 CLI 参数当成授权来源，真正的业务授权仍来自 `LegalTask` 内嵌的 Authorizer public key + signature 并由接收 Validator 的本地 `AuthorizerSet` 独立验证。
 
 当前 runtime 已有进程内 peer manager，并同时管理 inbound 与主动 outbound connection。peer 只有在 authenticated Hello 完成后才进入 registry；registry 以 NodeId 为唯一键，同一 NodeId 在同一节点上同时只保留一条 active connection，自连接（remote NodeId 等于 local NodeId）直接拒绝。没有重复连接时，任意方向的 authenticated connection 都可正常注册，因此 public read admission 仍保持开放。
 
@@ -916,7 +916,7 @@ runtime 当前以 8 个已验证且活跃的已知 peer 作为本地连接维护
 
 当前 public Node admission 是开放的：任何能够完成 authenticated Hello、证明持有其 NodeId 对应 transport private key 的 peer，都可以使用上述公开只读网络能力，前提是通过现有 connection / stream / sync resource guardrail 与 peer 去重规则。public admission 不维护 allowlist，也不要求 ValidatorCredential，因为这些数据本来就是公开状态。
 
-这不意味着 Second 的 Validator 层是 permissionless。transport-authenticated public peer 只获得公开网络访问权；Validator vote、ValidatorSet membership、未来任何私有 LegalTask 通道或其他 privileged protocol 都必须使用各自独立的授权规则。peer discovery 只传播 reachability candidate，不建立任何 authority；未来 privileged peer role 若需要与 transport endpoint 绑定，必须另外定义可验证 binding，不反向改变当前 public read service 的开放 admission。
+这不意味着 Second 的 Validator 层是 permissionless。transport-authenticated public peer 只获得公开网络访问权；Validator vote、ValidatorSet membership、LegalTask submission 与其他 privileged protocol 都使用各自独立的授权规则。LegalTask submission 不把任意 transport NodeId 升级成业务写 authority：客户端只是在 certificate-pinned、加密的 QUIC connection 上把 signed LegalTask 定向提交给一个 Validator-capable Node，接收方必须用自己的 `AuthorizerSet` 验证 signed LegalTask 后才能 prepare。peer discovery 只传播 reachability candidate，不建立任何 authority；未来其他 privileged peer role 若需要与 transport endpoint 绑定，必须另外定义可验证 binding，不反向改变当前 public read service 的开放 admission。
 
 每个 stream 内仍使用统一的自定义二进制 frame：
 
@@ -935,7 +935,12 @@ payload
 - 公共 summary；
 - public checkpoint proof；
 - certified public state sync；
-- 有界 `PeerRecord` 查询与 bootstrap peer discovery。
+- 有界 `PeerRecord` 查询与 bootstrap peer discovery；
+- 仅 Validator capability 启用时可用的 chunked signed `LegalTask` submission service。
+
+LegalTask submission 与 authenticated-open public read session 使用同一个 QUIC listener 和统一 network frame，但由 connection 的第一条 service request 显式分流：第一条消息为 `LegalTaskSubmissionOpen` 时，在 public `PeerManager` 注册之前直接进入 submission handler，因此 raw LegalTask 不会进入 public session、PeerStore、peer discovery 或 public gossip；public-only Node 在读取 task body 前直接返回 `Unavailable`。Validator-capable Node 对 submission 另设最多 8 条并发 service connection，且这些连接仍同时计入整个节点 128 条 connection 总预算；既有 QUIC 5 秒 idle timeout 继续限制占槽不发送数据的客户端。单个 canonical encoded LegalTask 最大 2 MiB，沿用 Validator 间 private source bootstrap 的同一语义上限；wire 上复用现有 32 KiB source chunk 大小顺序传输，并严格校验 total length、offset 与 chunk boundary，避免为了外部入口维护第二套 task 编码或资源常量。CLI 的 transaction JSON 属于本地输入表示，不是 wire object；其本地文件读取 budget 为 16 MiB，解析完成后仍必须编码到上述 2 MiB canonical LegalTask 上限内才能发送。
+
+submission 服务在收齐 task 后调用同一个 Validator runtime submit/prepare 路径：先用本地 AuthorizerSet 验证签名和 payload，再进行 durable prepare，并注册现有 PreparedTask BFT scope；响应不会为了客户端同步等待 finality。`prepared` 表示这次请求新建了本地 durable PreparedTask 并启动/注册共识，`pending` 表示完全相同的 `TaskId + request digest + signed source` 已在本地进行中，`succeeded` 表示该请求已经完成业务 commit。这样网络重试是幂等的，同时同 TaskId 的不同 signed request 仍然按冲突 fail-closed；服务端对不合法/不可执行的业务拒绝只返回通用 `Rejected`，不把私有状态或具体执行失败原因泄露给外部提交者。
 
 full public sync 的本地 materialization budget 当前为 64 MiB，仅约束客户端为 `Vec<PublicCurrencyState>` 物化整份公开状态所允许占用的元素存储空间。允许的 state 数量通过当前 `size_of::<PublicCurrencyState>()` 动态换算，而不是把 Currency 数量写成协议上限；远端 summary 声明的 `current_supply` 超出预算时，客户端必须在请求任何分页数据之前拒绝。实际 Vec 使用 `try_reserve_exact`，无法满足本地分配时返回错误而不是继续无界增长。该预算同样是本地资源保护策略，不限制 Second 协议本身允许存在多少 Currency。
 
@@ -1096,6 +1101,7 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | state_recovery_checkpoint.rs | shared recovery payload/checkpoint/QC commitment |
 | network/ | 二进制网络 framing / session / public state sync |
 | network/bft_codec.rs | bounded BFT Proposal/Vote/QC/FinalityVote/FinalityCertificate binary envelope codec |
+| network/submission.rs | 外部 signed LegalTask 的 bounded chunked client/service transport 与 submission response 语义 |
 | network/bft.rs | channel-bound active+retained Validator identity authority、exact-set envelope 授权与 bounded one-way BFT transport |
 | runtime_bft.rs | Validator-only peer 维护、active+retained authority、inbound queue、普通 BFT / finality 独立保留 in-flight 容量的 exact-set fanout 与 send-failure 生命周期 |
 | runtime_bft/keys.rs | Validator runtime identity key 与按 consensus public key 索引的 active/retained signing keyring |
@@ -1105,6 +1111,7 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
 | persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
 | transaction.rs | 外部 transaction request 严格解析 |
+| local_file.rs | CLI 本地 bounded file 读取与标准 Base64 32-byte key 解码共享 helper |
 | node_capabilities.rs | `second node` 启动时的本地 capability composition；Validator sidecar 成对存在/缺失规则与 fail-closed 装配 |
 | validator_config.rs | Validator capability 非秘密 Authorizer / BFT timeout strict sidecar loader |
 | validator_keyring.rs | Validator operator identity/recovery/current+historical consensus private keyring loader 与 durable authority 校验 |

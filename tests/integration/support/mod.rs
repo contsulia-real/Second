@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
     AccountAddress, AuthorizerSet, BftPhase, BftQuorumCertificate, BftStatement, BftTimeoutConfig,
@@ -20,10 +22,80 @@ use second::{
     ValidatorRegistry, ValidatorRuntimeConfig, ValidatorSet, ValidatorSetTransition, ValidatorVote,
     VerifiedLegalTask, VerifiedValidatorAdmission,
 };
+use serde_json::json;
 
 pub fn key(byte: u8) -> SigningKey {
     SigningKey::from_bytes(&[byte; 32])
 }
+
+pub fn single_validator_set(
+    version: u64,
+    validator_id: u64,
+    identity_seed: u8,
+    consensus_seed: u8,
+    recovery_seed: u8,
+) -> ValidatorSet {
+    ValidatorSet::new(
+        version,
+        [ValidatorCredential::new(
+            ValidatorId::new(validator_id),
+            key(identity_seed).verifying_key().to_bytes(),
+            key(consensus_seed).verifying_key().to_bytes(),
+            key(recovery_seed).verifying_key().to_bytes(),
+        )
+        .unwrap()],
+    )
+    .unwrap()
+}
+
+pub fn write_validator_sidecars(
+    base: &Path,
+    validator_id: u64,
+    identity_seed: u8,
+    consensus_seeds: &[u8],
+    recovery_seed: u8,
+    authorizer_public_keys: &[[u8; 32]],
+) -> (PathBuf, PathBuf) {
+    let config_path = append_suffix(base, ".validator.json");
+    let keyring_path = append_suffix(base, ".validator.keys.json");
+
+    let config = json!({
+        "authorizer_public_keys_base64": authorizer_public_keys
+            .iter()
+            .map(|key| STANDARD.encode(key))
+            .collect::<Vec<_>>(),
+        "bft_timeouts_ms": {
+            "proposal": 250,
+            "prevote": 250,
+            "precommit": 250
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let keyring = json!({
+        "validator_id": validator_id,
+        "identity_private_key_base64": STANDARD.encode(key(identity_seed).to_bytes()),
+        "recovery_private_key_base64": STANDARD.encode(key(recovery_seed).to_bytes()),
+        "consensus_private_keys_base64": consensus_seeds
+            .iter()
+            .map(|seed| STANDARD.encode(key(*seed).to_bytes()))
+            .collect::<Vec<_>>()
+    });
+    fs::write(&keyring_path, serde_json::to_vec(&keyring).unwrap()).unwrap();
+    secure_private_file_permissions(&keyring_path);
+
+    (config_path, keyring_path)
+}
+
+#[cfg(unix)]
+fn secure_private_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn secure_private_file_permissions(_path: &Path) {}
 
 pub fn authorizers() -> AuthorizerSet {
     AuthorizerSet::new(

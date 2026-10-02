@@ -1,15 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::legal_task_codec::MAX_ENCODED_LEGAL_TASK_SIZE;
 use crate::legal_task_codec::encode_legal_task;
 use crate::network::MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
 use crate::runtime_bft::ValidatorBftRuntime;
-use crate::runtime_bft_consensus::{
-    MAX_PENDING_MESSAGES_PER_SCOPE, MAX_PENDING_UNREGISTERED_SCOPES,
-};
+use crate::runtime_bft_consensus::MAX_PENDING_UNREGISTERED_SCOPES;
 use crate::{BftNetworkMessage, ConsensusScope, NetworkError, ValidatorId, ValidatorSet};
 
-pub(crate) const MAX_PREPARED_TASK_SOURCE_SIZE: usize =
-    MAX_PENDING_MESSAGES_PER_SCOPE * MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
+pub(crate) const MAX_PREPARED_TASK_SOURCE_SIZE: usize = MAX_ENCODED_LEGAL_TASK_SIZE;
 
 #[derive(Default)]
 pub(super) struct PreparedTaskSyncState {
