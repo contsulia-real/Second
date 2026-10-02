@@ -409,6 +409,14 @@ fn verify_bft_sender(
                 .verify(validator_set)
                 .map_err(NetworkError::ConsensusFinality)?;
         }
+        BftNetworkMessage::PreparedTaskRequest { scope, .. }
+        | BftNetworkMessage::PreparedTaskSourceChunk { scope, .. }
+        | BftNetworkMessage::PreparedTaskSourceUnavailable { scope, .. }
+        | BftNetworkMessage::PreparedTaskAvailable { scope, .. } => {
+            if !matches!(scope, ConsensusScope::PreparedTask(_)) {
+                return Err(NetworkError::BftUnauthorized);
+            }
+        }
     }
     Ok(())
 }

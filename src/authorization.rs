@@ -105,17 +105,26 @@ impl LegalTask {
             .verify_strict(&message, &signature)
             .map_err(|_| AuthorizationError::InvalidSignature)?;
 
-        let mut hasher = Sha256::new();
-        hasher.update(REQUEST_DIGEST_DOMAIN);
-        hasher.update(self.authorizer_public_key);
-        hasher.update(self.signature);
-        hasher.update(&message);
-        let request_digest = hasher.finalize().into();
+        let request_digest = self.request_digest_from_message(&message);
 
         Ok(VerifiedLegalTask {
             task: self.clone(),
             request_digest,
         })
+    }
+
+    pub(crate) fn request_digest(&self) -> Result<[u8; 32], TaskEncodingError> {
+        let message = self.payload.canonical_signing_bytes()?;
+        Ok(self.request_digest_from_message(&message))
+    }
+
+    fn request_digest_from_message(&self, message: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DIGEST_DOMAIN);
+        hasher.update(self.authorizer_public_key);
+        hasher.update(self.signature);
+        hasher.update(message);
+        hasher.finalize().into()
     }
 }
 

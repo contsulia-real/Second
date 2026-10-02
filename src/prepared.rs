@@ -32,6 +32,10 @@ pub enum PreparationError {
         expected: u64,
         actual: u64,
     },
+    PreparedPlanDigestMismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
     AlreadyPrepared(TaskId),
     NotPrepared(TaskId),
     CancellationClosed(TaskId),
@@ -73,7 +77,7 @@ impl From<ValidatorSigningError> for PreparationError {
 
 #[derive(Clone, Debug)]
 enum BuildOutcome {
-    Prepared(PreparedTask),
+    Prepared(Box<PreparedTask>),
     AlreadySucceeded,
 }
 
@@ -111,6 +115,28 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
     ) -> Result<PreparationOutcome, PreparationError> {
+        self.prepare_inner(state, task, now, validator_set, None)
+    }
+
+    pub(crate) fn prepare_expected_plan(
+        &mut self,
+        state: &mut SecondState,
+        task: &VerifiedLegalTask,
+        now: u64,
+        validator_set: &ValidatorSet,
+        expected_plan_digest: [u8; 32],
+    ) -> Result<PreparationOutcome, PreparationError> {
+        self.prepare_inner(state, task, now, validator_set, Some(expected_plan_digest))
+    }
+
+    fn prepare_inner(
+        &mut self,
+        state: &mut SecondState,
+        task: &VerifiedLegalTask,
+        now: u64,
+        validator_set: &ValidatorSet,
+        expected_plan_digest: Option<[u8; 32]>,
+    ) -> Result<PreparationOutcome, PreparationError> {
         if self.tasks.contains_key(&task.task_id()) {
             return Err(PreparationError::AlreadyPrepared(task.task_id()));
         }
@@ -127,8 +153,24 @@ impl PreparedTaskBook {
         match result {
             Ok(BuildOutcome::AlreadySucceeded) => Ok(PreparationOutcome::AlreadySucceeded),
             Ok(BuildOutcome::Prepared(prepared)) => {
+                if let Some(expected) = expected_plan_digest {
+                    let actual = match prepared.plan_digest() {
+                        Ok(actual) => actual,
+                        Err(error) => {
+                            self.release_task_claims(task.task_id());
+                            return Err(error);
+                        }
+                    };
+                    if actual != expected {
+                        self.release_task_claims(task.task_id());
+                        return Err(PreparationError::PreparedPlanDigestMismatch {
+                            expected,
+                            actual,
+                        });
+                    }
+                }
                 let mut updated_tasks = self.tasks.clone();
-                updated_tasks.insert(task.task_id(), prepared);
+                updated_tasks.insert(task.task_id(), *prepared);
 
                 if let Err(error) = self.store.save_with_prepared(
                     state,
@@ -348,12 +390,13 @@ impl PreparedTaskBook {
         let mut working = state.business.clone();
         let operations = self.prepare_operations(state, task, &mut working)?;
 
-        Ok(BuildOutcome::Prepared(PreparedTask::new(
+        Ok(BuildOutcome::Prepared(Box::new(PreparedTask::new(
             task.task_id(),
             task.request_digest(),
+            task.signed_task().clone(),
             validator_set_version,
             operations,
-        )))
+        ))))
     }
 
     fn prepare_operations(

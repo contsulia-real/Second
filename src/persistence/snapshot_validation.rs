@@ -225,6 +225,15 @@ pub(super) fn validate_prepared_snapshot_links(
             return Err(PersistenceError::InvalidSnapshot);
         }
 
+        if prepared.source_task.payload().task_id() != *task_id
+            || prepared
+                .source_task
+                .request_digest()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?
+                != prepared.request_digest
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
         let mut expected_transfer_claims = BTreeSet::new();
         for (index, operation) in prepared.operations.iter().enumerate() {
             let operation_index =

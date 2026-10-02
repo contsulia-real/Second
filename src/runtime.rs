@@ -26,13 +26,18 @@ use crate::network::{
 };
 use crate::runtime_bft::{ValidatorBftRuntime, ValidatorBftRuntimeError};
 use crate::{
-    BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint, PersistenceError,
-    RemoteCertifiedPublicCurrencyView, StateStore,
+    AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
+    PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView, StateStore,
+    TaskEncodingError,
 };
 
 #[derive(Debug)]
 pub enum NodeRuntimeError {
     Persistence(PersistenceError),
+    Authorization(AuthorizationError),
+    Preparation(PreparationError),
+    TaskEncoding(TaskEncodingError),
+    PreparedTaskSourceTooLarge { maximum: usize, actual: usize },
     Network(NetworkError),
     SnapshotMissing,
     ConnectionCapacityReached { maximum: usize },
@@ -49,6 +54,24 @@ pub enum NodeRuntimeError {
 impl From<PersistenceError> for NodeRuntimeError {
     fn from(error: PersistenceError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+impl From<AuthorizationError> for NodeRuntimeError {
+    fn from(error: AuthorizationError) -> Self {
+        Self::Authorization(error)
+    }
+}
+
+impl From<PreparationError> for NodeRuntimeError {
+    fn from(error: PreparationError) -> Self {
+        Self::Preparation(error)
+    }
+}
+
+impl From<TaskEncodingError> for NodeRuntimeError {
+    fn from(error: TaskEncodingError) -> Self {
+        Self::TaskEncoding(error)
     }
 }
 

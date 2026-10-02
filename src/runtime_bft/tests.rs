@@ -1,9 +1,11 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 
 use super::*;
-use crate::{SecondState, ValidatorCredential};
+use crate::{
+    AuthorizerSet, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, SecondState, ValidatorCredential,
+};
 
 fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
@@ -46,6 +48,19 @@ fn rejected_nodes_survive_stable_authority_refresh_and_reset_on_authority_change
 
     let runtime = ValidatorBftRuntime::new(
         ValidatorRuntimeKeys::new(ValidatorId::new(1), key(3), key(4)),
+        ValidatorRuntimeConfig::new(
+            AuthorizerSet::new(
+                CURRENT_PROTOCOL_VERSION,
+                [key(9).verifying_key().to_bytes()],
+            )
+            .unwrap(),
+            BftTimeoutConfig::new(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            || 1,
+        ),
         store.clone(),
         durable_set,
         std::iter::empty(),

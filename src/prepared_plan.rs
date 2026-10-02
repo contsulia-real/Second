@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::payment::EstablishedTransfer;
 use crate::state::{BusinessState, PrerequisiteState};
 use crate::{
-    AccountAddress, ClaimError, CurrencyAddress, CurrencyClaimBook, OperationClaimId,
+    AccountAddress, ClaimError, CurrencyAddress, CurrencyClaimBook, LegalTask, OperationClaimId,
     PaymentAddress, PreparationError, SecondState, TaskId,
 };
 
@@ -165,6 +165,7 @@ pub(crate) enum PreparedTaskPhase {
 pub(crate) struct PreparedTask {
     pub(crate) task_id: TaskId,
     pub(crate) request_digest: [u8; 32],
+    pub(crate) source_task: LegalTask,
     pub(crate) validator_set_version: u64,
     pub(crate) phase: PreparedTaskPhase,
     pub(crate) operations: Vec<PreparedOperation>,
@@ -174,12 +175,14 @@ impl PreparedTask {
     pub(crate) fn new(
         task_id: TaskId,
         request_digest: [u8; 32],
+        source_task: LegalTask,
         validator_set_version: u64,
         operations: Vec<PreparedOperation>,
     ) -> Self {
         Self {
             task_id,
             request_digest,
+            source_task,
             validator_set_version,
             phase: PreparedTaskPhase::Prepared,
             operations,
@@ -189,6 +192,7 @@ impl PreparedTask {
     pub(crate) fn from_persisted(
         task_id: TaskId,
         request_digest: [u8; 32],
+        source_task: LegalTask,
         validator_set_version: u64,
         phase: PreparedTaskPhase,
         operations: Vec<PreparedOperation>,
@@ -196,6 +200,7 @@ impl PreparedTask {
         Self {
             task_id,
             request_digest,
+            source_task,
             validator_set_version,
             phase,
             operations,

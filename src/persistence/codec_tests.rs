@@ -9,15 +9,31 @@ use crate::payment::{EstablishedTransfer, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
 use crate::{
-    AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PersistenceError,
-    PreparationError, SecondState, TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorSet,
+    AccountAddress, CURRENT_PROTOCOL_VERSION, CurrencyAddress, LegalTask, LegalTaskPayload,
+    Operation, OperationClaimId, PaymentAddress, PersistenceError, PreparationError, SecondState,
+    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
+
+fn prepared_source(task_id: &TaskId) -> (LegalTask, [u8; 32]) {
+    let payload = LegalTaskPayload::new(
+        task_id.clone(),
+        CURRENT_PROTOCOL_VERSION,
+        None,
+        vec![Operation::Issue {
+            account: AccountAddress::from_bytes([31; 32]),
+            count: 1,
+        }],
+    );
+    let task = LegalTask::sign(payload, &ed25519_dalek::SigningKey::from_bytes(&[32; 32]))
+        .expect("test LegalTask must encode");
+    let digest = task.request_digest().expect("test LegalTask must encode");
+    (task, digest)
+}
 
 #[test]
 fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let task_id = TaskId::parse("prepared-task").unwrap();
-    let request_digest = [7; 32];
+    let (source_task, request_digest) = prepared_source(&task_id);
     let source = PaymentAddress::from_bytes([1; 32]);
     let destination = PaymentAddress::from_bytes([2; 32]);
     let source_account = AccountAddress::from_bytes([3; 32]);
@@ -67,6 +83,7 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
         PreparedTask::new(
             task_id.clone(),
             request_digest,
+            source_task,
             1,
             vec![PreparedOperation::Transfer {
                 transfer,
@@ -123,7 +140,7 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
 #[test]
 fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     let task_id = TaskId::parse("vote-lock-plan").unwrap();
-    let request_digest = [7; 32];
+    let (source_task, request_digest) = prepared_source(&task_id);
     let account = AccountAddress::from_bytes([3; 32]);
     let bindings = BTreeMap::from([(
         task_id.clone(),
@@ -135,6 +152,7 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     let mut prepared_task = PreparedTask::new(
         task_id.clone(),
         request_digest,
+        source_task,
         1,
         vec![PreparedOperation::Issue {
             account,
@@ -248,9 +266,11 @@ fn prepared_transfer_rejects_currency_count_different_from_frozen_amount() {
     let destination = PaymentAddress::from_bytes([2; 32]);
     let source_account = AccountAddress::from_bytes([3; 32]);
     let destination_account = AccountAddress::from_bytes([4; 32]);
+    let (source_task, _) = prepared_source(&task_id);
     let prepared = PreparedTask::new(
         task_id,
         [7; 32],
+        source_task,
         1,
         vec![PreparedOperation::Transfer {
             transfer: EstablishedTransfer {
@@ -282,6 +302,7 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
         PreparedTask::new(
             TaskId::parse("valid-preallocation").unwrap(),
             [1; 32],
+            prepared_source(&TaskId::parse("valid-preallocation").unwrap()).0,
             1,
             vec![PreparedOperation::Issue {
                 account,
@@ -299,6 +320,7 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
         PreparedTask::new(
             TaskId::parse("bad-frontier").unwrap(),
             [2; 32],
+            prepared_source(&TaskId::parse("bad-frontier").unwrap()).0,
             1,
             vec![PreparedOperation::Issue {
                 account,
@@ -317,8 +339,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
         (
             first_id.clone(),
             PreparedTask::new(
-                first_id,
+                first_id.clone(),
                 [3; 32],
+                prepared_source(&first_id).0,
                 1,
                 vec![PreparedOperation::Issue {
                     account,
@@ -329,8 +352,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
         (
             second_id.clone(),
             PreparedTask::new(
-                second_id,
+                second_id.clone(),
                 [4; 32],
+                prepared_source(&second_id).0,
                 1,
                 vec![PreparedOperation::Issue {
                     account,
@@ -405,6 +429,7 @@ fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
     let mut prepared_task = PreparedTask::new(
         task_id.clone(),
         [7; 32],
+        prepared_source(&task_id).0,
         1,
         vec![PreparedOperation::Issue {
             account: AccountAddress::from_bytes([3; 32]),

@@ -18,6 +18,22 @@ fn validator_runtime_fixture(
     prefix: &str,
     validator_id: u64,
 ) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
+    validator_runtime_fixture_with_timeouts(
+        prefix,
+        validator_id,
+        BftTimeoutConfig::new(
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        ),
+    )
+}
+
+fn validator_runtime_fixture_with_timeouts(
+    prefix: &str,
+    validator_id: u64,
+    timeouts: BftTimeoutConfig,
+) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
     let base = temp_base(prefix);
     let store = StateStore::new(&base);
     let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
@@ -31,6 +47,7 @@ fn validator_runtime_fixture(
                 key((validator_id * 3) as u8),
                 key((validator_id * 3 + 1) as u8),
             ),
+            support::validator_runtime_config(timeouts),
         )
         .unwrap(),
     );
@@ -194,7 +211,7 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
         timeouts.proposal + timeouts.prevote + timeouts.precommit + timeouts.precommit;
     for ((runtime, _, _), checkpoint) in fixtures.iter().zip(checkpoints) {
         runtime
-            .start_public_checkpoint_consensus(checkpoint, timeouts)
+            .start_public_checkpoint_consensus(checkpoint)
             .unwrap();
     }
 
@@ -270,8 +287,158 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
 }
 
 #[tokio::test]
+async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull() {
+    let validators = validator_set(1, 1..=4);
+    let alice = support::account(31);
+    let task = support::verified_task(
+        1300,
+        vec![Operation::Issue {
+            account: alice,
+            count: 1,
+        }],
+    );
+    let task_id = task.task_id();
+
+    let mut fixtures = (1..=4)
+        .map(|validator_id| {
+            let base = temp_base(&format!(
+                "runtime-bft-private-task-pull-validator-{validator_id}"
+            ));
+            let store = StateStore::new(&base);
+            store
+                .initialize(&SecondState::genesis([alice], 1), &validators)
+                .unwrap();
+            let runtime = Arc::new(
+                NodeRuntime::load_validator_and_bind(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                    &store,
+                    ValidatorRuntimeKeys::new(
+                        ValidatorId::new(validator_id),
+                        key((validator_id * 3) as u8),
+                        key((validator_id * 3 + 1) as u8),
+                    ),
+                    support::default_validator_runtime_config(),
+                )
+                .unwrap(),
+            );
+            (runtime, store, base)
+        })
+        .collect::<Vec<_>>();
+
+    for (_, store, _) in &fixtures {
+        assert!(
+            !PreparedTaskBook::new(store.clone())
+                .unwrap()
+                .is_prepared(task_id.clone())
+        );
+    }
+
+    let records = fixtures
+        .iter()
+        .map(|(runtime, _, _)| peer_record(runtime))
+        .collect::<Vec<_>>();
+    let runtime_tasks = fixtures
+        .iter()
+        .enumerate()
+        .map(|(index, (runtime, _, _))| {
+            let bootstrap = records
+                .iter()
+                .enumerate()
+                .filter(|(candidate, _)| *candidate != index)
+                .map(|(_, record)| record.clone())
+                .collect();
+            support::spawn_node_runtime_with_bootstrap(runtime, bootstrap)
+        })
+        .collect::<Vec<_>>();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixtures
+                .iter()
+                .all(|(runtime, _, _)| runtime.connected_validator_ids().len() == 3)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all validators must establish private BFT connections before task submission");
+
+    // Validator 1 is the deterministic round-0 proposer. Submit only to Validator 2 so
+    // consensus can start only if the private availability hint and on-demand pull work.
+    assert_eq!(
+        fixtures[1]
+            .0
+            .submit_legal_task(task.signed_task().clone())
+            .unwrap(),
+        second::PreparationOutcome::Prepared
+    );
+
+    let mut certificates = vec![None; fixtures.len()];
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            for (index, (runtime, _, _)) in fixtures.iter().enumerate() {
+                for event in runtime.drain_bft_consensus_events().unwrap() {
+                    match event {
+                        BftConsensusEvent::CertifiedPreparedTask {
+                            task_id: certified_task_id,
+                            certificate,
+                        } => {
+                            assert_eq!(certified_task_id, task_id);
+                            certificate.verify(&validators).unwrap();
+                            certificates[index] = Some(certificate);
+                        }
+                        BftConsensusEvent::SendFailed { .. } => {}
+                        event => panic!("unexpected task propagation consensus event: {event:?}"),
+                    }
+                }
+            }
+            if certificates.iter().all(Option::is_some) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(
+        "one private task source must be pulled, independently prepared, and finalized by all validators",
+    );
+
+    let expected_digest = PreparedTaskBook::new(fixtures[1].1.clone())
+        .unwrap()
+        .prepared_plan_digest(task_id.clone())
+        .unwrap();
+    for (_, store, _) in &fixtures {
+        let book = PreparedTaskBook::new(store.clone()).unwrap();
+        assert!(book.is_prepared(task_id.clone()));
+        assert_eq!(
+            book.prepared_plan_digest(task_id.clone()).unwrap(),
+            expected_digest
+        );
+    }
+
+    for runtime_task in &runtime_tasks {
+        runtime_task.abort();
+    }
+    for runtime_task in runtime_tasks {
+        let _ = runtime_task.await;
+    }
+    for (runtime, store, base) in fixtures.drain(..) {
+        drop(runtime);
+        support::cleanup_node_runtime(store, base);
+    }
+}
+
+#[tokio::test]
 async fn runtime_bft_timeout_scheduler_advances_round_without_manual_driver_calls() {
-    let (runtime, store, base) = validator_runtime_fixture("runtime-bft-timeout", 2);
+    let timeout_config = BftTimeoutConfig::new(
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+    );
+    let (runtime, store, base) =
+        validator_runtime_fixture_with_timeouts("runtime-bft-timeout", 2, timeout_config);
     let task = support::spawn_node_runtime(&runtime);
     let checkpoint = public_checkpoint(&store, 1);
     let scope = store
@@ -281,14 +448,7 @@ async fn runtime_bft_timeout_scheduler_advances_round_without_manual_driver_call
         .clone();
 
     runtime
-        .start_public_checkpoint_consensus(
-            checkpoint,
-            BftTimeoutConfig::new(
-                Duration::from_millis(25),
-                Duration::from_millis(25),
-                Duration::from_millis(25),
-            ),
-        )
+        .start_public_checkpoint_consensus(checkpoint)
         .unwrap();
 
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -397,6 +557,7 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
                     SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                     &store,
                     keys,
+                    support::default_validator_runtime_config(),
                 )
                 .unwrap(),
             );
@@ -462,7 +623,7 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
     );
     for ((runtime, _, _), checkpoint) in fixtures.iter().zip(checkpoints.iter().cloned()) {
         runtime
-            .start_public_checkpoint_consensus(checkpoint, timeouts)
+            .start_public_checkpoint_consensus(checkpoint)
             .unwrap();
     }
 
@@ -496,7 +657,7 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
 
     for (runtime, _, _) in &fixtures {
         runtime
-            .start_prepared_task_consensus(task.task_id(), timeouts)
+            .start_prepared_task_consensus(task.task_id())
             .unwrap();
     }
 
@@ -618,18 +779,12 @@ async fn retained_prepared_task_refuses_current_consensus_key_without_historical
         SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         &store,
         ValidatorRuntimeKeys::new(ValidatorId::new(1), key(3), rotated_consensus_key(1)),
+        support::default_validator_runtime_config(),
     )
     .unwrap();
 
     assert!(matches!(
-        runtime.start_prepared_task_consensus(
-            task.task_id(),
-            BftTimeoutConfig::new(
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-            ),
-        ),
+        runtime.start_prepared_task_consensus(task.task_id()),
         Err(second::NodeRuntimeError::ValidatorBft(
             ValidatorBftRuntimeError::ConsensusKeyMismatch(validator_id)
         )) if validator_id == ValidatorId::new(1)

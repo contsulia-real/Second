@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::ConsensusScope;
+use crate::legal_task_codec::{decode_legal_task, encode_legal_task};
 use crate::payment::EstablishedTransfer;
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::{
@@ -23,6 +24,10 @@ pub(super) fn encode_local_state(
     for prepared in prepared_tasks.values() {
         push_task_id(out, &prepared.task_id);
         out.extend_from_slice(&prepared.request_digest);
+        let source = encode_legal_task(&prepared.source_task)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        push_len(out, source.len())?;
+        out.extend_from_slice(&source);
         out.extend_from_slice(&prepared.validator_set_version.to_be_bytes());
         out.push(match prepared.phase {
             PreparedTaskPhase::Prepared => 1,
@@ -75,6 +80,9 @@ pub(super) fn decode_local_state(
     for _ in 0..task_count {
         let task_id = decoder.read_task_id()?;
         let request_digest = decoder.read_array_32()?;
+        let source_len = decoder.read_len()?;
+        let source_task = decode_legal_task(decoder.read_exact(source_len)?)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
         let validator_set_version = decoder.read_u64()?;
         let phase = match decoder.read_u8()? {
             1 => PreparedTaskPhase::Prepared,
@@ -99,6 +107,7 @@ pub(super) fn decode_local_state(
                 PreparedTask::from_persisted(
                     task_id,
                     request_digest,
+                    source_task,
                     validator_set_version,
                     phase,
                     operations,

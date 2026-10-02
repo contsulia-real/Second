@@ -23,6 +23,7 @@ pub(crate) use bft::{
     authenticate_validator_bft_peer_with_authority, serve_validator_bft_connection_from_request,
 };
 pub use bft::{ValidatorBftPeer, authenticate_validator_bft_peer, serve_validator_bft_connection};
+pub(crate) use bft_codec::MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
 pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
 pub use identity::QuicTransportIdentity;

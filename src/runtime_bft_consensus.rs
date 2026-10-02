@@ -17,11 +17,11 @@ use crate::runtime_consensus_target::{
     CertifiedConsensusTarget, ConsensusTargetError, ValidatorConsensusTarget,
 };
 use crate::{
-    BftDriver, BftDriverAction, BftDriverError, BftDriverPhase, BftNetworkMessage, BftPhase,
-    BftProposalSubject, BftQuorumCertificate, BftTimeoutConfig, BftValue,
-    CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
+    AuthorizationError, BftDriver, BftDriverAction, BftDriverError, BftDriverPhase,
+    BftNetworkMessage, BftPhase, BftProposalSubject, BftQuorumCertificate, BftTimeoutConfig,
+    BftValue, CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, ConsensusScope, FinalityCertificate, FinalityError,
-    NodeRuntime, NodeRuntimeError, PersistenceError, PublicCurrencyCheckpoint,
+    NodeRuntime, NodeRuntimeError, PersistenceError, PreparationError, PublicCurrencyCheckpoint,
     StateRecoveryCheckpoint, TaskId, ValidatorBftSendFailure, ValidatorId, ValidatorSet,
     ValidatorSetTransition, ValidatorSigner, ValidatorSigningError, ValidatorTransitionError,
     ValidatorVote,
@@ -85,6 +85,18 @@ impl ValidatorConsensusRuntime {
             .record_send_failures(scope, failures);
     }
 
+    pub(crate) fn record_rejection(
+        &self,
+        validator_id: Option<ValidatorId>,
+        scope: ConsensusScope,
+        error: BftConsensusRuntimeError,
+    ) {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_rejection(validator_id, scope, error);
+    }
+
     pub(crate) fn wake(&self) {
         self.activity.notify_one();
     }
@@ -108,53 +120,42 @@ impl ValidatorConsensusRuntime {
 }
 
 impl NodeRuntime {
-    pub fn start_prepared_task_consensus(
-        &self,
-        task_id: TaskId,
-        timeouts: BftTimeoutConfig,
-    ) -> Result<(), NodeRuntimeError> {
+    pub fn start_prepared_task_consensus(&self, task_id: TaskId) -> Result<(), NodeRuntimeError> {
         let target = ValidatorConsensusTarget::prepared_task(&self.store, task_id)
             .map_err(BftConsensusRuntimeError::from)?;
-        self.start_validator_consensus_target(target, timeouts)
+        self.start_validator_consensus_target(target)
     }
 
     pub fn start_public_checkpoint_consensus(
         &self,
         checkpoint: PublicCurrencyCheckpoint,
-        timeouts: BftTimeoutConfig,
     ) -> Result<(), NodeRuntimeError> {
-        self.start_validator_consensus_target(
-            ValidatorConsensusTarget::PublicCheckpoint(checkpoint),
-            timeouts,
-        )
+        self.start_validator_consensus_target(ValidatorConsensusTarget::PublicCheckpoint(
+            checkpoint,
+        ))
     }
 
     pub fn start_validator_set_transition_consensus(
         &self,
         transition: ValidatorSetTransition,
-        timeouts: BftTimeoutConfig,
     ) -> Result<(), NodeRuntimeError> {
-        self.start_validator_consensus_target(
-            ValidatorConsensusTarget::ValidatorSetTransition(transition),
-            timeouts,
-        )
+        self.start_validator_consensus_target(ValidatorConsensusTarget::ValidatorSetTransition(
+            transition,
+        ))
     }
 
     pub fn start_state_recovery_checkpoint_consensus(
         &self,
         checkpoint: StateRecoveryCheckpoint,
-        timeouts: BftTimeoutConfig,
     ) -> Result<(), NodeRuntimeError> {
-        self.start_validator_consensus_target(
-            ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint),
-            timeouts,
-        )
+        self.start_validator_consensus_target(ValidatorConsensusTarget::StateRecoveryCheckpoint(
+            checkpoint,
+        ))
     }
 
     fn start_validator_consensus_target(
         &self,
         target: ValidatorConsensusTarget,
-        timeouts: BftTimeoutConfig,
     ) -> Result<(), NodeRuntimeError> {
         let runtime = self
             .validator_bft
@@ -166,13 +167,24 @@ impl NodeRuntime {
             .validator_set(&self.store, &active_validator_set)
             .map_err(BftConsensusRuntimeError::from)?;
         let signer = runtime.signer_for(&validator_set)?;
+        let prepared_subject = matches!(target, ValidatorConsensusTarget::PreparedTask { .. })
+            .then(|| target.proposal_subject(&self.store))
+            .transpose()
+            .map_err(BftConsensusRuntimeError::from)?;
         runtime.consensus().register(
             signer,
             self.store.clone(),
-            validator_set,
+            validator_set.clone(),
             target,
-            timeouts,
+            runtime.bft_timeouts(),
         )?;
+        if let Some(subject) = prepared_subject {
+            runtime.announce_prepared_task(
+                &validator_set,
+                subject.scope().clone(),
+                subject.digest(),
+            );
+        }
         Ok(())
     }
 
@@ -188,11 +200,13 @@ impl NodeRuntime {
         let Some(runtime) = self.validator_bft.as_ref() else {
             return std::future::pending::<Result<(), NodeRuntimeError>>().await;
         };
+        self.start_durable_prepared_consensus()?;
 
         loop {
+            let inbound = self.process_prepared_task_sync(runtime.drain_inbound())?;
             let output = runtime
                 .consensus()
-                .drive(runtime.drain_inbound(), tokio::time::Instant::now());
+                .drive(inbound, tokio::time::Instant::now());
             for message in output.outbound {
                 let scope = message.scope().clone();
                 let failures = runtime.broadcast(&message);
@@ -200,7 +214,17 @@ impl NodeRuntime {
                     runtime.consensus().record_send_failures(scope, failures);
                 }
             }
-            runtime.consensus().wait_for_activity_or_deadline().await;
+
+            if runtime.has_pending_prepared_task_sync() {
+                tokio::select! {
+                    _ = runtime.consensus().wait_for_activity_or_deadline() => {}
+                    _ = tokio::time::sleep(runtime.bft_timeouts().proposal) => {
+                        runtime.retry_prepared_task_sync(true);
+                    }
+                }
+            } else {
+                runtime.consensus().wait_for_activity_or_deadline().await;
+            }
         }
     }
 }
@@ -209,6 +233,9 @@ impl NodeRuntime {
 pub enum BftConsensusRuntimeError {
     Driver(BftDriverError),
     Persistence(PersistenceError),
+    Authorization(AuthorizationError),
+    Preparation(PreparationError),
+    InvalidPreparedTaskSource,
     Signing(ValidatorSigningError),
     Finality(FinalityError),
     ValidatorTransition(ValidatorTransitionError),
@@ -258,8 +285,10 @@ pub enum BftConsensusEvent {
     },
 }
 
-const MAX_PENDING_UNREGISTERED_SCOPES: usize = 32;
-const MAX_PENDING_MESSAGES_PER_SCOPE: usize = 64;
+pub(crate) const MAX_PENDING_UNREGISTERED_SCOPES: usize = 32;
+pub(crate) const MAX_PENDING_MESSAGES_PER_SCOPE: usize = 64;
+pub(crate) const MAX_BFT_RUNTIME_INBOUND_QUEUE: usize =
+    MAX_PENDING_UNREGISTERED_SCOPES * MAX_PENDING_MESSAGES_PER_SCOPE;
 const MAX_RECENT_COMPLETED_SCOPES: usize = 64;
 
 pub(crate) struct BftConsensusCoordinator {
@@ -386,6 +415,19 @@ impl BftConsensusCoordinator {
         }
         self.events
             .push_back(BftConsensusEvent::SendFailed { scope, failures });
+    }
+
+    pub(crate) fn record_rejection(
+        &mut self,
+        validator_id: Option<ValidatorId>,
+        scope: ConsensusScope,
+        error: BftConsensusRuntimeError,
+    ) {
+        self.events.push_back(BftConsensusEvent::Rejected {
+            validator_id,
+            scope,
+            error,
+        });
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
@@ -779,6 +821,12 @@ fn handle_inbound(
         }
         BftNetworkMessage::FinalityVote { .. } | BftNetworkMessage::FinalityCertificate { .. } => {
             unreachable!("handled before BFT dispatch")
+        }
+        BftNetworkMessage::PreparedTaskRequest { .. }
+        | BftNetworkMessage::PreparedTaskSourceChunk { .. }
+        | BftNetworkMessage::PreparedTaskSourceUnavailable { .. }
+        | BftNetworkMessage::PreparedTaskAvailable { .. } => {
+            unreachable!("prepared-task sync control is consumed before BFT dispatch")
         }
     };
 

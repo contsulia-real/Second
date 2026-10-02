@@ -1,10 +1,18 @@
+mod config;
 mod keys;
+mod task_sync;
 #[cfg(test)]
 mod tests;
 
+pub use config::ValidatorRuntimeConfig;
 pub use keys::ValidatorRuntimeKeys;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use task_sync::PreparedTaskSyncState;
+pub(crate) use task_sync::{
+    MAX_PREPARED_TASK_SOURCE_SIZE, PreparedTaskChunk, PreparedTaskChunkResult,
+};
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -17,7 +25,7 @@ use crate::network::{
     serve_validator_bft_connection_from_request,
 };
 use crate::runtime::{ActiveConnectionPermit, MAX_ACTIVE_CONNECTIONS};
-use crate::runtime_bft_consensus::ValidatorConsensusRuntime;
+use crate::runtime_bft_consensus::{MAX_BFT_RUNTIME_INBOUND_QUEUE, ValidatorConsensusRuntime};
 use crate::{
     BftNetworkMessage, NodeRuntime, NodeRuntimeError, PersistenceError, StateStore, ValidatorId,
     ValidatorSet, ValidatorSigner,
@@ -64,10 +72,13 @@ pub(crate) struct ValidatorBftRuntime {
 
 struct ValidatorBftRuntimeInner {
     keys: ValidatorRuntimeKeys,
+    config: ValidatorRuntimeConfig,
     store: StateStore,
     authority: SharedValidatorBftAuthority,
     outbound: Mutex<BTreeMap<ValidatorId, ManagedValidatorBftPeer>>,
-    inbound: Mutex<VecDeque<InboundBftMessage>>,
+    inbound_sender: mpsc::Sender<InboundBftMessage>,
+    inbound_receiver: Mutex<mpsc::Receiver<InboundBftMessage>>,
+    task_sync: Mutex<PreparedTaskSyncState>,
     consensus: ValidatorConsensusRuntime,
     rejected_nodes: Mutex<BTreeSet<NodeId>>,
     authority_refresh: Mutex<()>,
@@ -93,6 +104,7 @@ impl NodeRuntime {
         listen_address: std::net::SocketAddr,
         store: &StateStore,
         keys: ValidatorRuntimeKeys,
+        config: ValidatorRuntimeConfig,
     ) -> Result<Self, NodeRuntimeError> {
         let mut runtime = Self::load_and_bind(listen_address, store)?;
         let persisted = runtime
@@ -101,6 +113,7 @@ impl NodeRuntime {
             .ok_or(NodeRuntimeError::SnapshotMissing)?;
         runtime.validator_bft = Some(ValidatorBftRuntime::new(
             keys,
+            config,
             runtime.store.clone(),
             persisted.validator_set,
             persisted.retained_validator_sets.into_values(),
@@ -194,6 +207,7 @@ impl NodeRuntime {
 impl ValidatorBftRuntime {
     pub(crate) fn new(
         keys: ValidatorRuntimeKeys,
+        config: ValidatorRuntimeConfig,
         store: StateStore,
         validator_set: ValidatorSet,
         retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
@@ -216,13 +230,17 @@ impl ValidatorBftRuntime {
             };
         }
 
+        let (inbound_sender, inbound_receiver) = mpsc::channel(MAX_BFT_RUNTIME_INBOUND_QUEUE);
         Ok(Self {
             inner: Arc::new(ValidatorBftRuntimeInner {
                 keys,
+                config,
                 store,
                 authority: Arc::new(std::sync::RwLock::new(authority)),
                 outbound: Mutex::new(BTreeMap::new()),
-                inbound: Mutex::new(VecDeque::new()),
+                inbound_sender,
+                inbound_receiver: Mutex::new(inbound_receiver),
+                task_sync: Mutex::new(PreparedTaskSyncState::default()),
                 consensus: ValidatorConsensusRuntime::new(),
                 rejected_nodes: Mutex::new(BTreeSet::new()),
                 authority_refresh: Mutex::new(()),
@@ -232,6 +250,18 @@ impl ValidatorBftRuntime {
 
     pub(crate) fn validator_id(&self) -> ValidatorId {
         self.inner.keys.validator_id()
+    }
+
+    pub(crate) fn authorizers(&self) -> &crate::AuthorizerSet {
+        self.inner.config.authorizers()
+    }
+
+    pub(crate) fn bft_timeouts(&self) -> crate::BftTimeoutConfig {
+        self.inner.config.bft_timeouts()
+    }
+
+    pub(crate) fn now(&self) -> u64 {
+        self.inner.config.now()
     }
 
     pub(crate) fn signer_for(
@@ -352,16 +382,22 @@ impl ValidatorBftRuntime {
             self.inner.keys.identity_key(),
             &self.inner.authority,
             move |validator_id, message| {
-                inbound
-                    .inbound
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push_back(InboundBftMessage {
-                        validator_id,
-                        message,
-                    });
-                inbound.consensus.wake();
-                Ok(())
+                let envelope = InboundBftMessage {
+                    validator_id,
+                    message,
+                };
+                match inbound.inbound_sender.try_send(envelope) {
+                    Ok(()) => {
+                        inbound.consensus.wake();
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => Err(NetworkError::Transport(
+                        "validator BFT inbound queue is full".to_owned(),
+                    )),
+                    Err(mpsc::error::TrySendError::Closed(_)) => Err(NetworkError::Transport(
+                        "validator BFT inbound queue is closed".to_owned(),
+                    )),
+                }
             },
         )
         .await?)
@@ -432,6 +468,7 @@ impl ValidatorBftRuntime {
             alive,
             Arc::downgrade(&self.inner),
         ));
+        self.inner.consensus.wake();
         Ok(remote_validator_id)
     }
 
@@ -479,12 +516,16 @@ impl ValidatorBftRuntime {
     }
 
     pub(crate) fn drain_inbound(&self) -> Vec<InboundBftMessage> {
-        self.inner
-            .inbound
+        let mut receiver = self
+            .inner
+            .inbound_receiver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain(..)
-            .collect()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inbound = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            inbound.push(message);
+        }
+        inbound
     }
 
     pub(crate) fn broadcast(&self, message: &BftNetworkMessage) -> Vec<ValidatorBftSendFailure> {

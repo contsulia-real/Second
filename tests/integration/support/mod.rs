@@ -7,22 +7,42 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
 use second::{
-    AccountAddress, AuthorizerSet, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote,
-    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope, ExecutionError,
-    ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask, LegalTaskPayload,
-    NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError, PreparationOutcome,
-    PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore,
-    TaskId, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
-    VerifiedValidatorAdmission,
+    AccountAddress, AuthorizerSet, BftPhase, BftQuorumCertificate, BftStatement, BftTimeoutConfig,
+    BftValue, BftVote, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask,
+    LegalTaskPayload, NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError,
+    PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity,
+    SecondState, StateStore, TaskId, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId,
+    ValidatorRegistry, ValidatorRuntimeConfig, ValidatorSet, ValidatorSetTransition, ValidatorVote,
+    VerifiedLegalTask, VerifiedValidatorAdmission,
 };
 
 pub fn key(byte: u8) -> SigningKey {
     SigningKey::from_bytes(&[byte; 32])
+}
+
+pub fn authorizers() -> AuthorizerSet {
+    AuthorizerSet::new(
+        CURRENT_PROTOCOL_VERSION,
+        [key(9).verifying_key().to_bytes()],
+    )
+    .unwrap()
+}
+
+pub fn validator_runtime_config(timeouts: BftTimeoutConfig) -> ValidatorRuntimeConfig {
+    ValidatorRuntimeConfig::new(authorizers(), timeouts, || 1)
+}
+
+pub fn default_validator_runtime_config() -> ValidatorRuntimeConfig {
+    validator_runtime_config(BftTimeoutConfig::new(
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    ))
 }
 
 fn deterministic_address_bytes(value: u64) -> [u8; 32] {
@@ -53,11 +73,7 @@ pub fn verified_task_with_expiry(
     operations: Vec<Operation>,
 ) -> VerifiedLegalTask {
     let signing = key(9);
-    let authorizers = AuthorizerSet::new(
-        CURRENT_PROTOCOL_VERSION,
-        [signing.verifying_key().to_bytes()],
-    )
-    .unwrap();
+    let authorizers = authorizers();
     let payload = LegalTaskPayload::new(
         task_id(task_number),
         CURRENT_PROTOCOL_VERSION,
