@@ -20,6 +20,7 @@ mod runtime;
 mod runtime_bft;
 mod runtime_bft_consensus;
 mod runtime_consensus_target;
+mod runtime_submission;
 mod runtime_tasks;
 mod state;
 mod state_recovery_checkpoint;
@@ -83,7 +84,7 @@ pub use runtime_bft::{
     ValidatorBftRuntimeError, ValidatorBftSendFailure, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
 };
 pub use runtime_bft_consensus::{BftConsensusEvent, BftConsensusRuntimeError};
-pub use runtime_tasks::LegalTaskSubmissionOutcome;
+pub use runtime_submission::LegalTaskSubmissionOutcome;
 pub use state::{ExecutionOutcome, SecondState};
 pub use state_recovery_checkpoint::{
     CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint, StateRecoveryCheckpointProof,

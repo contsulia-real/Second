@@ -28,7 +28,7 @@ use crate::network::{
 use crate::runtime_bft::{
     ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
 };
-use crate::runtime_tasks::serve_legal_task_submission_from_request;
+use crate::runtime_submission::serve_legal_task_submission_from_request;
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
     PersistedNodeState, PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView,

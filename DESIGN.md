@@ -938,7 +938,7 @@ payload
 - 有界 `PeerRecord` 查询与 bootstrap peer discovery；
 - 仅 Validator capability 启用时可用的 chunked signed `LegalTask` submission service。
 
-LegalTask submission 与 authenticated-open public read session 使用同一个 QUIC listener 和统一 network frame，但由 connection 的第一条 service request 显式分流：第一条消息为 `LegalTaskSubmissionOpen` 时，在 public `PeerManager` 注册之前直接进入 submission handler，因此 raw LegalTask 不会进入 public session、PeerStore、peer discovery 或 public gossip；public-only Node 在读取 task body 前直接返回 `Unavailable`。Validator-capable Node 对 submission 另设最多 8 条并发 service connection，且这些连接仍同时计入整个节点 128 条 connection 总预算；既有 QUIC 5 秒 idle timeout 继续限制占槽不发送数据的客户端。单个 canonical encoded LegalTask 最大 2 MiB，沿用 Validator 间 private source bootstrap 的同一语义上限；wire 上复用现有 32 KiB source chunk 大小顺序传输，并严格校验 total length、offset 与 chunk boundary，避免为了外部入口维护第二套 task 编码或资源常量。CLI 的 transaction JSON 属于本地输入表示，不是 wire object；其本地文件读取 budget 为 16 MiB，解析完成后仍必须编码到上述 2 MiB canonical LegalTask 上限内才能发送。
+LegalTask submission 新增了 network message set，因此当前未发布协议直接把 `CURRENT_NETWORK_PROTOCOL_VERSION` 提升为 2；不保留 v1 fallback、双解码或 legacy handshake。LegalTask submission 与 authenticated-open public read session 使用同一个 QUIC listener 和统一 network frame，但由 connection 的第一条 service request 显式分流：第一条消息为 `LegalTaskSubmissionOpen` 时，在 public `PeerManager` 注册之前直接进入 submission handler，因此 raw LegalTask 不会进入 public session、PeerStore、peer discovery 或 public gossip；public-only Node 在读取 task body 前直接返回 `Unavailable`。Validator-capable Node 对 submission 另设最多 8 条并发 service connection，且这些连接仍同时计入整个节点 128 条 connection 总预算；既有 QUIC 5 秒 idle timeout 继续限制占槽不发送数据的客户端。单个 canonical encoded LegalTask 最大 2 MiB，沿用 Validator 间 private source bootstrap 的同一语义上限；wire 上复用现有 32 KiB source chunk 大小顺序传输，并严格校验 total length、offset 与 chunk boundary，避免为了外部入口维护第二套 task 编码或资源常量。CLI 的 transaction JSON 属于本地输入表示，不是 wire object；其本地文件读取 budget 为 16 MiB，解析完成后仍必须编码到上述 2 MiB canonical LegalTask 上限内才能发送。
 
 submission 服务在收齐 task 后调用同一个 Validator runtime submit/prepare 路径：先用本地 AuthorizerSet 验证签名和 payload，再进行 durable prepare，并注册现有 PreparedTask BFT scope；响应不会为了客户端同步等待 finality。`prepared` 表示这次请求新建了本地 durable PreparedTask 并启动/注册共识，`pending` 表示完全相同的 `TaskId + request digest + signed source` 已在本地进行中，`succeeded` 表示该请求已经完成业务 commit。这样网络重试是幂等的，同时同 TaskId 的不同 signed request 仍然按冲突 fail-closed；服务端对不合法/不可执行的业务拒绝只返回通用 `Rejected`，不把私有状态或具体执行失败原因泄露给外部提交者。
 
@@ -1106,8 +1106,10 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | runtime_bft.rs | Validator-only peer 维护、active+retained authority、inbound queue、普通 BFT / finality 独立保留 in-flight 容量的 exact-set fanout 与 send-failure 生命周期 |
 | runtime_bft/keys.rs | Validator runtime identity key 与按 consensus public key 索引的 active/retained signing keyring |
 | runtime_bft_consensus.rs | NodeRuntime per-scope BFT coordinator、PreparedTask 自动/恢复注册、round/timeout、early/future-message buffering 与完成 scope 的有界 compact certificate cache |
+| runtime_submission.rs | 外部 LegalTask submission 的本地 Authorizer 验证、幂等 prepare/BFT 注册与 service handler |
 | runtime_bft_consensus/finality.rs | precommit-QC gated FinalityVote / FinalityCertificate 聚合、验证、relay、PreparedTask durable lifecycle 与 Certified* 事件收敛 |
 | runtime_consensus_target.rs | PreparedTask / PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 到既有 proposal/finality 类型的单一适配层 |
+| runtime_tasks.rs | Validator 间 PreparedTask 私有 source pull / install / retry 与 durable task 恢复编排 |
 | network/recovery.rs | channel-bound Validator identity 授权与 chunked private recovery transport |
 | persistence/ | 私有 snapshot、prepared、vote-lock、registry 与空-store recovery 安装 |
 | transaction.rs | 外部 transaction request 严格解析 |
