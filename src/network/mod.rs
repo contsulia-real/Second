@@ -16,8 +16,9 @@ use std::fmt;
 use crate::{
     BftError, CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint, CurrencyAddress,
     FinalityError, LegalTaskSubmissionOutcome, PublicCheckpointError,
-    PublicCurrencyCheckpointProof, PublicCurrencyState, PublicCurrencySummary, PublicCurrencyView,
-    PublicStateError, StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId,
+    PublicCurrencyCheckpointProof, PublicCurrencyDelta, PublicCurrencyState, PublicCurrencySummary,
+    PublicCurrencyView, PublicStateError, StateRecoveryCheckpointProof, StateRecoveryPayload,
+    TaskId, ValidatorId, ValidatorSetTransitionProof,
 };
 
 pub(crate) use bft::{
@@ -50,15 +51,15 @@ pub(crate) use recovery::{
     state_recovery_response, validate_chunk_limit,
 };
 pub(crate) use session::{
-    PublicNetworkServices, RuntimeNetworkSnapshot,
+    PublicNetworkServices, RuntimeNetworkSnapshot, RuntimePublicSnapshot,
     client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
     serve_public_network_connection_from_request,
 };
 pub use session::{
     client_peer_records, client_ping, client_public_currency_checkpoint_proof,
-    client_public_currency_page, client_public_currency_summary,
+    client_public_currency_delta, client_public_currency_page, client_public_currency_summary,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
-    serve_ping_session, serve_public_currency_connection,
+    client_validator_set_transition_proof, serve_ping_session, serve_public_currency_connection,
 };
 pub use submission::{
     MAX_LEGAL_TASK_SUBMISSION_SIZE, RemoteLegalTaskSubmission, client_submit_legal_task,
@@ -67,7 +68,7 @@ pub(crate) use submission::{
     rejected as legal_task_submission_rejected, validate_submission_chunk, validate_submission_open,
 };
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 3;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 4;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -177,6 +178,21 @@ pub enum NetworkMessage {
         proof: PublicCurrencyCheckpointProof,
     },
     NoPublicCurrencyCheckpoint,
+    GetPublicCurrencyDelta {
+        from_epoch: u64,
+        from_state_digest: [u8; 32],
+    },
+    PublicCurrencyDelta {
+        delta: PublicCurrencyDelta,
+    },
+    NoPublicCurrencyDelta,
+    GetValidatorSetTransitionProof {
+        current_validator_set_version: u64,
+    },
+    ValidatorSetTransitionProof {
+        proof: ValidatorSetTransitionProof,
+    },
+    NoValidatorSetTransitionProof,
     GetPeers {
         limit: u16,
     },
@@ -338,6 +354,8 @@ pub enum NetworkError {
         actual_epoch: u64,
     },
     CheckpointDoesNotMatchServedState,
+    InvalidPublicCurrencyDelta,
+    InvalidValidatorTransitionProof,
     PublicStateSource(String),
     StateRecoveryUnauthorized,
     MissingStateRecoveryCheckpoint,

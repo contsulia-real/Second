@@ -1,6 +1,6 @@
 use crate::{
     AccountAddress, BftPhase, BftValue, CurrencyAddress, OperationClaimId, PaymentAddress,
-    ValidatorId,
+    PublicCheckpointError, ValidatorId,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,6 +160,7 @@ pub enum PersistenceError {
         actual: u64,
     },
     CheckpointFinality(FinalityError),
+    PublicCheckpoint(PublicCheckpointError),
     StaleCheckpointEpoch {
         minimum: u64,
         actual: u64,

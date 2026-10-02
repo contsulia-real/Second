@@ -170,7 +170,7 @@ impl NodeRuntime {
             .validator_bft
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
-        start_prepared_task_consensus_for(&self.store, runtime, task_id)
+        start_prepared_task_consensus_for(self.full_store()?, runtime, task_id)
     }
 
     pub fn start_public_checkpoint_consensus(
@@ -208,7 +208,7 @@ impl NodeRuntime {
             .validator_bft
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
-        start_validator_consensus_target_for(&self.store, runtime, target)
+        start_validator_consensus_target_for(self.full_store()?, runtime, target)
     }
 
     pub fn drain_bft_consensus_events(&self) -> Result<Vec<BftConsensusEvent>, NodeRuntimeError> {
@@ -223,10 +223,8 @@ impl NodeRuntime {
         &self,
         runtime: &ValidatorBftRuntime,
     ) -> Result<(), NodeRuntimeError> {
-        let snapshot = self
-            .store
-            .load()?
-            .ok_or(PersistenceError::MissingSnapshot)?;
+        let store = self.full_store()?;
+        let snapshot = store.load()?.ok_or(PersistenceError::MissingSnapshot)?;
         if snapshot.validator_safety_ready
             || snapshot.pending_validator_safety_recovery.is_none()
             || snapshot.recovery_checkpoint_proof.is_none()
@@ -235,7 +233,7 @@ impl NodeRuntime {
         }
 
         let signer = runtime.signer_for(&snapshot.validator_set)?;
-        self.store.try_complete_pending_validator_safety_recovery(
+        store.try_complete_pending_validator_safety_recovery(
             signer.validator_id(),
             signer.consensus_public_key(),
         )?;

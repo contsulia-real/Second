@@ -1,11 +1,13 @@
 use crate::{
-    CURRENT_PROTOCOL_VERSION, ValidatorAdmissionError, ValidatorAdmissionRequest,
-    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
-    ValidatorRotationAuthority, ValidatorSet, ValidatorSetError, ValidatorSetTransition,
-    ValidatorTransitionError,
+    CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ValidatorAdmissionError,
+    ValidatorAdmissionRequest, ValidatorConsensusKeyRotationRequest, ValidatorCredential,
+    ValidatorId, ValidatorRegistry, ValidatorRotationAuthority, ValidatorSet, ValidatorSetError,
+    ValidatorSetTransition, ValidatorTransitionError, ValidatorVote,
 };
 
 pub const MAX_VALIDATOR_TRANSITION_SOURCE_SIZE: usize = 48 * 1024;
+pub const MAX_VALIDATOR_TRANSITION_PROOF_SIZE: usize = 60 * 1024;
+const ENCODED_TRANSITION_VOTE_SIZE: usize = 8 + 64;
 const CREDENTIAL_SIZE: usize = 8 + 32 * 3;
 const ADMISSION_SIZE: usize = 4 + CREDENTIAL_SIZE + 64 * 3;
 const ROTATION_SIZE: usize = 4 + 1 + 8 + 8 + 32 + 64;
@@ -16,6 +18,12 @@ pub struct ValidatorSetTransitionSource {
     next_validator_set: ValidatorSet,
     admissions: Vec<ValidatorAdmissionRequest>,
     consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatorSetTransitionProof {
+    source: ValidatorSetTransitionSource,
+    votes: Vec<ValidatorVote>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +39,93 @@ pub enum ValidatorTransitionSourceCodecError {
     InvalidValidatorSet(ValidatorSetError),
     InvalidAdmission(ValidatorAdmissionError),
     InvalidRotationAuthority,
+}
+
+impl ValidatorSetTransitionProof {
+    pub fn from_certified(certified: &CertifiedValidatorSetTransition) -> Self {
+        Self {
+            source: ValidatorSetTransitionSource::from_transition(certified.transition()),
+            votes: certified.certificate().votes().to_vec(),
+        }
+    }
+
+    pub fn source(&self) -> &ValidatorSetTransitionSource {
+        &self.source
+    }
+
+    pub fn votes(&self) -> &[ValidatorVote] {
+        &self.votes
+    }
+
+    pub fn verify(
+        &self,
+        current_validator_set: &ValidatorSet,
+        validator_registry: &ValidatorRegistry,
+    ) -> Result<CertifiedValidatorSetTransition, ValidatorTransitionSourceError> {
+        let transition = self
+            .source
+            .verify(current_validator_set, validator_registry)?;
+        CertifiedValidatorSetTransition::new(transition, self.votes.clone(), current_validator_set)
+            .map_err(ValidatorTransitionSourceError::Transition)
+    }
+
+    pub fn encode_bytes(&self) -> Result<Vec<u8>, ValidatorTransitionSourceCodecError> {
+        let source = self.source.encode_bytes()?;
+        let source_len = u16::try_from(source.len())
+            .map_err(|_| ValidatorTransitionSourceCodecError::TooLarge)?;
+        let vote_count = u16::try_from(self.votes.len())
+            .map_err(|_| ValidatorTransitionSourceCodecError::TooLarge)?;
+        let encoded_len = 2_usize
+            .checked_add(source.len())
+            .and_then(|len| len.checked_add(2))
+            .and_then(|len| {
+                self.votes
+                    .len()
+                    .checked_mul(ENCODED_TRANSITION_VOTE_SIZE)
+                    .and_then(|vote_bytes| len.checked_add(vote_bytes))
+            })
+            .ok_or(ValidatorTransitionSourceCodecError::TooLarge)?;
+        if encoded_len > MAX_VALIDATOR_TRANSITION_PROOF_SIZE {
+            return Err(ValidatorTransitionSourceCodecError::TooLarge);
+        }
+
+        let mut out = Vec::with_capacity(encoded_len);
+        out.extend_from_slice(&source_len.to_be_bytes());
+        out.extend_from_slice(&source);
+        out.extend_from_slice(&vote_count.to_be_bytes());
+        for vote in &self.votes {
+            out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
+            out.extend_from_slice(&vote.signature_bytes());
+        }
+        Ok(out)
+    }
+
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, ValidatorTransitionSourceCodecError> {
+        if bytes.len() > MAX_VALIDATOR_TRANSITION_PROOF_SIZE {
+            return Err(ValidatorTransitionSourceCodecError::TooLarge);
+        }
+        let mut decoder = Decoder::new(bytes);
+        let source_len = usize::from(decoder.u16()?);
+        if source_len == 0 || source_len > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE {
+            return Err(ValidatorTransitionSourceCodecError::InvalidLength);
+        }
+        let source = ValidatorSetTransitionSource::decode_bytes(decoder.take(source_len)?)?;
+        let vote_count = usize::from(decoder.u16()?);
+        if vote_count == 0 || vote_count > decoder.remaining() / ENCODED_TRANSITION_VOTE_SIZE {
+            return Err(ValidatorTransitionSourceCodecError::InvalidLength);
+        }
+        let mut votes = Vec::with_capacity(vote_count);
+        for _ in 0..vote_count {
+            votes.push(ValidatorVote::from_untrusted_parts(
+                ValidatorId::new(decoder.u64()?),
+                decoder.array_64()?,
+            ));
+        }
+        if !decoder.is_done() {
+            return Err(ValidatorTransitionSourceCodecError::InvalidLength);
+        }
+        Ok(Self { source, votes })
+    }
 }
 
 impl ValidatorSetTransitionSource {
@@ -298,6 +393,10 @@ impl<'a> Decoder<'a> {
         self.take(64)?
             .try_into()
             .map_err(|_| ValidatorTransitionSourceCodecError::InvalidLength)
+    }
+
+    const fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
     }
 
     const fn is_done(&self) -> bool {

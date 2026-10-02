@@ -17,10 +17,10 @@ use second::{
     BftValue, BftVote, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, ConsensusScope,
     ExecutionError, ExecutionOutcome, FinalityCertificate, FinalityStatement, LegalTask,
     LegalTaskPayload, NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError,
-    PreparationOutcome, PreparedTaskBook, QuicClient, QuicServer, QuicTransportIdentity,
-    SecondState, StateStore, TaskId, ValidatorAdmissionRequest, ValidatorCredential, ValidatorId,
-    ValidatorRegistry, ValidatorRuntimeConfig, ValidatorSet, ValidatorSetTransition, ValidatorVote,
-    VerifiedLegalTask, VerifiedValidatorAdmission,
+    PreparationOutcome, PreparedTaskBook, PublicStateStore, QuicClient, QuicServer,
+    QuicTransportIdentity, SecondState, StateStore, TaskId, ValidatorAdmissionRequest,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRuntimeConfig, ValidatorSet,
+    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask, VerifiedValidatorAdmission,
 };
 use serde_json::json;
 
@@ -570,6 +570,13 @@ pub fn spawn_node_runtime_with_bootstrap(
 }
 
 pub fn cleanup_node_runtime(store: StateStore, base: PathBuf) {
+    store.remove_files().unwrap();
+    remove_transport_identity(&base);
+    remove_optional_file(peer_store_path(&base), "peer store");
+    remove_optional_file(bootstrap_config_path(&base), "bootstrap config");
+}
+
+pub fn cleanup_public_node_runtime(store: PublicStateStore, base: PathBuf) {
     store.remove_files().unwrap();
     remove_transport_identity(&base);
     remove_optional_file(peer_store_path(&base), "peer store");

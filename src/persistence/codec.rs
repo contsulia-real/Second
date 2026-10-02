@@ -8,10 +8,11 @@ use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::prepared_plan::PreparedTask;
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding};
 use crate::{
-    AccountAddress, BftLocalState, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
-    PaymentAddressStatus, PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof,
+    AccountAddress, BftLocalState, CurrencyAddress, CurrencyRole,
+    MAX_PUBLIC_CURRENCY_DELTA_CHANGES, OperationClaimId, PaymentAddress, PaymentAddressStatus,
+    PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof, PublicCurrencyDelta,
     SecondState, StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId,
-    ValidatorRegistry, ValidatorSet,
+    ValidatorRegistry, ValidatorSet, ValidatorSetTransitionProof,
 };
 
 use super::RecoveryCheckpointFloor;
@@ -32,7 +33,7 @@ use super::validator_codec::{
 };
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"S2SN";
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
 const SNAPSHOT_DOMAIN: &[u8] = b"SECOND_STATE_SNAPSHOT_V1\0";
 pub(super) const CHECKSUM_SIZE: usize = 32;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 8;
@@ -46,6 +47,10 @@ pub(super) struct SnapshotContents<'a> {
     pub(super) validator_set: &'a ValidatorSet,
     pub(super) retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
     pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
+    pub(super) public_checkpoint_baseline: Option<&'a PublicCurrencyCheckpointProof>,
+    pub(super) latest_public_delta: Option<&'a PublicCurrencyDelta>,
+    pub(super) pending_public_changes: Option<&'a BTreeSet<CurrencyAddress>>,
+    pub(super) validator_transition_proofs: &'a BTreeMap<u64, ValidatorSetTransitionProof>,
     pub(super) recovery_checkpoint_proof: Option<&'a StateRecoveryCheckpointProof>,
     pub(super) checkpoint_floor_epoch: u64,
     pub(super) recovery_checkpoint_floors: &'a BTreeMap<u64, RecoveryCheckpointFloor>,
@@ -63,6 +68,10 @@ struct DecodedSnapshotPayload {
     validator_set: ValidatorSet,
     retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+    public_checkpoint_baseline: Option<PublicCurrencyCheckpointProof>,
+    latest_public_delta: Option<PublicCurrencyDelta>,
+    pending_public_changes: Option<BTreeSet<CurrencyAddress>>,
+    validator_transition_proofs: BTreeMap<u64, ValidatorSetTransitionProof>,
     recovery_checkpoint_proof: Option<StateRecoveryCheckpointProof>,
     checkpoint_floor_epoch: u64,
     recovery_checkpoint_floors: BTreeMap<u64, RecoveryCheckpointFloor>,
@@ -218,6 +227,12 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         decoded.public_checkpoint_proof.as_ref(),
         decoded.checkpoint_floor_epoch,
     )?;
+    validate_public_sync_state(
+        &decoded.validator_set,
+        decoded.public_checkpoint_baseline.as_ref(),
+        decoded.latest_public_delta.as_ref(),
+        decoded.pending_public_changes.as_ref(),
+    )?;
     decoded
         .validator_registry
         .validate_current_set(&decoded.validator_set)
@@ -244,6 +259,10 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         validator_registry: decoded.validator_registry,
         retained_validator_sets: decoded.retained_validator_sets,
         public_checkpoint_proof: decoded.public_checkpoint_proof,
+        public_checkpoint_baseline: decoded.public_checkpoint_baseline,
+        latest_public_delta: decoded.latest_public_delta,
+        pending_public_changes: decoded.pending_public_changes,
+        validator_transition_proofs: decoded.validator_transition_proofs,
         recovery_checkpoint_proof: decoded.recovery_checkpoint_proof,
         checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
         recovery_checkpoint_floors: decoded.recovery_checkpoint_floors,
@@ -269,6 +288,10 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     let validator_set = contents.validator_set;
     let retained_validator_sets = contents.retained_validator_sets;
     let public_checkpoint_proof = contents.public_checkpoint_proof;
+    let public_checkpoint_baseline = contents.public_checkpoint_baseline;
+    let latest_public_delta = contents.latest_public_delta;
+    let pending_public_changes = contents.pending_public_changes;
+    let validator_transition_proofs = contents.validator_transition_proofs;
     let recovery_checkpoint_proof = contents.recovery_checkpoint_proof;
     let checkpoint_floor_epoch = contents.checkpoint_floor_epoch;
     let recovery_checkpoint_floors = contents.recovery_checkpoint_floors;
@@ -298,16 +321,43 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
 
     encode_optional_recovery_proof(&mut out, recovery_checkpoint_proof)?;
 
-    match public_checkpoint_proof {
-        Some(proof) => {
+    encode_optional_public_proof(&mut out, public_checkpoint_proof)?;
+    encode_optional_public_proof(&mut out, public_checkpoint_baseline)?;
+    match latest_public_delta {
+        Some(delta) => {
             out.push(1);
-            let proof_bytes = proof
+            let bytes = delta
                 .encode_bytes()
                 .map_err(|_| PersistenceError::InvalidSnapshot)?;
-            push_len(&mut out, proof_bytes.len())?;
-            out.extend_from_slice(&proof_bytes);
+            push_len(&mut out, bytes.len())?;
+            out.extend_from_slice(&bytes);
         }
         None => out.push(0),
+    }
+    match pending_public_changes {
+        Some(changes) => {
+            if changes.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            out.push(1);
+            push_len(&mut out, changes.len())?;
+            for address in changes {
+                out.extend_from_slice(&address.value().to_be_bytes());
+            }
+        }
+        None => out.push(0),
+    }
+    push_len(&mut out, validator_transition_proofs.len())?;
+    for (current_version, proof) in validator_transition_proofs {
+        if proof.source().next_validator_set().version() != current_version.saturating_add(1) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        out.extend_from_slice(&current_version.to_be_bytes());
+        let bytes = proof
+            .encode_bytes()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        push_len(&mut out, bytes.len())?;
+        out.extend_from_slice(&bytes);
     }
 
     out.push(u8::from(validator_safety_ready));
@@ -639,18 +689,51 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
 
     let recovery_checkpoint_proof = decode_optional_recovery_proof(&mut decoder)?;
 
-    let public_checkpoint_proof = match decoder.read_u8()? {
+    let public_checkpoint_proof = decode_optional_public_proof(&mut decoder)?;
+    let public_checkpoint_baseline = decode_optional_public_proof(&mut decoder)?;
+    let latest_public_delta = match decoder.read_u8()? {
         0 => None,
         1 => {
-            let proof_len = decoder.read_len()?;
-            let proof_bytes = decoder.read_exact(proof_len)?;
+            let len = decoder.read_len()?;
             Some(
-                PublicCurrencyCheckpointProof::decode_bytes(proof_bytes)
+                PublicCurrencyDelta::decode_bytes(decoder.read_exact(len)?)
                     .map_err(|_| PersistenceError::InvalidSnapshot)?,
             )
         }
         _ => return Err(PersistenceError::InvalidSnapshot),
     };
+    let pending_public_changes = match decoder.read_u8()? {
+        0 => None,
+        1 => {
+            let count = decoder.read_len()?;
+            if count > MAX_PUBLIC_CURRENCY_DELTA_CHANGES || count > decoder.remaining() / 8 {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            let mut changes = BTreeSet::new();
+            for _ in 0..count {
+                if !changes.insert(CurrencyAddress::new(decoder.read_u64()?)) {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+            Some(changes)
+        }
+        _ => return Err(PersistenceError::InvalidSnapshot),
+    };
+    let transition_count = decoder.read_len()?;
+    let mut validator_transition_proofs = BTreeMap::new();
+    for _ in 0..transition_count {
+        let current_version = decoder.read_u64()?;
+        let len = decoder.read_len()?;
+        let proof = ValidatorSetTransitionProof::decode_bytes(decoder.read_exact(len)?)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if proof.source().next_validator_set().version() != current_version.saturating_add(1)
+            || validator_transition_proofs
+                .insert(current_version, proof)
+                .is_some()
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
 
     let validator_safety_ready = match decoder.read_u8()? {
         0 => false,
@@ -704,6 +787,10 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         validator_set,
         retained_validator_sets,
         public_checkpoint_proof,
+        public_checkpoint_baseline,
+        latest_public_delta,
+        pending_public_changes,
+        validator_transition_proofs,
         recovery_checkpoint_proof,
         checkpoint_floor_epoch,
         recovery_checkpoint_floors,
@@ -715,6 +802,70 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         validator_vote_locks,
         bft_local_states,
     })
+}
+
+fn encode_optional_public_proof(
+    out: &mut Vec<u8>,
+    proof: Option<&PublicCurrencyCheckpointProof>,
+) -> Result<(), PersistenceError> {
+    match proof {
+        Some(proof) => {
+            out.push(1);
+            let bytes = proof
+                .encode_bytes()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+            push_len(out, bytes.len())?;
+            out.extend_from_slice(&bytes);
+        }
+        None => out.push(0),
+    }
+    Ok(())
+}
+
+fn decode_optional_public_proof(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<PublicCurrencyCheckpointProof>, PersistenceError> {
+    match decoder.read_u8()? {
+        0 => Ok(None),
+        1 => {
+            let len = decoder.read_len()?;
+            PublicCurrencyCheckpointProof::decode_bytes(decoder.read_exact(len)?)
+                .map(Some)
+                .map_err(|_| PersistenceError::InvalidSnapshot)
+        }
+        _ => Err(PersistenceError::InvalidSnapshot),
+    }
+}
+
+fn validate_public_sync_state(
+    validator_set: &ValidatorSet,
+    baseline: Option<&PublicCurrencyCheckpointProof>,
+    latest_delta: Option<&PublicCurrencyDelta>,
+    pending_changes: Option<&BTreeSet<CurrencyAddress>>,
+) -> Result<(), PersistenceError> {
+    if pending_changes.is_some_and(|changes| changes.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES) {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    let certified_baseline = baseline
+        .map(|proof| {
+            proof
+                .clone()
+                .verify_checkpoint(validator_set)
+                .map_err(PersistenceError::PublicCheckpoint)
+        })
+        .transpose()?;
+    match (certified_baseline.as_ref(), latest_delta) {
+        (Some(checkpoint), Some(delta)) => {
+            if delta.to_epoch() != checkpoint.checkpoint().epoch()
+                || delta.summary() != checkpoint.checkpoint().summary()
+            {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+        }
+        (None, Some(_)) => return Err(PersistenceError::InvalidSnapshot),
+        _ => {}
+    }
+    Ok(())
 }
 
 fn encode_optional_recovery_proof(
@@ -830,7 +981,7 @@ pub(super) struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(super) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
@@ -898,7 +1049,7 @@ impl<'a> Decoder<'a> {
         Ok(slice)
     }
 
-    fn finish(self) -> Result<(), PersistenceError> {
+    pub(super) fn finish(self) -> Result<(), PersistenceError> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {

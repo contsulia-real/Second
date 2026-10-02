@@ -1,10 +1,16 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::{
-    CurrencyAddress, CurrencyRole, LegalTaskSubmissionOutcome,
-    MAX_VALIDATOR_TRANSITION_SOURCE_SIZE, PublicCurrencyCheckpointProof, PublicCurrencyState,
-    PublicCurrencySummary, StateRecoveryCheckpointProof, TaskId, ValidatorId,
+    CurrencyAddress, LegalTaskSubmissionOutcome, MAX_VALIDATOR_TRANSITION_SOURCE_SIZE,
+    PublicCurrencyCheckpointProof, PublicCurrencyDelta, StateRecoveryCheckpointProof, TaskId,
+    ValidatorId, ValidatorSetTransitionProof,
     public_checkpoint::CheckpointProofCodecError,
+    public_state_codec::{
+        PUBLIC_CURRENCY_STATE_ENCODED_SIZE, PUBLIC_CURRENCY_SUMMARY_ENCODED_SIZE,
+        PublicStateCodecError, decode_public_currency_state,
+        decode_public_currency_summary as decode_public_currency_summary_bytes,
+        encode_public_currency_state, encode_public_currency_summary,
+    },
     state_recovery_checkpoint::StateRecoveryProofCodecError,
 };
 
@@ -19,7 +25,6 @@ use super::{
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
 const FRAME_HEADER_SIZE: usize = 12;
 pub(super) const MAX_NETWORK_MESSAGE_SIZE: usize = MAX_NETWORK_FRAME_SIZE + FRAME_HEADER_SIZE;
-const PUBLIC_CURRENCY_ENCODED_SIZE: usize = 10;
 
 pub fn encode_network_message(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {
     let payload = encode_message_payload(message)?;
@@ -152,18 +157,14 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
                 }
             })?;
 
-            let mut payload =
-                Vec::with_capacity(1 + 2 + states.len() * PUBLIC_CURRENCY_ENCODED_SIZE + 1 + 8);
+            let mut payload = Vec::with_capacity(
+                1 + 2 + states.len() * PUBLIC_CURRENCY_STATE_ENCODED_SIZE + 1 + 8,
+            );
             payload.push(5);
             payload.extend_from_slice(&count.to_be_bytes());
 
             for state in states {
-                payload.extend_from_slice(&state.address.value().to_be_bytes());
-                payload.push(u8::from(state.occupied));
-                payload.push(match state.role {
-                    CurrencyRole::Circulation => 1,
-                    CurrencyRole::Reserve => 2,
-                });
+                encode_public_currency_state(&mut payload, state);
             }
 
             match next_start {
@@ -178,13 +179,9 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
         }
         NetworkMessage::GetPublicCurrencySummary => Ok(vec![6]),
         NetworkMessage::PublicCurrencySummary { summary } => {
-            let mut payload = Vec::with_capacity(65);
+            let mut payload = Vec::with_capacity(1 + PUBLIC_CURRENCY_SUMMARY_ENCODED_SIZE);
             payload.push(7);
-            payload.extend_from_slice(&summary.next_currency_address.to_be_bytes());
-            payload.extend_from_slice(&summary.current_supply.to_be_bytes());
-            payload.extend_from_slice(&summary.reserve_count.to_be_bytes());
-            payload.extend_from_slice(&summary.occupied_count.to_be_bytes());
-            payload.extend_from_slice(&summary.state_digest);
+            encode_public_currency_summary(&mut payload, summary);
             Ok(payload)
         }
         NetworkMessage::GetPublicCurrencyCheckpoint => Ok(vec![8]),
@@ -379,6 +376,44 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
         NetworkMessage::GovernanceRejected { reason } => {
             Ok(vec![32, encode_governance_rejection(*reason)])
         }
+        NetworkMessage::GetPublicCurrencyDelta {
+            from_epoch,
+            from_state_digest,
+        } => {
+            let mut payload = Vec::with_capacity(41);
+            payload.push(33);
+            payload.extend_from_slice(&from_epoch.to_be_bytes());
+            payload.extend_from_slice(from_state_digest);
+            Ok(payload)
+        }
+        NetworkMessage::PublicCurrencyDelta { delta } => {
+            let bytes = delta
+                .encode_bytes()
+                .map_err(|_| NetworkError::InvalidPublicCurrencyDelta)?;
+            let mut payload = Vec::with_capacity(1 + bytes.len());
+            payload.push(34);
+            payload.extend_from_slice(&bytes);
+            Ok(payload)
+        }
+        NetworkMessage::NoPublicCurrencyDelta => Ok(vec![35]),
+        NetworkMessage::GetValidatorSetTransitionProof {
+            current_validator_set_version,
+        } => {
+            let mut payload = Vec::with_capacity(9);
+            payload.push(36);
+            payload.extend_from_slice(&current_validator_set_version.to_be_bytes());
+            Ok(payload)
+        }
+        NetworkMessage::ValidatorSetTransitionProof { proof } => {
+            let bytes = proof
+                .encode_bytes()
+                .map_err(|_| NetworkError::InvalidValidatorTransitionProof)?;
+            let mut payload = Vec::with_capacity(1 + bytes.len());
+            payload.push(37);
+            payload.extend_from_slice(&bytes);
+            Ok(payload)
+        }
+        NetworkMessage::NoValidatorSetTransitionProof => Ok(vec![38]),
     }
 }
 
@@ -487,8 +522,65 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
         30 => decode_state_recovery_checkpoint_submit(payload),
         31 => decode_state_recovery_checkpoint_accepted(payload),
         32 => decode_governance_rejected(payload),
+        33 => decode_public_currency_delta_request(payload),
+        34 => decode_public_currency_delta(payload),
+        35 => {
+            require_message_length(35, payload, 1)?;
+            Ok(NetworkMessage::NoPublicCurrencyDelta)
+        }
+        36 => decode_validator_transition_proof_request(payload),
+        37 => decode_validator_transition_proof(payload),
+        38 => {
+            require_message_length(38, payload, 1)?;
+            Ok(NetworkMessage::NoValidatorSetTransitionProof)
+        }
         other => Err(NetworkError::UnknownMessageType(other)),
     }
+}
+
+fn decode_public_currency_delta_request(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(33, payload, 41)?;
+    Ok(NetworkMessage::GetPublicCurrencyDelta {
+        from_epoch: u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidPublicCurrencyDelta)?,
+        ),
+        from_state_digest: payload[9..41]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidPublicCurrencyDelta)?,
+    })
+}
+
+fn decode_public_currency_delta(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() <= 1 {
+        return Err(NetworkError::InvalidPublicCurrencyDelta);
+    }
+    let delta = PublicCurrencyDelta::decode_bytes(&payload[1..])
+        .map_err(|_| NetworkError::InvalidPublicCurrencyDelta)?;
+    Ok(NetworkMessage::PublicCurrencyDelta { delta })
+}
+
+fn decode_validator_transition_proof_request(
+    payload: &[u8],
+) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(36, payload, 9)?;
+    Ok(NetworkMessage::GetValidatorSetTransitionProof {
+        current_validator_set_version: u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidValidatorTransitionProof)?,
+        ),
+    })
+}
+
+fn decode_validator_transition_proof(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() <= 1 {
+        return Err(NetworkError::InvalidValidatorTransitionProof);
+    }
+    let proof = ValidatorSetTransitionProof::decode_bytes(&payload[1..])
+        .map_err(|_| NetworkError::InvalidValidatorTransitionProof)?;
+    Ok(NetworkMessage::ValidatorSetTransitionProof { proof })
 }
 
 fn decode_validator_transition_submit(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
@@ -969,54 +1061,16 @@ fn map_checkpoint_codec_error(error: CheckpointProofCodecError) -> NetworkError 
 }
 
 fn decode_public_currency_summary(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
-    require_message_length(7, payload, 65)?;
-
-    let next_currency_address = u64::from_be_bytes(payload[1..9].try_into().map_err(|_| {
+    let expected = 1 + PUBLIC_CURRENCY_SUMMARY_ENCODED_SIZE;
+    require_message_length(7, payload, expected)?;
+    let summary = decode_public_currency_summary_bytes(&payload[1..]).map_err(|_| {
         NetworkError::InvalidMessageLength {
             message_type: 7,
-            expected: 65,
+            expected,
             actual: payload.len(),
         }
-    })?);
-    let current_supply = u64::from_be_bytes(payload[9..17].try_into().map_err(|_| {
-        NetworkError::InvalidMessageLength {
-            message_type: 7,
-            expected: 65,
-            actual: payload.len(),
-        }
-    })?);
-    let reserve_count = u64::from_be_bytes(payload[17..25].try_into().map_err(|_| {
-        NetworkError::InvalidMessageLength {
-            message_type: 7,
-            expected: 65,
-            actual: payload.len(),
-        }
-    })?);
-    let occupied_count = u64::from_be_bytes(payload[25..33].try_into().map_err(|_| {
-        NetworkError::InvalidMessageLength {
-            message_type: 7,
-            expected: 65,
-            actual: payload.len(),
-        }
-    })?);
-    let state_digest =
-        payload[33..65]
-            .try_into()
-            .map_err(|_| NetworkError::InvalidMessageLength {
-                message_type: 7,
-                expected: 65,
-                actual: payload.len(),
-            })?;
-
-    Ok(NetworkMessage::PublicCurrencySummary {
-        summary: PublicCurrencySummary {
-            next_currency_address,
-            current_supply,
-            reserve_count,
-            occupied_count,
-            state_digest,
-        },
-    })
+    })?;
+    Ok(NetworkMessage::PublicCurrencySummary { summary })
 }
 
 fn decode_hello(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
@@ -1096,7 +1150,7 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
 
     let base_len = 1_usize
         .checked_add(2)
-        .and_then(|len| len.checked_add(count * PUBLIC_CURRENCY_ENCODED_SIZE))
+        .and_then(|len| len.checked_add(count * PUBLIC_CURRENCY_STATE_ENCODED_SIZE))
         .and_then(|len| len.checked_add(1))
         .ok_or(NetworkError::FrameTooLarge {
             announced: payload.len(),
@@ -1115,31 +1169,21 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
     let mut offset = 3;
 
     for _ in 0..count {
-        let address = CurrencyAddress::new(u64::from_be_bytes(
-            payload[offset..offset + 8].try_into().map_err(|_| {
-                NetworkError::InvalidMessageLength {
+        let end = offset + PUBLIC_CURRENCY_STATE_ENCODED_SIZE;
+        let state =
+            decode_public_currency_state(&payload[offset..end]).map_err(|error| match error {
+                PublicStateCodecError::Boolean(value) => NetworkError::InvalidBoolean(value),
+                PublicStateCodecError::CurrencyRole(value) => {
+                    NetworkError::InvalidCurrencyRole(value)
+                }
+                PublicStateCodecError::Length => NetworkError::InvalidMessageLength {
                     message_type: 5,
                     expected: base_len,
                     actual: payload.len(),
-                }
-            })?,
-        ));
-        offset += 8;
-
-        let occupied = decode_bool(payload[offset])?;
-        offset += 1;
-        let role = match payload[offset] {
-            1 => CurrencyRole::Circulation,
-            2 => CurrencyRole::Reserve,
-            other => return Err(NetworkError::InvalidCurrencyRole(other)),
-        };
-        offset += 1;
-
-        states.push(PublicCurrencyState {
-            address,
-            occupied,
-            role,
-        });
+                },
+            })?;
+        states.push(state);
+        offset = end;
     }
 
     let cursor_flag = payload[offset];
@@ -1179,14 +1223,6 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
     }
 
     Ok(NetworkMessage::PublicCurrencies { states, next_start })
-}
-
-fn decode_bool(value: u8) -> Result<bool, NetworkError> {
-    match value {
-        0 => Ok(false),
-        1 => Ok(true),
-        other => Err(NetworkError::InvalidBoolean(other)),
-    }
 }
 
 fn require_message_length(

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
@@ -226,6 +226,35 @@ impl PreparedTask {
             ),
             votes.clone(),
         )))
+    }
+
+    pub(crate) fn public_currency_change_addresses(&self) -> BTreeSet<CurrencyAddress> {
+        let mut addresses = BTreeSet::new();
+        for operation in &self.operations {
+            match operation {
+                PreparedOperation::Issue {
+                    addresses: issued, ..
+                } => addresses.extend(issued.iter().copied()),
+                PreparedOperation::Transfer { currencies, .. }
+                | PreparedOperation::Destroy { currencies } => {
+                    addresses.extend(currencies.iter().copied());
+                }
+                PreparedOperation::LeakRepair {
+                    leaked,
+                    reserve,
+                    replacement_reserve,
+                    ..
+                } => {
+                    addresses.extend(leaked.iter().copied());
+                    addresses.extend(reserve.iter().copied());
+                    addresses.extend(replacement_reserve.iter().copied());
+                }
+                PreparedOperation::RegisterPaymentAddress { .. }
+                | PreparedOperation::RetirePaymentAddress { .. }
+                | PreparedOperation::FinalizePaymentAddressRetirement { .. } => {}
+            }
+        }
+        addresses
     }
 
     pub(crate) fn finalize_with_votes(&mut self, votes: Vec<ValidatorVote>) {

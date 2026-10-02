@@ -1,6 +1,7 @@
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCurrencyCheckpointProof,
-    PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorRegistry, ValidatorSet,
+    PublicCurrencyDelta, PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorRegistry,
+    ValidatorSet, ValidatorSetTransitionProof,
 };
 
 use super::quic::{QuicPeer, QuicRequestStream};
@@ -9,13 +10,22 @@ const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct RuntimeNetworkSnapshot {
     pub(crate) state: SecondState,
-    pub(crate) checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub(crate) validator_set: ValidatorSet,
     pub(crate) validator_registry: ValidatorRegistry,
 }
 
+pub(crate) struct RuntimePublicSnapshot {
+    pub(crate) view: PublicCurrencyView,
+    pub(crate) checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+    pub(crate) latest_delta: Option<PublicCurrencyDelta>,
+}
+
 type RuntimeNetworkSnapshotLoader<'a> =
     &'a (dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync);
+type RuntimePublicSnapshotLoader<'a> =
+    &'a (dyn Fn() -> Result<RuntimePublicSnapshot, NetworkError> + Send + Sync);
+type ValidatorTransitionProofLoader<'a> =
+    &'a (dyn Fn(u64) -> Result<Option<ValidatorSetTransitionProof>, NetworkError> + Send + Sync);
 
 #[derive(Clone, Copy)]
 pub(crate) struct PublicNetworkServices<'a> {
@@ -23,7 +33,9 @@ pub(crate) struct PublicNetworkServices<'a> {
     local_node_id: NodeId,
     local_peer_record: Option<&'a PeerRecord>,
     state_recovery_provider: &'a StateRecoveryProviderHandle,
-    runtime_snapshot_loader: RuntimeNetworkSnapshotLoader<'a>,
+    public_snapshot_loader: RuntimePublicSnapshotLoader<'a>,
+    transition_proof_loader: ValidatorTransitionProofLoader<'a>,
+    recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader<'a>>,
 }
 
 impl<'a> PublicNetworkServices<'a> {
@@ -32,14 +44,18 @@ impl<'a> PublicNetworkServices<'a> {
         local_node_id: NodeId,
         local_peer_record: Option<&'a PeerRecord>,
         state_recovery_provider: &'a StateRecoveryProviderHandle,
-        runtime_snapshot_loader: RuntimeNetworkSnapshotLoader<'a>,
+        public_snapshot_loader: RuntimePublicSnapshotLoader<'a>,
+        transition_proof_loader: ValidatorTransitionProofLoader<'a>,
+        recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader<'a>>,
     ) -> Self {
         Self {
             peer_store,
             local_node_id,
             local_peer_record,
             state_recovery_provider,
-            runtime_snapshot_loader,
+            public_snapshot_loader,
+            transition_proof_loader,
+            recovery_snapshot_loader,
         }
     }
 }
@@ -130,6 +146,54 @@ pub async fn client_public_currency_checkpoint_proof(
     peer: &QuicPeer,
 ) -> Result<Option<PublicCurrencyCheckpointProof>, NetworkError> {
     request_public_currency_checkpoint_proof(peer).await
+}
+
+pub async fn client_public_currency_delta(
+    peer: &QuicPeer,
+    from_epoch: u64,
+    from_state_digest: [u8; 32],
+) -> Result<Option<PublicCurrencyDelta>, NetworkError> {
+    match peer
+        .exchange(&NetworkMessage::GetPublicCurrencyDelta {
+            from_epoch,
+            from_state_digest,
+        })
+        .await?
+    {
+        NetworkMessage::PublicCurrencyDelta { delta }
+            if delta.from_epoch() == from_epoch
+                && delta.from_state_digest() == from_state_digest =>
+        {
+            Ok(Some(delta))
+        }
+        NetworkMessage::NoPublicCurrencyDelta => Ok(None),
+        NetworkMessage::PublicCurrencyDelta { .. } => Err(NetworkError::InvalidPublicCurrencyDelta),
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
+pub async fn client_validator_set_transition_proof(
+    peer: &QuicPeer,
+    current_validator_set_version: u64,
+) -> Result<Option<ValidatorSetTransitionProof>, NetworkError> {
+    match peer
+        .exchange(&NetworkMessage::GetValidatorSetTransitionProof {
+            current_validator_set_version,
+        })
+        .await?
+    {
+        NetworkMessage::ValidatorSetTransitionProof { proof }
+            if proof.source().next_validator_set().version()
+                == current_validator_set_version.saturating_add(1) =>
+        {
+            Ok(Some(proof))
+        }
+        NetworkMessage::NoValidatorSetTransitionProof => Ok(None),
+        NetworkMessage::ValidatorSetTransitionProof { .. } => {
+            Err(NetworkError::InvalidValidatorTransitionProof)
+        }
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
 }
 
 pub async fn client_sync_certified_public_currency_view(
@@ -262,12 +326,15 @@ pub async fn serve_public_currency_connection(
     state: &SecondState,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
 ) -> Result<NodeId, NetworkError> {
-    if checkpoint_proof
-        .is_some_and(|proof| proof.checkpoint().summary() != &state.public_currency_summary())
-    {
+    let view = PublicCurrencyView::new(
+        state.public_currency_summary(),
+        state.public_currency_states(),
+    )
+    .map_err(NetworkError::PublicState)?;
+    if checkpoint_proof.is_some_and(|proof| proof.checkpoint().summary() != &view.summary) {
         return Err(NetworkError::CheckpointDoesNotMatchServedState);
     }
-    serve_public_connection(peer, Some((state, checkpoint_proof)), None, None).await
+    serve_public_connection(peer, Some((&view, checkpoint_proof)), None, None).await
 }
 
 pub(crate) async fn serve_public_network_connection(
@@ -287,7 +354,7 @@ pub(crate) async fn serve_public_network_connection_from_request(
 
 async fn serve_public_connection(
     peer: &QuicPeer,
-    static_public_state: Option<(&SecondState, Option<&PublicCurrencyCheckpointProof>)>,
+    static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
     services: Option<PublicNetworkServices<'_>>,
     mut first_request: Option<QuicRequestStream>,
 ) -> Result<NodeId, NetworkError> {
@@ -303,23 +370,32 @@ async fn serve_public_connection(
         };
 
         let recovery_response = services.as_ref().and_then(|services| {
-            state_recovery_response(
-                peer,
-                request.message(),
-                services.state_recovery_provider,
-                || {
-                    (services.runtime_snapshot_loader)().map(|snapshot| {
-                        (
-                            snapshot.state,
-                            snapshot.validator_set,
-                            snapshot.validator_registry,
-                        )
-                    })
-                },
-            )
+            services.recovery_snapshot_loader.and_then(|loader| {
+                state_recovery_response(
+                    peer,
+                    request.message(),
+                    services.state_recovery_provider,
+                    || {
+                        loader().map(|snapshot| {
+                            (
+                                snapshot.state,
+                                snapshot.validator_set,
+                                snapshot.validator_registry,
+                            )
+                        })
+                    },
+                )
+            })
         });
         let response = match recovery_response {
             Some(response) => response?,
+            None if matches!(
+                request.message(),
+                NetworkMessage::GetValidatorSetTransitionProof { .. }
+            ) =>
+            {
+                transition_proof_response(request.message(), services.as_ref())?
+            }
             None if is_public_currency_request(request.message()) => {
                 public_currency_response(request.message(), static_public_state, services.as_ref())?
             }
@@ -357,54 +433,87 @@ fn is_public_currency_request(message: &NetworkMessage) -> bool {
         NetworkMessage::GetPublicCurrencies { .. }
             | NetworkMessage::GetPublicCurrencySummary
             | NetworkMessage::GetPublicCurrencyCheckpoint
+            | NetworkMessage::GetPublicCurrencyDelta { .. }
     )
 }
 
 fn public_currency_response(
     message: &NetworkMessage,
-    static_public_state: Option<(&SecondState, Option<&PublicCurrencyCheckpointProof>)>,
+    static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
     services: Option<&PublicNetworkServices<'_>>,
 ) -> Result<NetworkMessage, NetworkError> {
     if let Some(services) = services {
         let snapshot = load_runtime_public_snapshot(services)?;
         return public_currency_response_for_snapshot(
             message,
-            &snapshot.state,
+            &snapshot.view,
             snapshot.checkpoint_proof.as_ref(),
+            snapshot.latest_delta.as_ref(),
         );
     }
 
-    let (state, checkpoint_proof) = static_public_state.ok_or(NetworkError::UnexpectedMessage)?;
-    public_currency_response_for_snapshot(message, state, checkpoint_proof)
+    let (view, checkpoint_proof) = static_public_state.ok_or(NetworkError::UnexpectedMessage)?;
+    public_currency_response_for_snapshot(message, view, checkpoint_proof, None)
 }
 
 fn public_currency_response_for_snapshot(
     message: &NetworkMessage,
-    state: &SecondState,
+    view: &PublicCurrencyView,
     checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
+    latest_delta: Option<&PublicCurrencyDelta>,
 ) -> Result<NetworkMessage, NetworkError> {
     match message {
         NetworkMessage::GetPublicCurrencies { start, limit } => {
-            public_currency_page_response(state, *start, *limit)
+            public_currency_page_response(view, *start, *limit)
         }
         NetworkMessage::GetPublicCurrencySummary => Ok(NetworkMessage::PublicCurrencySummary {
-            summary: state.public_currency_summary(),
+            summary: view.summary.clone(),
         }),
         NetworkMessage::GetPublicCurrencyCheckpoint => Ok(checkpoint_proof
             .cloned()
             .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
             .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint)),
+        NetworkMessage::GetPublicCurrencyDelta {
+            from_epoch,
+            from_state_digest,
+        } => Ok(latest_delta
+            .filter(|delta| {
+                delta.from_epoch() == *from_epoch && delta.from_state_digest() == *from_state_digest
+            })
+            .cloned()
+            .map(|delta| NetworkMessage::PublicCurrencyDelta { delta })
+            .unwrap_or(NetworkMessage::NoPublicCurrencyDelta)),
         _ => Err(NetworkError::UnexpectedMessage),
     }
 }
 
+fn transition_proof_response(
+    message: &NetworkMessage,
+    services: Option<&PublicNetworkServices<'_>>,
+) -> Result<NetworkMessage, NetworkError> {
+    let services = services.ok_or(NetworkError::UnexpectedMessage)?;
+    let NetworkMessage::GetValidatorSetTransitionProof {
+        current_validator_set_version,
+    } = message
+    else {
+        return Err(NetworkError::UnexpectedMessage);
+    };
+    Ok(
+        (services.transition_proof_loader)(*current_validator_set_version)?
+            .map(|proof| NetworkMessage::ValidatorSetTransitionProof { proof })
+            .unwrap_or(NetworkMessage::NoValidatorSetTransitionProof),
+    )
+}
+
 fn load_runtime_public_snapshot(
     services: &PublicNetworkServices<'_>,
-) -> Result<RuntimeNetworkSnapshot, NetworkError> {
-    let snapshot = (services.runtime_snapshot_loader)()?;
-    if snapshot.checkpoint_proof.as_ref().is_some_and(|proof| {
-        proof.checkpoint().summary() != &snapshot.state.public_currency_summary()
-    }) {
+) -> Result<RuntimePublicSnapshot, NetworkError> {
+    let snapshot = (services.public_snapshot_loader)()?;
+    if snapshot
+        .checkpoint_proof
+        .as_ref()
+        .is_some_and(|proof| proof.checkpoint().summary() != &snapshot.view.summary)
+    {
         return Err(NetworkError::CheckpointDoesNotMatchServedState);
     }
     Ok(snapshot)
@@ -520,13 +629,16 @@ fn validate_synced_page(
 }
 
 fn public_currency_page_response(
-    state: &SecondState,
+    view: &PublicCurrencyView,
     start: CurrencyAddress,
     limit: u16,
 ) -> Result<NetworkMessage, NetworkError> {
-    let page = state.public_currency_page(start, limit)?;
-    Ok(NetworkMessage::PublicCurrencies {
-        states: page.states,
-        next_start: page.next_start,
-    })
+    validate_public_currency_limit(limit)?;
+    let start_index = view.states.partition_point(|state| state.address < start);
+    let end_index = start_index
+        .saturating_add(usize::from(limit))
+        .min(view.states.len());
+    let states = view.states[start_index..end_index].to_vec();
+    let next_start = view.states.get(end_index).map(|state| state.address);
+    Ok(NetworkMessage::PublicCurrencies { states, next_start })
 }

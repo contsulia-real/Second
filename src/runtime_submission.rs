@@ -110,9 +110,10 @@ impl NodeRuntime {
     }
 
     pub(crate) fn task_submission_context(&self) -> Option<LegalTaskSubmissionContext> {
+        let store = self.full_store().ok()?.clone();
         self.validator_bft
             .clone()
-            .map(|runtime| LegalTaskSubmissionContext::new(self.store.clone(), runtime))
+            .map(|runtime| LegalTaskSubmissionContext::new(store, runtime))
     }
 }
 

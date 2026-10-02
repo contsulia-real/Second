@@ -45,6 +45,22 @@ pub(crate) fn load(
     }
 }
 
+pub(crate) fn ensure_validator_absent(snapshot_base: &str) -> Result<(), String> {
+    let base = Path::new(snapshot_base);
+    let config_path = crate::validator_config::config_path(base);
+    let keyring_path = crate::validator_keyring::keyring_path(base);
+    let config_present = sidecar_exists(&config_path, "validator config")?;
+    let keyring_present = sidecar_exists(&keyring_path, "validator keyring")?;
+    if config_present || keyring_present {
+        return Err(format!(
+            "public-only node cannot enable validator capability: remove {} and {}",
+            config_path.display(),
+            keyring_path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn sidecar_exists(path: &Path, label: &str) -> Result<bool, String> {
     path.try_exists()
         .map_err(|error| format!("failed to inspect {label} {}: {error}", path.display()))

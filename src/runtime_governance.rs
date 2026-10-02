@@ -94,10 +94,10 @@ impl GovernanceContext {
 
 impl NodeRuntime {
     pub(crate) fn governance_context(&self) -> Option<GovernanceContext> {
-        self.validator_bft.clone().map(|runtime| GovernanceContext {
-            store: self.store.clone(),
-            runtime,
-        })
+        let store = self.full_store().ok()?.clone();
+        self.validator_bft
+            .clone()
+            .map(|runtime| GovernanceContext { store, runtime })
     }
 
     pub(crate) fn process_governance_bft_sources(

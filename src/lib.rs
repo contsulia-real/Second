@@ -16,11 +16,14 @@ mod prepared;
 mod prepared_plan;
 mod public_checkpoint;
 mod public_state;
+mod public_state_codec;
+mod public_sync;
 mod runtime;
 mod runtime_bft;
 mod runtime_bft_consensus;
 mod runtime_consensus_target;
 mod runtime_governance;
+mod runtime_public_sync;
 mod runtime_submission;
 mod runtime_tasks;
 mod state;
@@ -65,21 +68,26 @@ pub use network::{
     RemotePublicCurrencyView, RemoteRecoveryCheckpointSubmission, RemoteStateRecoveryPayload,
     RemoteValidatorTransitionSubmission, SECOND_QUIC_SERVER_NAME, ValidatorBftPeer,
     authenticate_validator_bft_peer, client_fetch_state_recovery, client_peer_records, client_ping,
-    client_public_currency_checkpoint_proof, client_public_currency_page,
-    client_public_currency_summary, client_submit_legal_task, client_submit_recovery_checkpoint,
-    client_submit_validator_transition, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view, decode_bft_network_message, decode_network_message,
+    client_public_currency_checkpoint_proof, client_public_currency_delta,
+    client_public_currency_page, client_public_currency_summary, client_submit_legal_task,
+    client_submit_recovery_checkpoint, client_submit_validator_transition,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
+    client_validator_set_transition_proof, decode_bft_network_message, decode_network_message,
     encode_bft_network_message, encode_network_message, serve_ping_session,
     serve_public_currency_connection, serve_validator_bft_connection, transport_identity_path,
 };
 pub use payment::PaymentAddressStatus;
-pub use persistence::{PersistedNodeState, StateStore};
+pub use persistence::{PersistedNodeState, PersistedPublicNodeState, PublicStateStore, StateStore};
 pub use prepared::{PreparationError, PreparationOutcome, PreparedTaskBook};
 pub use public_checkpoint::{
     CertifiedPublicCurrencyCheckpoint, PublicCheckpointError, PublicCurrencyCheckpoint,
     PublicCurrencyCheckpointProof,
 };
 pub use public_state::{PublicCurrencySummary, PublicCurrencyView, PublicStateError};
+pub use public_sync::{
+    MAX_PUBLIC_CURRENCY_DELTA_CHANGES, MAX_PUBLIC_CURRENCY_DELTA_SIZE, PublicCurrencyDelta,
+    PublicCurrencyDeltaChange, PublicCurrencyDeltaError,
+};
 pub use runtime::{
     DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeCapabilities, NodeRuntimeError,
 };
@@ -102,6 +110,7 @@ pub use validator_rotation::{ValidatorConsensusKeyRotationRequest, ValidatorRota
 pub use validator_signer::{ValidatorSigner, ValidatorSigningError};
 pub use validator_transition::{CertifiedValidatorSetTransition, ValidatorSetTransition};
 pub use validator_transition_source::{
-    MAX_VALIDATOR_TRANSITION_SOURCE_SIZE, ValidatorSetTransitionSource,
-    ValidatorTransitionSourceCodecError, ValidatorTransitionSourceError,
+    MAX_VALIDATOR_TRANSITION_PROOF_SIZE, MAX_VALIDATOR_TRANSITION_SOURCE_SIZE,
+    ValidatorSetTransitionProof, ValidatorSetTransitionSource, ValidatorTransitionSourceCodecError,
+    ValidatorTransitionSourceError,
 };

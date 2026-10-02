@@ -251,8 +251,14 @@ impl PreparedTaskBook {
 
         match outcome {
             ExecutionOutcome::Succeeded => {
-                self.store
-                    .commit_prepared_state(state, &candidate, &self.tasks, &remaining)?;
+                let public_changes = prepared.public_currency_change_addresses();
+                self.store.commit_prepared_state(
+                    state,
+                    &candidate,
+                    &self.tasks,
+                    &remaining,
+                    &public_changes,
+                )?;
                 *state = candidate;
             }
             ExecutionOutcome::AlreadySucceeded => {

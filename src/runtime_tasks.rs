@@ -10,9 +10,10 @@ use crate::{
 
 impl NodeRuntime {
     pub(crate) fn start_durable_prepared_consensus(&self) -> Result<(), NodeRuntimeError> {
-        PreparedTaskBook::recover_finalized_from_store(&self.store)?;
+        let store = self.full_store()?;
+        PreparedTaskBook::recover_finalized_from_store(store)?;
 
-        for task_id in self.store.load_prepared_tasks()?.into_keys() {
+        for task_id in store.load_prepared_tasks()?.into_keys() {
             self.start_prepared_task_consensus(task_id)?;
         }
         Ok(())
@@ -166,7 +167,10 @@ impl NodeRuntime {
         let ConsensusScope::PreparedTask(task_id) = scope else {
             return Ok(false);
         };
-        match self.store.prepared_bft_proposal_subject(task_id.clone()) {
+        match self
+            .full_store()?
+            .prepared_bft_proposal_subject(task_id.clone())
+        {
             Ok(subject) => Ok(subject.validator_set_version() == validator_set_version
                 && subject.digest() == expected_plan_digest),
             Err(PersistenceError::StalePreparedTasks) => Ok(false),
@@ -191,7 +195,7 @@ impl NodeRuntime {
         validator_set_version: u64,
     ) -> Result<Option<ValidatorSet>, NodeRuntimeError> {
         let persisted = self
-            .store
+            .full_store()?
             .load()?
             .ok_or(NodeRuntimeError::SnapshotMissing)?;
         if persisted.validator_set.version() == validator_set_version {
@@ -241,14 +245,16 @@ impl NodeRuntime {
             })?
             .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
 
-        let persisted = self
-            .store
+        let store = self
+            .full_store()
+            .map_err(|_| BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
+        let persisted = store
             .load()
             .map_err(BftConsensusRuntimeError::Persistence)?
             .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
         let mut state = persisted.state;
-        let mut prepared = PreparedTaskBook::new(self.store.clone())
-            .map_err(BftConsensusRuntimeError::Preparation)?;
+        let mut prepared =
+            PreparedTaskBook::new(store.clone()).map_err(BftConsensusRuntimeError::Preparation)?;
 
         match prepared.prepare_expected_plan(
             &mut state,
@@ -265,8 +271,7 @@ impl NodeRuntime {
                 return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
             }
             Err(PreparationError::AlreadyPrepared(_)) => {
-                let subject = self
-                    .store
+                let subject = store
                     .prepared_bft_proposal_subject(task_id.clone())
                     .map_err(BftConsensusRuntimeError::Persistence)?;
                 if subject.validator_set_version() != validator_set_version

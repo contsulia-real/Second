@@ -9,7 +9,7 @@ use support::FinalizedExecute as _;
 
 use second::{
     CURRENT_PROTOCOL_VERSION, Operation, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof,
-    SecondState, StateStore, ValidatorCredential, ValidatorId, ValidatorSet,
+    PublicStateStore, SecondState, StateStore, ValidatorCredential, ValidatorId, ValidatorSet,
 };
 use support::{key, signed_vote, temp_base, verified_task};
 
@@ -67,6 +67,107 @@ fn parse_listening(line: &str) -> (String, String, String) {
         .to_owned();
     assert_eq!(fields.next(), None);
     (address, node_id, certificate)
+}
+
+fn parse_public_listening(line: &str) -> (String, String, String) {
+    let mut fields = line.split_whitespace();
+    assert_eq!(fields.next(), Some("LISTENING"));
+    let address = fields
+        .next()
+        .expect("missing QUIC listening address")
+        .to_owned();
+    assert_eq!(fields.next(), Some("NODE"));
+    let node_id = fields
+        .next()
+        .expect("missing authenticated NodeId")
+        .to_owned();
+    assert_eq!(fields.next(), Some("CERT"));
+    let certificate = fields
+        .next()
+        .expect("missing QUIC transport certificate")
+        .to_owned();
+    assert_eq!(fields.next(), Some("PUBLIC"));
+    assert_eq!(fields.next(), None);
+    (address, node_id, certificate)
+}
+
+#[test]
+fn real_cli_public_init_starts_public_node_and_serves_certified_state() {
+    let trust_base = temp_base("public-init-trust");
+    let public_base = temp_base("public-init-node");
+    let trust_store = StateStore::new(&trust_base);
+
+    let state = SecondState::genesis([], 50).with_reserve(4).unwrap();
+    let set = validators();
+    let proof = checkpoint_proof(&state, &set, 91);
+    trust_store.initialize(&state, &set).unwrap();
+    trust_store.attach_checkpoint_proof(Some(&proof)).unwrap();
+
+    let executable = env!("CARGO_BIN_EXE_second");
+    let initialized = Command::new(executable)
+        .args([
+            "public-init",
+            public_base.to_str().unwrap(),
+            trust_base.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "public-init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let initialized_stdout = String::from_utf8(initialized.stdout).unwrap();
+    assert!(initialized_stdout.contains("PUBLIC-INITIALIZED"));
+    assert!(initialized_stdout.contains("validator_set=7"));
+    assert!(initialized_stdout.contains("checkpoint_epoch=91"));
+
+    let mut server = Command::new(executable)
+        .args(["node", "127.0.0.1:0", public_base.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = server.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut listening = String::new();
+    reader.read_line(&mut listening).unwrap();
+    let (address, public_node_id, certificate) = parse_public_listening(&listening);
+
+    let client = Command::new(executable)
+        .args([
+            "sync-public-certified",
+            address.as_str(),
+            trust_base.to_str().unwrap(),
+            certificate.as_str(),
+        ])
+        .output()
+        .unwrap();
+    if !client.status.success() {
+        let _ = server.kill();
+        let _ = server.wait();
+        panic!(
+            "sync-public-certified against public node failed: {}",
+            String::from_utf8_lossy(&client.stderr)
+        );
+    }
+
+    let client_stdout = String::from_utf8(client.stdout).unwrap();
+    assert!(client_stdout.contains(&format!("peer={public_node_id}")));
+    assert!(client_stdout.contains("epoch=91"));
+    assert!(client_stdout.contains("validator_set=7"));
+    assert!(client_stdout.contains("count=4"));
+    assert!(client_stdout.contains("reserve=4"));
+    assert!(client_stdout.contains("next_currency=54"));
+
+    server
+        .kill()
+        .expect("public node exited before test shutdown");
+    server.wait().unwrap();
+
+    PublicStateStore::new(&public_base).remove_files().unwrap();
+    support::remove_transport_identity(&public_base);
+    trust_store.remove_files().unwrap();
 }
 
 #[test]

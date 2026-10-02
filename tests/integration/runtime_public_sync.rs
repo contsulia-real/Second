@@ -4,9 +4,10 @@ use std::sync::Arc;
 use crate::support;
 use second::{
     CURRENT_PROTOCOL_VERSION, CertifiedPublicCurrencyCheckpoint, NodeRuntime, Operation,
-    PreparedTaskBook, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, SecondState,
-    StateStore, ValidatorId, ValidatorSet, ValidatorVote, client_public_currency_checkpoint_proof,
-    client_public_currency_page, client_public_currency_summary,
+    PreparedTaskBook, PublicCurrencyCheckpoint, PublicCurrencyCheckpointProof, PublicStateStore,
+    SecondState, StateStore, ValidatorId, ValidatorSet, ValidatorVote,
+    client_public_currency_checkpoint_proof, client_public_currency_page,
+    client_public_currency_summary,
 };
 use support::{certificate_from_keys, key, signed_vote, validator_set, verified_task};
 
@@ -292,4 +293,172 @@ async fn runtime_public_connection_reads_current_durable_state_and_checkpoint_wi
     let _ = runtime_task.await;
     drop(runtime);
     support::cleanup_node_runtime(store, base);
+}
+
+#[tokio::test]
+async fn public_only_runtime_incrementally_persists_certified_state_from_full_peer() {
+    let validators = validator_set(1, 1..=4);
+    let account = support::account(71);
+    let mut state = SecondState::genesis([account], 1);
+
+    let server_base = support::temp_base("runtime-public-only-server");
+    let server_store = StateStore::new(&server_base);
+    server_store.initialize(&state, &validators).unwrap();
+    let initial_checkpoint = certified_checkpoint(&state, &validators, 1);
+    server_store
+        .attach_certified_checkpoint(&initial_checkpoint)
+        .unwrap();
+
+    let trusted = server_store.load().unwrap().unwrap();
+    let public_base = support::temp_base("runtime-public-only-client");
+    let public_store = PublicStateStore::new(&public_base);
+    public_store
+        .initialize(validators.clone(), trusted.validator_registry)
+        .unwrap();
+    public_store
+        .install_certified_view(
+            second::PublicCurrencyView::new(
+                state.public_currency_summary(),
+                state.public_currency_states(),
+            )
+            .unwrap(),
+            &initial_checkpoint,
+        )
+        .unwrap();
+
+    let task = verified_task(171, vec![Operation::Issue { account, count: 3 }]);
+    let mut prepared = PreparedTaskBook::new(server_store.clone()).unwrap();
+    prepared.prepare(&mut state, &task, 2, &validators).unwrap();
+    let statement = prepared
+        .prepared_finality_statement(task.task_id())
+        .unwrap();
+    let certificate = certificate_from_keys(
+        statement,
+        &validators,
+        (1_u64..=3).map(|id| (ValidatorId::new(id), key((id * 3 + 1) as u8))),
+    );
+    prepared
+        .commit(&mut state, task.task_id(), &certificate)
+        .unwrap();
+    let updated_checkpoint = certified_checkpoint(&state, &validators, 2);
+    server_store
+        .attach_certified_checkpoint(&updated_checkpoint)
+        .unwrap();
+
+    let server = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &server_store)
+            .unwrap(),
+    );
+    let public = Arc::new(
+        NodeRuntime::load_public_and_bind(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            &public_store,
+        )
+        .unwrap(),
+    );
+    let server_task = support::spawn_node_runtime(&server);
+    let peer = public.dial(&support::peer_record(&server)).await.unwrap();
+
+    assert!(public.sync_public_state_once().await.unwrap());
+
+    let persisted = public_store.load().unwrap().unwrap();
+    assert_eq!(
+        persisted
+            .checkpoint_proof
+            .as_ref()
+            .unwrap()
+            .checkpoint()
+            .epoch(),
+        2
+    );
+    assert_eq!(
+        persisted.view.unwrap(),
+        second::PublicCurrencyView::new(
+            state.public_currency_summary(),
+            state.public_currency_states(),
+        )
+        .unwrap()
+    );
+
+    peer.close();
+    server_task.abort();
+    let _ = server_task.await;
+    drop(public);
+    drop(server);
+
+    support::cleanup_public_node_runtime(public_store, public_base);
+    support::cleanup_node_runtime(server_store, server_base);
+}
+
+#[tokio::test]
+async fn public_only_runtime_advances_validator_trust_before_syncing_new_set_state() {
+    let initial = validator_set(1, 1..=4);
+    let server_base = support::temp_base("runtime-public-transition-server");
+    let server_store = StateStore::new(&server_base);
+    let state = SecondState::genesis([], 400).with_reserve(2).unwrap();
+    server_store.initialize(&state, &initial).unwrap();
+
+    let initial_persisted = server_store.load().unwrap().unwrap();
+    let public_base = support::temp_base("runtime-public-transition-client");
+    let public_store = PublicStateStore::new(&public_base);
+    public_store
+        .initialize(initial.clone(), initial_persisted.validator_registry)
+        .unwrap();
+
+    let transition = support::certified_add_validator_transition(&initial, 2, 1..=4, 5, 1..=3);
+    server_store
+        .activate_validator_set_transition(&transition)
+        .unwrap();
+    let next = server_store.load().unwrap().unwrap().validator_set;
+    assert_eq!(next.version(), 2);
+
+    let checkpoint = certified_checkpoint(&state, &next, 8);
+    server_store
+        .attach_certified_checkpoint(&checkpoint)
+        .unwrap();
+
+    let server = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &server_store)
+            .unwrap(),
+    );
+    let public = Arc::new(
+        NodeRuntime::load_public_and_bind(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            &public_store,
+        )
+        .unwrap(),
+    );
+    let server_task = support::spawn_node_runtime(&server);
+    let peer = public.dial(&support::peer_record(&server)).await.unwrap();
+
+    assert!(public.sync_public_state_once().await.unwrap());
+
+    let persisted = public_store.load().unwrap().unwrap();
+    assert_eq!(persisted.validator_set, next);
+    assert_eq!(
+        persisted
+            .checkpoint_proof
+            .as_ref()
+            .unwrap()
+            .checkpoint()
+            .epoch(),
+        8
+    );
+    assert_eq!(
+        persisted.view.unwrap(),
+        second::PublicCurrencyView::new(
+            state.public_currency_summary(),
+            state.public_currency_states(),
+        )
+        .unwrap()
+    );
+
+    peer.close();
+    server_task.abort();
+    let _ = server_task.await;
+    drop(public);
+    drop(server);
+
+    support::cleanup_public_node_runtime(public_store, public_base);
+    support::cleanup_node_runtime(server_store, server_base);
 }

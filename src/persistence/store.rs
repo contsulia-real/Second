@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -7,10 +7,11 @@ use crate::ConsensusScope;
 use crate::prepared_plan::{PreparedTask, PreparedTaskPhase};
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
-    CertifiedValidatorSetTransition, FinalityCertificate, PersistenceError,
-    PublicCurrencyCheckpointProof, SecondState, StateRecoveryCheckpoint,
-    StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorTransitionError,
+    CertifiedValidatorSetTransition, FinalityCertificate, MAX_PUBLIC_CURRENCY_DELTA_CHANGES,
+    PersistenceError, PublicCurrencyCheckpointProof, PublicCurrencyDelta,
+    PublicCurrencyDeltaChange, SecondState, StateRecoveryCheckpoint, StateRecoveryCheckpointProof,
+    StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorSetTransitionProof, ValidatorTransitionError,
 };
 
 use super::bft_store::{
@@ -73,6 +74,8 @@ impl StateStore {
         let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
+        let pending_public_changes = BTreeSet::new();
+        let validator_transition_proofs = BTreeMap::new();
 
         self.write_next_unlocked(
             None,
@@ -81,6 +84,10 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                public_checkpoint_baseline: None,
+                latest_public_delta: None,
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
@@ -114,6 +121,8 @@ impl StateStore {
         let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
+        let pending_public_changes = BTreeSet::new();
+        let validator_transition_proofs = BTreeMap::new();
 
         self.write_next_unlocked(
             None,
@@ -122,6 +131,10 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                public_checkpoint_baseline: None,
+                latest_public_delta: None,
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
@@ -158,6 +171,8 @@ impl StateStore {
                 certified: true,
             },
         )]);
+        let pending_public_changes = BTreeSet::new();
+        let validator_transition_proofs = BTreeMap::new();
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
         let bft_local_states = BTreeMap::new();
@@ -169,6 +184,10 @@ impl StateStore {
                 validator_set: payload.validator_set(),
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                public_checkpoint_baseline: None,
+                latest_public_delta: None,
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
@@ -280,6 +299,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -348,6 +371,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -408,6 +435,21 @@ impl StateStore {
             next_validator_set.version(),
         );
 
+        let mut validator_transition_proofs = latest.validator_transition_proofs.clone();
+        let transition_version = certified_transition
+            .transition()
+            .current_validator_set_version();
+        if validator_transition_proofs
+            .insert(
+                transition_version,
+                ValidatorSetTransitionProof::from_certified(certified_transition),
+            )
+            .is_some()
+        {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        let pending_public_changes = BTreeSet::new();
+
         let pending_validator_safety_recovery = if latest.validator_safety_ready {
             None
         } else {
@@ -430,6 +472,10 @@ impl StateStore {
                 validator_set: &next_validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                public_checkpoint_baseline: None,
+                latest_public_delta: None,
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -486,6 +532,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof,
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -518,6 +568,8 @@ impl StateStore {
         )?;
         let proof = certified_checkpoint.to_unverified_proof();
         let checkpoint_floor_epoch = checkpoint_floor_for_write(Some(&latest), Some(&proof))?;
+        let latest_public_delta = public_delta_for_checkpoint(&latest, &proof)?;
+        let pending_public_changes = BTreeSet::new();
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -526,6 +578,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: Some(&proof),
+                public_checkpoint_baseline: Some(&proof),
+                latest_public_delta: latest_public_delta.as_ref(),
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -566,6 +622,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -621,6 +681,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
@@ -677,6 +741,20 @@ impl StateStore {
             .as_ref()
             .map(|snapshot| snapshot.bft_local_states.clone())
             .unwrap_or_default();
+        let public_checkpoint_baseline = latest
+            .as_ref()
+            .and_then(|snapshot| snapshot.public_checkpoint_baseline.clone());
+        let latest_public_delta = latest
+            .as_ref()
+            .and_then(|snapshot| snapshot.latest_public_delta.clone());
+        let pending_public_changes = latest
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_public_changes.clone())
+            .unwrap_or_default();
+        let validator_transition_proofs = latest
+            .as_ref()
+            .map(|snapshot| snapshot.validator_transition_proofs.clone())
+            .unwrap_or_default();
 
         self.write_next_unlocked(
             latest.as_ref().map(|snapshot| snapshot.generation),
@@ -685,6 +763,10 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint.as_ref(),
+                public_checkpoint_baseline: public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest_public_delta.as_ref(),
+                pending_public_changes: Some(&pending_public_changes),
+                validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: latest
                     .as_ref()
                     .and_then(|snapshot| snapshot.recovery_checkpoint_proof.as_ref())
@@ -718,6 +800,7 @@ impl StateStore {
         state: &SecondState,
         expected_prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
         prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+        public_changes: &BTreeSet<crate::CurrencyAddress>,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self
@@ -739,6 +822,8 @@ impl StateStore {
             .filter(|proof| checkpoint_matches(proof, state, &latest.validator_set));
         let mut bft_local_states = latest.bft_local_states.clone();
         retain_active_prepared_bft_states(&mut bft_local_states, prepared_tasks);
+        let pending_public_changes =
+            merge_pending_public_changes(latest.pending_public_changes.as_ref(), public_changes);
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -747,6 +832,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint,
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref().filter(
                     |proof| {
                         recovery_checkpoint_matches(
@@ -822,6 +911,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -863,6 +956,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -968,6 +1065,10 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
+                latest_public_delta: latest.latest_public_delta.as_ref(),
+                pending_public_changes: latest.pending_public_changes.as_ref(),
+                validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
@@ -1111,6 +1212,61 @@ fn registry_for_write(
         None => ValidatorRegistry::from_validator_set(validator_set)
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch),
     }
+}
+
+fn merge_pending_public_changes(
+    current: Option<&BTreeSet<crate::CurrencyAddress>>,
+    changes: &BTreeSet<crate::CurrencyAddress>,
+) -> Option<BTreeSet<crate::CurrencyAddress>> {
+    let mut merged = current?.clone();
+    for address in changes {
+        merged.insert(*address);
+        if merged.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES {
+            return None;
+        }
+    }
+    Some(merged)
+}
+
+fn public_delta_for_checkpoint(
+    latest: &PersistedNodeState,
+    proof: &PublicCurrencyCheckpointProof,
+) -> Result<Option<PublicCurrencyDelta>, PersistenceError> {
+    let Some(base) = latest.public_checkpoint_baseline.as_ref() else {
+        return Ok(None);
+    };
+    if base.validator_set_version() != latest.validator_set.version()
+        || proof.validator_set_version() != latest.validator_set.version()
+    {
+        return Ok(None);
+    }
+    let from_epoch = base.checkpoint().epoch();
+    let to_epoch = proof.checkpoint().epoch();
+    if to_epoch <= from_epoch {
+        return Ok(None);
+    }
+    let Some(addresses) = latest.pending_public_changes.as_ref() else {
+        return Ok(None);
+    };
+    if addresses.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES {
+        return Ok(None);
+    }
+    let mut changes = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        match latest.state.public_currency_state(*address) {
+            Some(state) => changes.push(PublicCurrencyDeltaChange::Upsert(state)),
+            None => changes.push(PublicCurrencyDeltaChange::Remove(*address)),
+        }
+    }
+    PublicCurrencyDelta::new(
+        from_epoch,
+        base.checkpoint().summary().state_digest,
+        to_epoch,
+        proof.checkpoint().summary().clone(),
+        changes,
+    )
+    .map(Some)
+    .map_err(|_| PersistenceError::InvalidSnapshot)
 }
 
 fn validate_certified_checkpoint_for_state(

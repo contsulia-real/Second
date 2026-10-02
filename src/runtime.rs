@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -19,7 +19,7 @@ use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
     PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
     QuicRequestStream, QuicServer, QuicTransportIdentity, RuntimeNetworkSnapshot,
-    StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
+    RuntimePublicSnapshot, StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
     client_public_currency_checkpoint_proof,
     client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
     outbound_bind_address, serve_public_network_connection,
@@ -32,8 +32,8 @@ use crate::runtime_governance::serve_governance_request_from_request;
 use crate::runtime_submission::serve_legal_task_submission_from_request;
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
-    PersistedNodeState, PersistenceError, PreparationError, RemoteCertifiedPublicCurrencyView,
-    StateStore, TaskEncodingError,
+    PersistedNodeState, PersistedPublicNodeState, PersistenceError, PreparationError,
+    PublicStateStore, RemoteCertifiedPublicCurrencyView, StateStore, TaskEncodingError,
 };
 
 #[derive(Debug)]
@@ -105,8 +105,30 @@ impl From<BftConsensusRuntimeError> for NodeRuntimeError {
 }
 
 #[derive(Clone)]
+enum NodeStateBackend {
+    Full(StateStore),
+    Public(PublicStateStore),
+}
+
+impl NodeStateBackend {
+    fn base_path(&self) -> &Path {
+        match self {
+            Self::Full(store) => store.base_path(),
+            Self::Public(store) => store.base_path(),
+        }
+    }
+
+    fn full_store(&self) -> Option<&StateStore> {
+        match self {
+            Self::Full(store) => Some(store),
+            Self::Public(_) => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct PublicNetworkContext {
-    store: StateStore,
+    backend: NodeStateBackend,
     peer_store: PeerStore,
     local_node_id: NodeId,
     local_peer_record: Option<PeerRecord>,
@@ -132,7 +154,7 @@ impl NodeRuntimeCapabilities {
 pub struct NodeRuntime {
     server: QuicServer,
     pub(crate) transport_identity: QuicTransportIdentity,
-    pub(crate) store: StateStore,
+    backend: NodeStateBackend,
     peer_manager: PeerManager,
     pub(crate) peer_store: PeerStore,
     local_peer_record: Option<PeerRecord>,
@@ -188,8 +210,48 @@ impl NodeRuntime {
             None => None,
         };
 
+        Self::bind_backend(
+            listen_address,
+            NodeStateBackend::Full(store.clone()),
+            recovered_provider,
+            validator_bft,
+        )
+    }
+
+    pub fn load_public_and_bind(
+        listen_address: SocketAddr,
+        store: &PublicStateStore,
+    ) -> Result<Self, NodeRuntimeError> {
+        let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+        Self::bind_public_loaded(listen_address, store, persisted)
+    }
+
+    pub fn bind_public_loaded(
+        listen_address: SocketAddr,
+        store: &PublicStateStore,
+        persisted: PersistedPublicNodeState,
+    ) -> Result<Self, NodeRuntimeError> {
+        persisted
+            .validator_registry
+            .validate_current_set(&persisted.validator_set)
+            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        Self::bind_backend(
+            listen_address,
+            NodeStateBackend::Public(store.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn bind_backend(
+        listen_address: SocketAddr,
+        backend: NodeStateBackend,
+        recovered_provider: Option<Arc<StateRecoveryProvider>>,
+        validator_bft: Option<ValidatorBftRuntime>,
+    ) -> Result<Self, NodeRuntimeError> {
+        let base_path = backend.base_path();
         let transport_identity =
-            QuicTransportIdentity::load_or_generate(transport_identity_path(store.base_path()))?;
+            QuicTransportIdentity::load_or_generate(transport_identity_path(base_path))?;
         let server = QuicServer::bind(listen_address, &transport_identity)?;
         let local_address = server.local_addr()?;
         let local_peer_record = if local_address.ip().is_unspecified() {
@@ -202,7 +264,7 @@ impl NodeRuntime {
             )?)
         };
         let peer_manager = PeerManager::new(transport_identity.node_id());
-        let peer_store = PeerStore::load(peer_store_path(store))?;
+        let peer_store = PeerStore::load(peer_store_path(base_path))?;
         let state_recovery_provider = new_state_recovery_provider_handle();
         *state_recovery_provider
             .write()
@@ -211,7 +273,7 @@ impl NodeRuntime {
         Ok(Self {
             server,
             transport_identity,
-            store: store.clone(),
+            backend,
             peer_manager,
             peer_store,
             local_peer_record,
@@ -220,6 +282,23 @@ impl NodeRuntime {
             active_connections: Arc::new(AtomicUsize::new(0)),
             active_submissions: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    pub(crate) fn full_store(&self) -> Result<&StateStore, NodeRuntimeError> {
+        self.backend
+            .full_store()
+            .ok_or(NodeRuntimeError::SnapshotMissing)
+    }
+
+    pub(crate) fn public_state_store(&self) -> Option<PublicStateStore> {
+        match &self.backend {
+            NodeStateBackend::Full(_) => None,
+            NodeStateBackend::Public(store) => Some(store.clone()),
+        }
+    }
+
+    pub(crate) fn active_public_peers(&self) -> Vec<QuicPeer> {
+        self.peer_manager.peers()
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, NodeRuntimeError> {
@@ -245,12 +324,21 @@ impl NodeRuntime {
     pub async fn sync_freshest_certified_public_currency_view(
         &self,
     ) -> Result<RemoteCertifiedPublicCurrencyView, NodeRuntimeError> {
-        let persisted = self
-            .store
-            .load()?
-            .ok_or(NodeRuntimeError::SnapshotMissing)?;
-        let validator_set = persisted.validator_set;
-        let checkpoint_floor_epoch = persisted.checkpoint_floor_epoch;
+        let (validator_set, checkpoint_floor_epoch) = match &self.backend {
+            NodeStateBackend::Full(store) => {
+                let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+                (persisted.validator_set, persisted.checkpoint_floor_epoch)
+            }
+            NodeStateBackend::Public(store) => {
+                let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+                let floor = persisted
+                    .checkpoint_proof
+                    .as_ref()
+                    .map(|proof| proof.checkpoint().epoch())
+                    .unwrap_or(0);
+                (persisted.validator_set, floor)
+            }
+        };
 
         let peers = self.peer_manager.peers();
         if peers.is_empty() {
@@ -305,7 +393,7 @@ impl NodeRuntime {
 
     fn public_network_context(&self) -> PublicNetworkContext {
         PublicNetworkContext {
-            store: self.store.clone(),
+            backend: self.backend.clone(),
             peer_store: self.peer_store.clone(),
             local_node_id: self.node_id(),
             local_peer_record: self.local_peer_record.clone(),
@@ -317,7 +405,8 @@ impl NodeRuntime {
         &self,
         checkpoint: CertifiedStateRecoveryCheckpoint,
     ) -> Result<(), NodeRuntimeError> {
-        self.store.advance_recovery_checkpoint_floor(&checkpoint)?;
+        self.full_store()?
+            .advance_recovery_checkpoint_floor(&checkpoint)?;
         self.publish_state_recovery_provider(&checkpoint)
     }
 
@@ -326,7 +415,7 @@ impl NodeRuntime {
         checkpoint: &CertifiedStateRecoveryCheckpoint,
     ) -> Result<(), NodeRuntimeError> {
         let persisted = self
-            .store
+            .full_store()?
             .load()?
             .ok_or(NodeRuntimeError::SnapshotMissing)?;
         let provider = Arc::new(StateRecoveryProvider::new(
@@ -465,6 +554,7 @@ impl NodeRuntime {
             result = self.run_listener() => result,
             result = self.maintain_peers(bootstrap_records) => result,
             result = self.run_validator_bft_consensus() => result,
+            result = self.run_public_state_sync() => result,
         }
     }
 
@@ -635,25 +725,81 @@ async fn serve_managed_peer(
         }
     });
 
-    let load_public_snapshot = || {
-        let persisted = context
-            .store
+    let load_public_snapshot = || match &context.backend {
+        NodeStateBackend::Full(store) => {
+            let persisted = store
+                .load()
+                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
+                .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
+            let view = crate::PublicCurrencyView::new(
+                persisted.state.public_currency_summary(),
+                persisted.state.public_currency_states(),
+            )
+            .map_err(NetworkError::PublicState)?;
+            Ok(RuntimePublicSnapshot {
+                view,
+                checkpoint_proof: persisted.public_checkpoint_proof,
+                latest_delta: persisted.latest_public_delta,
+            })
+        }
+        NodeStateBackend::Public(store) => {
+            let persisted = store
+                .load()
+                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
+                .ok_or_else(|| {
+                    NetworkError::PublicStateSource("public snapshot missing".to_owned())
+                })?;
+            let view = persisted.view.ok_or_else(|| {
+                NetworkError::PublicStateSource("public state not synchronized".to_owned())
+            })?;
+            Ok(RuntimePublicSnapshot {
+                view,
+                checkpoint_proof: persisted.checkpoint_proof,
+                latest_delta: None,
+            })
+        }
+    };
+    let load_transition_proof = |current_validator_set_version: u64| match &context.backend {
+        NodeStateBackend::Full(store) => {
+            let persisted = store
+                .load()
+                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
+                .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
+            Ok(persisted
+                .validator_transition_proofs
+                .get(&current_validator_set_version)
+                .cloned())
+        }
+        NodeStateBackend::Public(_) => Ok(None),
+    };
+    let load_recovery_snapshot = || {
+        let store = context.backend.full_store().ok_or_else(|| {
+            NetworkError::PublicStateSource(
+                "state recovery unavailable on public-only node".to_owned(),
+            )
+        })?;
+        let persisted = store
             .load()
             .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
             .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
         Ok(RuntimeNetworkSnapshot {
             state: persisted.state,
-            checkpoint_proof: persisted.public_checkpoint_proof,
             validator_set: persisted.validator_set,
             validator_registry: persisted.validator_registry,
         })
     };
+    let recovery_loader = context.backend.full_store().map(|_| {
+        &load_recovery_snapshot
+            as &(dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync)
+    });
     let services = PublicNetworkServices::new(
         &context.peer_store,
         context.local_node_id,
         context.local_peer_record.as_ref(),
         &context.state_recovery_provider,
         &load_public_snapshot,
+        &load_transition_proof,
+        recovery_loader,
     );
     let result = match first_request {
         Some(first_request) => {
@@ -695,8 +841,8 @@ impl Drop for ActiveConnectionPermit {
     }
 }
 
-fn peer_store_path(store: &StateStore) -> PathBuf {
-    let mut path = OsString::from(store.base_path().as_os_str());
+fn peer_store_path(base_path: &Path) -> PathBuf {
+    let mut path = OsString::from(base_path.as_os_str());
     path.push(".peers");
     PathBuf::from(path)
 }

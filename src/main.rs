@@ -17,9 +17,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use second::{
     CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, LegalTaskSubmissionOutcome,
-    LegalTaskSubmissionRejection, NetworkError, NodeRuntime, NodeRuntimeError, QuicClient,
-    QuicTransportIdentity, RemoteCertifiedPublicCurrencyView, StateStore, client_ping,
-    client_public_currency_page, client_submit_legal_task,
+    LegalTaskSubmissionRejection, NetworkError, NodeRuntime, NodeRuntimeError, PublicCurrencyView,
+    PublicStateStore, QuicClient, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
+    StateStore, client_ping, client_public_currency_page, client_submit_legal_task,
     client_sync_certified_public_currency_view, client_sync_public_currency_view,
     parse_transaction_request_json,
 };
@@ -90,6 +90,11 @@ async fn run() -> Result<(), String> {
         [command, config_file, output_dir] if command == "init-network" => {
             init_network(config_file, output_dir)
         }
+        [command, destination_snapshot_base, trust_snapshot_base]
+            if command == "public-init" =>
+        {
+            public_init(destination_snapshot_base, trust_snapshot_base)
+        }
         [command, address, nonce, server_certificate] if command == "ping" => {
             ping(address, parse_u64("nonce", nonce)?, server_certificate).await
         }
@@ -129,7 +134,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second public-init <destination-snapshot-base> <trust-snapshot-base> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -163,22 +168,94 @@ fn init_network(config_file: &str, output_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn public_init(destination_snapshot_base: &str, trust_snapshot_base: &str) -> Result<(), String> {
+    if StateStore::new(destination_snapshot_base)
+        .load()
+        .map_err(|error| format!("failed to inspect destination full snapshot: {error:?}"))?
+        .is_some()
+    {
+        return Err(format!(
+            "destination {destination_snapshot_base} already contains a full node snapshot"
+        ));
+    }
+
+    let trust = StateStore::new(trust_snapshot_base)
+        .load()
+        .map_err(|error| format!("failed to load trust snapshot: {error:?}"))?
+        .ok_or_else(|| format!("no trust snapshot found at {trust_snapshot_base}"))?;
+
+    let store = PublicStateStore::new(destination_snapshot_base);
+    store
+        .initialize(
+            trust.validator_set.clone(),
+            trust.validator_registry.clone(),
+        )
+        .map_err(|error| format!("failed to initialize public state: {error:?}"))?;
+
+    let mut checkpoint_epoch = None;
+    if let Some(proof) = trust.public_checkpoint_proof {
+        let certified = proof
+            .verify_checkpoint(&trust.validator_set)
+            .map_err(|error| format!("invalid trusted public checkpoint: {error:?}"))?;
+        let view = PublicCurrencyView::new(
+            trust.state.public_currency_summary(),
+            trust.state.public_currency_states(),
+        )
+        .map_err(|error| format!("invalid trusted public state: {error:?}"))?;
+        checkpoint_epoch = Some(certified.checkpoint().epoch());
+        store
+            .install_certified_view(view, &certified)
+            .map_err(|error| format!("failed to install trusted public state: {error:?}"))?;
+    }
+
+    match checkpoint_epoch {
+        Some(epoch) => println!(
+            "PUBLIC-INITIALIZED snapshot={} validator_set={} checkpoint_epoch={epoch}",
+            destination_snapshot_base,
+            trust.validator_set.version()
+        ),
+        None => println!(
+            "PUBLIC-INITIALIZED snapshot={} validator_set={} checkpoint_epoch=none",
+            destination_snapshot_base,
+            trust.validator_set.version()
+        ),
+    }
+    Ok(())
+}
+
 async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
     let bootstrap_records = bootstrap_config::load(snapshot_base)?;
-    let store = StateStore::new(snapshot_base);
-    let persisted = store
+    let listen_address = parse_socket_address(address)?;
+    let full_store = StateStore::new(snapshot_base);
+    let full = full_store
         .load()
-        .map_err(|error| format!("failed to load node snapshot: {error:?}"))?
-        .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
-    let loaded_capabilities = node_capabilities::load(snapshot_base, &persisted)?;
-    let validator_id = loaded_capabilities.validator_id;
-    let runtime = NodeRuntime::bind_loaded(
-        parse_socket_address(address)?,
-        &store,
-        persisted,
-        loaded_capabilities.runtime,
-    )
-    .map_err(|error| format!("failed to start node: {error:?}"))?;
+        .map_err(|error| format!("failed to load node snapshot: {error:?}"))?;
+
+    let (runtime, validator_id, public_only) = match full {
+        Some(persisted) => {
+            let loaded_capabilities = node_capabilities::load(snapshot_base, &persisted)?;
+            let validator_id = loaded_capabilities.validator_id;
+            let runtime = NodeRuntime::bind_loaded(
+                listen_address,
+                &full_store,
+                persisted,
+                loaded_capabilities.runtime,
+            )
+            .map_err(|error| format!("failed to start node: {error:?}"))?;
+            (runtime, validator_id, false)
+        }
+        None => {
+            node_capabilities::ensure_validator_absent(snapshot_base)?;
+            let public_store = PublicStateStore::new(snapshot_base);
+            let persisted = public_store
+                .load()
+                .map_err(|error| format!("failed to load public node snapshot: {error:?}"))?
+                .ok_or_else(|| format!("no full or public snapshot found at {snapshot_base}"))?;
+            let runtime = NodeRuntime::bind_public_loaded(listen_address, &public_store, persisted)
+                .map_err(|error| format!("failed to start public node: {error:?}"))?;
+            (runtime, None, true)
+        }
+    };
 
     let local_address = runtime
         .local_addr()
@@ -189,6 +266,11 @@ async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
             runtime.node_id(),
             STANDARD.encode(runtime.transport_certificate_der()),
             validator_id.value()
+        ),
+        None if public_only => println!(
+            "LISTENING {local_address} NODE {} CERT {} PUBLIC",
+            runtime.node_id(),
+            STANDARD.encode(runtime.transport_certificate_der())
         ),
         None => println!(
             "LISTENING {local_address} NODE {} CERT {}",
