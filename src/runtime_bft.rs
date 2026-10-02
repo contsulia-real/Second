@@ -308,9 +308,10 @@ impl ValidatorBftRuntime {
             .store
             .load()?
             .ok_or(PersistenceError::MissingSnapshot)?;
-        let authority = ValidatorBftAuthority::new(
+        let authority = ValidatorBftAuthority::new_with_completed(
             persisted.validator_set,
             persisted.retained_validator_sets.into_values(),
+            self.inner.consensus.completed_prepared_authorities(),
         )?;
 
         if let Some(identity_public_key) = authority.identity_public_key(self.validator_id())

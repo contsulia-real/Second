@@ -63,6 +63,13 @@ impl ValidatorConsensusRuntime {
             .drain_events()
     }
 
+    pub(crate) fn completed_prepared_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .completed_prepared_authorities()
+    }
+
     pub(crate) fn drive(
         &self,
         inbound: Vec<InboundBftMessage>,
@@ -300,6 +307,7 @@ pub(crate) struct BftConsensusCoordinator {
 
 struct CompletedConsensusScope {
     subject: BftProposalSubject,
+    validator_set: ValidatorSet,
     certificate: FinalityCertificate,
     relay_interval: Duration,
     next_relay_at: Instant,
@@ -339,6 +347,21 @@ impl BftConsensusCoordinator {
             recent_completed: VecDeque::new(),
             events: VecDeque::new(),
         }
+    }
+
+    pub(crate) fn completed_prepared_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
+        self.recent_completed
+            .iter()
+            .filter(|completed| {
+                matches!(completed.subject.scope(), ConsensusScope::PreparedTask(_))
+            })
+            .map(|completed| {
+                (
+                    completed.subject.scope().clone(),
+                    completed.validator_set.clone(),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn register(
@@ -536,6 +559,7 @@ impl BftConsensusCoordinator {
             };
             self.remember_completed(CompletedConsensusScope {
                 subject: session.subject,
+                validator_set: session.validator_set,
                 certificate,
                 relay_interval: session.timeouts.precommit,
                 next_relay_at: now,

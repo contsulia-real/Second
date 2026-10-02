@@ -1,4 +1,6 @@
 mod bootstrap_config;
+mod validator_config;
+mod validator_keyring;
 
 use std::env;
 use std::io::{self, Write};
@@ -47,6 +49,9 @@ async fn run() -> Result<(), String> {
         [command, address, snapshot_base] if command == "node" => {
             node(address, snapshot_base).await
         }
+        [command, address, snapshot_base] if command == "validator" => {
+            validator(address, snapshot_base).await
+        }
         [command, address, start, limit, server_certificate] if command == "query-public" => {
             query_public(
                 address,
@@ -57,7 +62,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second node <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second node <listen-address> <snapshot-base> | second validator <listen-address> <snapshot-base> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -92,6 +97,40 @@ async fn node(address: &str, snapshot_base: &str) -> Result<(), String> {
         .run(&bootstrap_records)
         .await
         .map_err(|error| format!("node runtime stopped: {error:?}"))
+}
+
+async fn validator(address: &str, snapshot_base: &str) -> Result<(), String> {
+    let bootstrap_records = bootstrap_config::load(snapshot_base)?;
+    let store = StateStore::new(snapshot_base);
+    let persisted = store
+        .load()
+        .map_err(|error| format!("failed to load validator snapshot: {error:?}"))?
+        .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
+
+    let config = validator_config::load(snapshot_base)?;
+    let keys = validator_keyring::load(snapshot_base, &persisted)?;
+    let validator_id = keys.validator_id();
+    let runtime =
+        NodeRuntime::load_validator_and_bind(parse_socket_address(address)?, &store, keys, config)
+            .map_err(|error| format!("failed to start validator: {error:?}"))?;
+
+    let local_address = runtime
+        .local_addr()
+        .map_err(|error| format!("failed to read QUIC listening address: {error:?}"))?;
+    println!(
+        "LISTENING {local_address} VALIDATOR {} NODE {} CERT {}",
+        validator_id.value(),
+        runtime.node_id(),
+        STANDARD.encode(runtime.transport_certificate_der())
+    );
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to flush validator listening address: {error}"))?;
+
+    runtime
+        .run(&bootstrap_records)
+        .await
+        .map_err(|error| format!("validator runtime stopped: {error:?}"))
 }
 
 async fn ping(address: &str, nonce: u64, server_certificate: &str) -> Result<(), String> {

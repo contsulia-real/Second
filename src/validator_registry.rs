@@ -60,6 +60,16 @@ impl ValidatorRegistry {
             .map(|record| &record.credential)
     }
 
+    pub fn has_consensus_key_in_history(
+        &self,
+        validator_id: ValidatorId,
+        public_key: [u8; 32],
+    ) -> bool {
+        self.records
+            .get(&validator_id)
+            .is_some_and(|record| record.consensus_key_history.contains(&public_key))
+    }
+
     pub fn validate_current_set(
         &self,
         current_validator_set: &ValidatorSet,

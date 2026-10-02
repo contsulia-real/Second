@@ -23,6 +23,7 @@ pub(crate) type SharedValidatorBftAuthority = Arc<RwLock<ValidatorBftAuthority>>
 pub(crate) struct ValidatorBftAuthority {
     active_validator_set_version: u64,
     validator_sets: BTreeMap<u64, ValidatorSet>,
+    completed_prepared_scopes: BTreeMap<ConsensusScope, ValidatorSet>,
     identity_public_keys: BTreeMap<ValidatorId, [u8; 32]>,
 }
 
@@ -30,6 +31,18 @@ impl ValidatorBftAuthority {
     pub(crate) fn new(
         active_validator_set: ValidatorSet,
         retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
+    ) -> Result<Self, NetworkError> {
+        Self::new_with_completed(
+            active_validator_set,
+            retained_validator_sets,
+            std::iter::empty(),
+        )
+    }
+
+    pub(crate) fn new_with_completed(
+        active_validator_set: ValidatorSet,
+        retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
+        completed_prepared_scopes: impl IntoIterator<Item = (ConsensusScope, ValidatorSet)>,
     ) -> Result<Self, NetworkError> {
         let active_validator_set_version = active_validator_set.version();
         let mut validator_sets = BTreeMap::new();
@@ -43,8 +56,18 @@ impl ValidatorBftAuthority {
             }
         }
 
+        let mut completed = BTreeMap::new();
+        for (scope, validator_set) in completed_prepared_scopes {
+            if !matches!(scope, ConsensusScope::PreparedTask(_))
+                || !scope.matches_validator_set_version(validator_set.version())
+                || completed.insert(scope, validator_set).is_some()
+            {
+                return Err(NetworkError::BftUnauthorized);
+            }
+        }
+
         let mut identity_public_keys = BTreeMap::new();
-        for validator_set in validator_sets.values() {
+        for validator_set in validator_sets.values().chain(completed.values()) {
             for credential in validator_set.credentials() {
                 match identity_public_keys.insert(credential.id(), credential.identity_public_key())
                 {
@@ -59,6 +82,7 @@ impl ValidatorBftAuthority {
         Ok(Self {
             active_validator_set_version,
             validator_sets,
+            completed_prepared_scopes: completed,
             identity_public_keys,
         })
     }
@@ -87,13 +111,22 @@ impl ValidatorBftAuthority {
         message: &BftNetworkMessage,
     ) -> Result<&ValidatorSet, NetworkError> {
         let version = message.validator_set_version();
-        if !matches!(message.scope(), ConsensusScope::PreparedTask(_))
-            && version != self.active_validator_set_version
-        {
-            return Err(NetworkError::BftUnauthorized);
+        if !matches!(message.scope(), ConsensusScope::PreparedTask(_)) {
+            if version != self.active_validator_set_version {
+                return Err(NetworkError::BftUnauthorized);
+            }
+            return self
+                .validator_sets
+                .get(&version)
+                .ok_or(NetworkError::BftUnauthorized);
         }
-        self.validator_sets
-            .get(&version)
+
+        if let Some(validator_set) = self.validator_sets.get(&version) {
+            return Ok(validator_set);
+        }
+        self.completed_prepared_scopes
+            .get(message.scope())
+            .filter(|validator_set| validator_set.version() == version)
             .ok_or(NetworkError::BftUnauthorized)
     }
 }

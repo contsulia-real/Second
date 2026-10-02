@@ -8,6 +8,7 @@ mod bft_transport;
 mod cli_network_observe;
 mod cli_public_network;
 mod cli_snapshot;
+mod cli_validator;
 mod concurrent_execution;
 mod core_protocol;
 mod currency_claims;
