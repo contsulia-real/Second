@@ -39,6 +39,18 @@ impl ValidatorKeyringMaterial {
         self.consensus_keys.len()
     }
 
+    pub(crate) fn identity_key(&self) -> &SigningKey {
+        &self.identity_key
+    }
+
+    pub(crate) fn recovery_key(&self) -> &SigningKey {
+        &self.recovery_key
+    }
+
+    pub(crate) fn consensus_key(&self, index: usize) -> Option<&SigningKey> {
+        self.consensus_keys.get(index)
+    }
+
     pub(crate) fn credential(&self) -> Result<ValidatorCredential, String> {
         let consensus_key = self.consensus_keys.first().ok_or_else(|| {
             "validator keyring must contain at least one consensus private key".to_owned()
@@ -138,9 +150,10 @@ pub(crate) fn write_material(
     write_new_private(path, &bytes, "validator keyring")
 }
 
-pub(crate) fn load(
+pub(crate) fn load_with_additional(
     snapshot_base: &str,
     persisted: &PersistedNodeState,
+    additional_consensus_keys: Vec<SigningKey>,
 ) -> Result<ValidatorRuntimeKeys, String> {
     let path = keyring_path(Path::new(snapshot_base));
     let material = read_material(&path)?;
@@ -191,6 +204,16 @@ pub(crate) fn load(
         consensus_keys.insert(public_key, key);
     }
 
+    for key in additional_consensus_keys {
+        let public_key = key.verifying_key().to_bytes();
+        if consensus_keys.insert(public_key, key).is_some() {
+            return Err(format!(
+                "validator keyring {} contains a duplicate consensus private key across base keyring and rotation-key log",
+                path.display()
+            ));
+        }
+    }
+
     let mut required = BTreeSet::new();
     if let Some(credential) = persisted.validator_set.validator(validator_id) {
         required.insert(credential.consensus_public_key());
@@ -231,7 +254,7 @@ pub(crate) fn keyring_path(snapshot_base: &Path) -> PathBuf {
     append_suffix(snapshot_base, ".validator.keys.json")
 }
 
-fn random_signing_key() -> Result<SigningKey, String> {
+pub(crate) fn random_signing_key() -> Result<SigningKey, String> {
     let mut seed = [0_u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|error| format!("failed to obtain OS randomness for validator key: {error}"))?;

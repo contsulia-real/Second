@@ -280,7 +280,7 @@ fn validate_consensus_key_rotations(
     Ok(())
 }
 
-fn transition_digest(
+pub(crate) fn transition_digest(
     protocol_version: u32,
     current_validator_set_version: u64,
     next_validator_set: &ValidatorSet,

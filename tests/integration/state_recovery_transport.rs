@@ -177,7 +177,7 @@ async fn recovery_payload_is_denied_without_current_validator_identity_proof() {
 }
 
 #[tokio::test]
-async fn runtime_persists_recovery_floor_and_refuses_stale_certified_publication_after_restart() {
+async fn runtime_reloads_certified_recovery_provider_and_refuses_stale_publication_after_restart() {
     let validators = validator_set(7, 1..=4);
     let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
     let base = support::temp_base("state-recovery-publish-floor");
@@ -192,8 +192,9 @@ async fn runtime_persists_recovery_floor_and_refuses_stale_certified_publication
     }
 
     let stale = certified_checkpoint(&store, 40);
-    let restarted =
-        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap();
+    let restarted = Arc::new(
+        NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
+    );
     assert!(matches!(
         restarted.publish_state_recovery_checkpoint(stale),
         Err(second::NodeRuntimeError::Persistence(
@@ -205,9 +206,28 @@ async fn runtime_persists_recovery_floor_and_refuses_stale_certified_publication
         ))
     ));
 
+    let task = support::spawn_node_runtime(&restarted);
+    let client = QuicClient::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        restarted.transport_certificate_der(),
+        QuicTransportIdentity::generate().unwrap(),
+    )
+    .unwrap();
+    let peer = client
+        .connect(restarted.local_addr().unwrap())
+        .await
+        .unwrap();
+    let recovered = client_fetch_state_recovery(&peer, ValidatorId::new(1), &key(3), &validators)
+        .await
+        .unwrap();
+    assert_eq!(recovered.checkpoint.checkpoint().serial(), 41);
+    peer.close();
+
     let next = certified_checkpoint(&store, 42);
     restarted.publish_state_recovery_checkpoint(next).unwrap();
 
+    task.abort();
+    let _ = task.await;
     drop(restarted);
     support::cleanup_node_runtime(store, base);
 }

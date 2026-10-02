@@ -1,17 +1,19 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::{
-    CurrencyAddress, CurrencyRole, LegalTaskSubmissionOutcome, PublicCurrencyCheckpointProof,
-    PublicCurrencyState, PublicCurrencySummary, StateRecoveryCheckpointProof, TaskId, ValidatorId,
+    CurrencyAddress, CurrencyRole, LegalTaskSubmissionOutcome,
+    MAX_VALIDATOR_TRANSITION_SOURCE_SIZE, PublicCurrencyCheckpointProof, PublicCurrencyState,
+    PublicCurrencySummary, StateRecoveryCheckpointProof, TaskId, ValidatorId,
     public_checkpoint::CheckpointProofCodecError,
     state_recovery_checkpoint::StateRecoveryProofCodecError,
 };
 
 use super::{
-    CURRENT_NETWORK_PROTOCOL_VERSION, LegalTaskSubmissionRejection, MAX_NETWORK_FRAME_SIZE,
-    MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE,
-    MAX_PUBLIC_CURRENCY_PAGE, MAX_STATE_RECOVERY_CHUNK_SIZE, NetworkError, NetworkMessage, NodeId,
-    PeerRecord, validate_chunk_limit, validate_peer_limit, validate_public_currency_limit,
+    CURRENT_NETWORK_PROTOCOL_VERSION, GovernanceRejection, LegalTaskSubmissionRejection,
+    MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS,
+    MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE, MAX_PUBLIC_CURRENCY_PAGE, MAX_STATE_RECOVERY_CHUNK_SIZE,
+    NetworkError, NetworkMessage, NodeId, PeerRecord, validate_chunk_limit, validate_peer_limit,
+    validate_public_currency_limit,
 };
 
 const NETWORK_MAGIC: [u8; 4] = *b"SCND";
@@ -318,6 +320,65 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
         NetworkMessage::LegalTaskSubmissionRejected { reason } => {
             Ok(vec![27, encode_submission_rejection(*reason)])
         }
+        NetworkMessage::ValidatorTransitionSubmit {
+            validator_id,
+            validator_set_version,
+            source,
+            signature,
+        } => {
+            if source.is_empty() || source.len() > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE {
+                return Err(NetworkError::InvalidGovernanceRequest);
+            }
+            let source_len =
+                u16::try_from(source.len()).map_err(|_| NetworkError::InvalidGovernanceRequest)?;
+            let mut payload = Vec::with_capacity(1 + 8 + 8 + 2 + source.len() + 64);
+            payload.push(28);
+            payload.extend_from_slice(&validator_id.value().to_be_bytes());
+            payload.extend_from_slice(&validator_set_version.to_be_bytes());
+            payload.extend_from_slice(&source_len.to_be_bytes());
+            payload.extend_from_slice(source);
+            payload.extend_from_slice(signature);
+            Ok(payload)
+        }
+        NetworkMessage::ValidatorTransitionAccepted {
+            current_validator_set_version,
+            next_validator_set_version,
+            transition_digest,
+        } => {
+            let mut payload = Vec::with_capacity(49);
+            payload.push(29);
+            payload.extend_from_slice(&current_validator_set_version.to_be_bytes());
+            payload.extend_from_slice(&next_validator_set_version.to_be_bytes());
+            payload.extend_from_slice(transition_digest);
+            Ok(payload)
+        }
+        NetworkMessage::StateRecoveryCheckpointSubmit {
+            validator_id,
+            validator_set_version,
+            signature,
+        } => {
+            let mut payload = Vec::with_capacity(81);
+            payload.push(30);
+            payload.extend_from_slice(&validator_id.value().to_be_bytes());
+            payload.extend_from_slice(&validator_set_version.to_be_bytes());
+            payload.extend_from_slice(signature);
+            Ok(payload)
+        }
+        NetworkMessage::StateRecoveryCheckpointAccepted {
+            validator_set_version,
+            serial,
+            checkpoint_digest,
+        } => {
+            let mut payload = Vec::with_capacity(49);
+            payload.push(31);
+            payload.extend_from_slice(&validator_set_version.to_be_bytes());
+            payload.extend_from_slice(&serial.to_be_bytes());
+            payload.extend_from_slice(checkpoint_digest);
+            Ok(payload)
+        }
+        NetworkMessage::GovernanceRejected { reason } => {
+            Ok(vec![32, encode_governance_rejection(*reason)])
+        }
     }
 }
 
@@ -421,7 +482,137 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
         25 => decode_submission_continue(payload),
         26 => decode_submission_accepted(payload),
         27 => decode_submission_rejected(payload),
+        28 => decode_validator_transition_submit(payload),
+        29 => decode_validator_transition_accepted(payload),
+        30 => decode_state_recovery_checkpoint_submit(payload),
+        31 => decode_state_recovery_checkpoint_accepted(payload),
+        32 => decode_governance_rejected(payload),
         other => Err(NetworkError::UnknownMessageType(other)),
+    }
+}
+
+fn decode_validator_transition_submit(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    if payload.len() < 83 {
+        return Err(NetworkError::InvalidGovernanceRequest);
+    }
+    let validator_id = ValidatorId::new(u64::from_be_bytes(
+        payload[1..9]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    ));
+    let validator_set_version = u64::from_be_bytes(
+        payload[9..17]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    );
+    let source_len = usize::from(u16::from_be_bytes(
+        payload[17..19]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    ));
+    if source_len == 0 || source_len > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE {
+        return Err(NetworkError::InvalidGovernanceRequest);
+    }
+    let expected_len = 19_usize
+        .checked_add(source_len)
+        .and_then(|len| len.checked_add(64))
+        .ok_or(NetworkError::InvalidGovernanceRequest)?;
+    if payload.len() != expected_len {
+        return Err(NetworkError::InvalidGovernanceRequest);
+    }
+    let signature = payload[19 + source_len..expected_len]
+        .try_into()
+        .map_err(|_| NetworkError::InvalidGovernanceRequest)?;
+    Ok(NetworkMessage::ValidatorTransitionSubmit {
+        validator_id,
+        validator_set_version,
+        source: payload[19..19 + source_len].to_vec(),
+        signature,
+    })
+}
+
+fn decode_validator_transition_accepted(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(29, payload, 49)?;
+    Ok(NetworkMessage::ValidatorTransitionAccepted {
+        current_validator_set_version: u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        ),
+        next_validator_set_version: u64::from_be_bytes(
+            payload[9..17]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        ),
+        transition_digest: payload[17..49]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    })
+}
+
+fn decode_state_recovery_checkpoint_submit(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(30, payload, 81)?;
+    Ok(NetworkMessage::StateRecoveryCheckpointSubmit {
+        validator_id: ValidatorId::new(u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        )),
+        validator_set_version: u64::from_be_bytes(
+            payload[9..17]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        ),
+        signature: payload[17..81]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    })
+}
+
+fn decode_state_recovery_checkpoint_accepted(
+    payload: &[u8],
+) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(31, payload, 49)?;
+    Ok(NetworkMessage::StateRecoveryCheckpointAccepted {
+        validator_set_version: u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        ),
+        serial: u64::from_be_bytes(
+            payload[9..17]
+                .try_into()
+                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+        ),
+        checkpoint_digest: payload[17..49]
+            .try_into()
+            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    })
+}
+
+fn decode_governance_rejected(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(32, payload, 2)?;
+    Ok(NetworkMessage::GovernanceRejected {
+        reason: decode_governance_rejection(payload[1])?,
+    })
+}
+
+const fn encode_governance_rejection(reason: GovernanceRejection) -> u8 {
+    match reason {
+        GovernanceRejection::Unavailable => 1,
+        GovernanceRejection::Busy => 2,
+        GovernanceRejection::Unauthorized => 3,
+        GovernanceRejection::Rejected => 4,
+    }
+}
+
+fn decode_governance_rejection(value: u8) -> Result<GovernanceRejection, NetworkError> {
+    match value {
+        1 => Ok(GovernanceRejection::Unavailable),
+        2 => Ok(GovernanceRejection::Busy),
+        3 => Ok(GovernanceRejection::Unauthorized),
+        4 => Ok(GovernanceRejection::Rejected),
+        _ => Err(NetworkError::InvalidGovernanceRequest),
     }
 }
 

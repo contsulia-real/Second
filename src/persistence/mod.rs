@@ -3,12 +3,14 @@ mod codec;
 #[cfg(test)]
 mod codec_tests;
 mod local_codec;
+mod safety_recovery;
 mod slot;
 mod snapshot_validation;
 mod store;
 mod validator_codec;
 
 pub(crate) use codec::{decode_shared_recovery_state, encode_shared_recovery_state};
+pub(crate) use safety_recovery::PendingValidatorSafetyRecovery;
 pub use store::StateStore;
 
 use std::collections::BTreeMap;
@@ -16,8 +18,8 @@ use std::collections::BTreeMap;
 use crate::ConsensusScope;
 use crate::prepared_plan::PreparedTask;
 use crate::{
-    BftLocalState, PublicCurrencyCheckpointProof, SecondState, TaskId, ValidatorId,
-    ValidatorRegistry, ValidatorSet,
+    BftLocalState, PublicCurrencyCheckpointProof, SecondState, StateRecoveryCheckpointProof,
+    TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
 #[derive(Clone)]
@@ -27,10 +29,12 @@ pub struct PersistedNodeState {
     pub validator_registry: ValidatorRegistry,
     pub retained_validator_sets: BTreeMap<u64, ValidatorSet>,
     pub public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
+    pub recovery_checkpoint_proof: Option<StateRecoveryCheckpointProof>,
     pub checkpoint_floor_epoch: u64,
     pub(crate) recovery_checkpoint_floors: BTreeMap<u64, RecoveryCheckpointFloor>,
     pub validator_safety_ready: bool,
     pub minimum_signing_validator_set_version: u64,
+    pub(crate) pending_validator_safety_recovery: Option<PendingValidatorSafetyRecovery>,
     pub generation: u64,
     pub(crate) prepared_tasks: BTreeMap<TaskId, PreparedTask>,
     pub(crate) validator_vote_locks: BTreeMap<(ValidatorId, ConsensusScope), [u8; 32]>,

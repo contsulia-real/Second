@@ -32,6 +32,55 @@ impl ValidatorAdmissionRequest {
         })
     }
 
+    pub fn from_untrusted_parts(
+        protocol_version: u32,
+        credential: ValidatorCredential,
+        identity_signature: [u8; 64],
+        consensus_signature: [u8; 64],
+        recovery_signature: [u8; 64],
+    ) -> Self {
+        Self {
+            protocol_version,
+            credential,
+            identity_signature,
+            consensus_signature,
+            recovery_signature,
+        }
+    }
+
+    pub fn encode_bytes(&self) -> [u8; 300] {
+        let mut bytes = [0_u8; 300];
+        bytes[0..4].copy_from_slice(&self.protocol_version.to_be_bytes());
+        bytes[4..12].copy_from_slice(&self.credential.id().value().to_be_bytes());
+        bytes[12..44].copy_from_slice(&self.credential.identity_public_key());
+        bytes[44..76].copy_from_slice(&self.credential.consensus_public_key());
+        bytes[76..108].copy_from_slice(&self.credential.recovery_public_key());
+        bytes[108..172].copy_from_slice(&self.identity_signature);
+        bytes[172..236].copy_from_slice(&self.consensus_signature);
+        bytes[236..300].copy_from_slice(&self.recovery_signature);
+        bytes
+    }
+
+    pub fn decode_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 300 {
+            return None;
+        }
+        let credential = ValidatorCredential::new(
+            ValidatorId::new(u64::from_be_bytes(bytes[4..12].try_into().ok()?)),
+            bytes[12..44].try_into().ok()?,
+            bytes[44..76].try_into().ok()?,
+            bytes[76..108].try_into().ok()?,
+        )
+        .ok()?;
+        Some(Self::from_untrusted_parts(
+            u32::from_be_bytes(bytes[0..4].try_into().ok()?),
+            credential,
+            bytes[108..172].try_into().ok()?,
+            bytes[172..236].try_into().ok()?,
+            bytes[236..300].try_into().ok()?,
+        ))
+    }
+
     pub const fn protocol_version(&self) -> u32 {
         self.protocol_version
     }

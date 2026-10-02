@@ -401,10 +401,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,

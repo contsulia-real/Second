@@ -156,7 +156,7 @@ impl ValidatorSet {
         self.validators.get(&validator)
     }
 
-    pub(crate) fn credentials(&self) -> impl Iterator<Item = &ValidatorCredential> {
+    pub fn credentials(&self) -> impl Iterator<Item = &ValidatorCredential> {
         self.validators.values()
     }
 }

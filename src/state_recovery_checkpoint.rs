@@ -118,6 +118,41 @@ impl StateRecoveryCheckpoint {
         })
     }
 
+    pub fn from_untrusted_parts(
+        protocol_version: u32,
+        serial: u64,
+        validator_set_version: u64,
+        shared_state_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            protocol_version,
+            serial,
+            validator_set_version,
+            shared_state_digest,
+        }
+    }
+
+    pub fn encode_bytes(&self) -> [u8; 52] {
+        let mut bytes = [0_u8; 52];
+        bytes[0..4].copy_from_slice(&self.protocol_version.to_be_bytes());
+        bytes[4..12].copy_from_slice(&self.serial.to_be_bytes());
+        bytes[12..20].copy_from_slice(&self.validator_set_version.to_be_bytes());
+        bytes[20..52].copy_from_slice(&self.shared_state_digest);
+        bytes
+    }
+
+    pub fn decode_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 52 {
+            return None;
+        }
+        Some(Self::from_untrusted_parts(
+            u32::from_be_bytes(bytes[0..4].try_into().ok()?),
+            u64::from_be_bytes(bytes[4..12].try_into().ok()?),
+            u64::from_be_bytes(bytes[12..20].try_into().ok()?),
+            bytes[20..52].try_into().ok()?,
+        ))
+    }
+
     pub const fn protocol_version(&self) -> u32 {
         self.protocol_version
     }

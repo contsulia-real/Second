@@ -1,6 +1,7 @@
 use crate::{
     BftPhase, BftProposal, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
-    FinalityCertificate, FinalityStatement, TaskId, ValidatorId, ValidatorVote,
+    FinalityCertificate, FinalityStatement, MAX_VALIDATOR_TRANSITION_SOURCE_SIZE, TaskId,
+    ValidatorId, ValidatorVote,
 };
 
 use super::{MAX_NETWORK_FRAME_SIZE, NetworkError};
@@ -53,6 +54,16 @@ pub enum BftNetworkMessage {
         expected_plan_digest: [u8; 32],
         round: u64,
     },
+    ValidatorSetTransitionSource {
+        validator_set_version: u64,
+        scope: ConsensusScope,
+        bytes: Vec<u8>,
+    },
+    StateRecoveryCheckpointSource {
+        validator_set_version: u64,
+        scope: ConsensusScope,
+        bytes: [u8; 52],
+    },
 }
 
 impl BftNetworkMessage {
@@ -66,7 +77,9 @@ impl BftNetworkMessage {
             | Self::PreparedTaskRequest { scope, .. }
             | Self::PreparedTaskSourceChunk { scope, .. }
             | Self::PreparedTaskSourceUnavailable { scope, .. }
-            | Self::PreparedTaskAvailable { scope, .. } => scope,
+            | Self::PreparedTaskAvailable { scope, .. }
+            | Self::ValidatorSetTransitionSource { scope, .. }
+            | Self::StateRecoveryCheckpointSource { scope, .. } => scope,
         }
     }
 
@@ -94,6 +107,14 @@ impl BftNetworkMessage {
             | Self::PreparedTaskAvailable {
                 validator_set_version,
                 ..
+            }
+            | Self::ValidatorSetTransitionSource {
+                validator_set_version,
+                ..
+            }
+            | Self::StateRecoveryCheckpointSource {
+                validator_set_version,
+                ..
             } => *validator_set_version,
         }
     }
@@ -107,7 +128,9 @@ impl BftNetworkMessage {
             | Self::FinalityCertificate { .. }
             | Self::PreparedTaskRequest { .. }
             | Self::PreparedTaskSourceChunk { .. }
-            | Self::PreparedTaskSourceUnavailable { .. } => None,
+            | Self::PreparedTaskSourceUnavailable { .. }
+            | Self::ValidatorSetTransitionSource { .. }
+            | Self::StateRecoveryCheckpointSource { .. } => None,
             Self::PreparedTaskAvailable { round, .. } => Some(*round),
         }
     }
@@ -122,7 +145,9 @@ impl BftNetworkMessage {
             | Self::PreparedTaskRequest { .. }
             | Self::PreparedTaskSourceChunk { .. }
             | Self::PreparedTaskSourceUnavailable { .. }
-            | Self::PreparedTaskAvailable { .. } => return false,
+            | Self::PreparedTaskAvailable { .. }
+            | Self::ValidatorSetTransitionSource { .. }
+            | Self::StateRecoveryCheckpointSource { .. } => return false,
         };
         statement.phase() == BftPhase::Precommit && matches!(statement.value(), BftValue::Digest(_))
     }
@@ -236,6 +261,37 @@ pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>
             )?;
             out.extend_from_slice(&round.to_be_bytes());
         }
+        BftNetworkMessage::ValidatorSetTransitionSource {
+            validator_set_version,
+            scope,
+            bytes,
+        } => {
+            if !matches!(scope, ConsensusScope::ValidatorSetTransition { .. })
+                || bytes.is_empty()
+                || bytes.len() > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE
+            {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            out.push(10);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            encode_scope(scope, &mut out)?;
+            let len = u16::try_from(bytes.len()).map_err(|_| NetworkError::InvalidBftMessage)?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        BftNetworkMessage::StateRecoveryCheckpointSource {
+            validator_set_version,
+            scope,
+            bytes,
+        } => {
+            if !matches!(scope, ConsensusScope::StateRecoveryCheckpoint { .. }) {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            out.push(11);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            encode_scope(scope, &mut out)?;
+            out.extend_from_slice(bytes);
+        }
     }
 
     if out.is_empty() || out.len() > MAX_BFT_MESSAGE_SIZE {
@@ -322,6 +378,34 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
                 scope,
                 expected_plan_digest,
                 round: cursor.u64()?,
+            }
+        }
+        10 => {
+            let validator_set_version = cursor.u64()?;
+            let scope = decode_scope(&mut cursor)?;
+            if !matches!(scope, ConsensusScope::ValidatorSetTransition { .. }) {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            let len = usize::from(cursor.u16()?);
+            if len == 0 || len > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE || len > cursor.remaining() {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            BftNetworkMessage::ValidatorSetTransitionSource {
+                validator_set_version,
+                scope,
+                bytes: cursor.bytes(len)?.to_vec(),
+            }
+        }
+        11 => {
+            let validator_set_version = cursor.u64()?;
+            let scope = decode_scope(&mut cursor)?;
+            if !matches!(scope, ConsensusScope::StateRecoveryCheckpoint { .. }) {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            BftNetworkMessage::StateRecoveryCheckpointSource {
+                validator_set_version,
+                scope,
+                bytes: cursor.array::<52>()?,
             }
         }
         _ => return Err(NetworkError::InvalidBftMessage),

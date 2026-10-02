@@ -23,8 +23,8 @@ use crate::{
     CertifiedValidatorSetTransition, ConsensusScope, FinalityCertificate, FinalityError,
     NodeRuntime, NodeRuntimeError, PersistenceError, PreparationError, PublicCurrencyCheckpoint,
     StateRecoveryCheckpoint, TaskId, ValidatorBftSendFailure, ValidatorId, ValidatorSet,
-    ValidatorSetTransition, ValidatorSigner, ValidatorSigningError, ValidatorTransitionError,
-    ValidatorVote,
+    ValidatorSetTransition, ValidatorSetTransitionSource, ValidatorSigner, ValidatorSigningError,
+    ValidatorTransitionError, ValidatorTransitionSourceCodecError, ValidatorVote,
 };
 
 pub(crate) struct ValidatorConsensusRuntime {
@@ -63,11 +63,11 @@ impl ValidatorConsensusRuntime {
             .drain_events()
     }
 
-    pub(crate) fn completed_prepared_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
+    pub(crate) fn completed_relay_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
         self.coordinator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .completed_prepared_authorities()
+            .completed_relay_authorities()
     }
 
     pub(crate) fn drive(
@@ -136,7 +136,7 @@ pub(crate) fn start_prepared_task_consensus_for(
     start_validator_consensus_target_for(store, runtime, target)
 }
 
-fn start_validator_consensus_target_for(
+pub(crate) fn start_validator_consensus_target_for(
     store: &crate::StateStore,
     runtime: &ValidatorBftRuntime,
     target: ValidatorConsensusTarget,
@@ -219,14 +219,39 @@ impl NodeRuntime {
         Ok(runtime.consensus().drain_events())
     }
 
+    fn recover_validator_safety_if_ready(
+        &self,
+        runtime: &ValidatorBftRuntime,
+    ) -> Result<(), NodeRuntimeError> {
+        let snapshot = self
+            .store
+            .load()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        if snapshot.validator_safety_ready
+            || snapshot.pending_validator_safety_recovery.is_none()
+            || snapshot.recovery_checkpoint_proof.is_none()
+        {
+            return Ok(());
+        }
+
+        let signer = runtime.signer_for(&snapshot.validator_set)?;
+        self.store.try_complete_pending_validator_safety_recovery(
+            signer.validator_id(),
+            signer.consensus_public_key(),
+        )?;
+        Ok(())
+    }
+
     pub(crate) async fn run_validator_bft_consensus(&self) -> Result<(), NodeRuntimeError> {
         let Some(runtime) = self.validator_bft.as_ref() else {
             return std::future::pending::<Result<(), NodeRuntimeError>>().await;
         };
+        self.recover_validator_safety_if_ready(runtime)?;
         self.start_durable_prepared_consensus()?;
 
         loop {
-            let inbound = self.process_prepared_task_sync(runtime.drain_inbound())?;
+            let inbound = self.process_governance_bft_sources(runtime.drain_inbound());
+            let inbound = self.process_prepared_task_sync(inbound)?;
             let output = runtime
                 .consensus()
                 .drive(inbound, tokio::time::Instant::now());
@@ -236,6 +261,12 @@ impl NodeRuntime {
                 if !failures.is_empty() {
                     runtime.consensus().record_send_failures(scope, failures);
                 }
+            }
+            if output.validator_set_changed {
+                runtime.refresh_authority()?;
+            }
+            if let Some(checkpoint) = output.certified_recovery_checkpoint {
+                self.publish_state_recovery_provider(&checkpoint)?;
             }
 
             if runtime.has_pending_prepared_task_sync() {
@@ -255,6 +286,8 @@ impl NodeRuntime {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BftConsensusRuntimeError {
     Driver(BftDriverError),
+    InvalidGovernanceSource,
+    GovernanceSourceCodec(ValidatorTransitionSourceCodecError),
     Persistence(PersistenceError),
     Authorization(AuthorizationError),
     Preparation(PreparationError),
@@ -353,6 +386,8 @@ struct BftConsensusSession {
 #[derive(Default)]
 pub(crate) struct BftConsensusOutput {
     pub(crate) outbound: Vec<BftNetworkMessage>,
+    pub(crate) certified_recovery_checkpoint: Option<CertifiedStateRecoveryCheckpoint>,
+    pub(crate) validator_set_changed: bool,
 }
 
 impl BftConsensusCoordinator {
@@ -365,12 +400,9 @@ impl BftConsensusCoordinator {
         }
     }
 
-    pub(crate) fn completed_prepared_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
+    pub(crate) fn completed_relay_authorities(&self) -> Vec<(ConsensusScope, ValidatorSet)> {
         self.recent_completed
             .iter()
-            .filter(|completed| {
-                matches!(completed.subject.scope(), ConsensusScope::PreparedTask(_))
-            })
             .map(|completed| {
                 (
                     completed.subject.scope().clone(),
@@ -789,6 +821,31 @@ fn start_round(
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     session.driver.register_subject(&session.subject)?;
     if session.driver.proposer()? == session.driver.validator_id() {
+        match &session.target {
+            ValidatorConsensusTarget::ValidatorSetTransition(transition) => {
+                let source = ValidatorSetTransitionSource::from_transition(transition)
+                    .encode_bytes()
+                    .map_err(BftConsensusRuntimeError::GovernanceSourceCodec)?;
+                output
+                    .outbound
+                    .push(BftNetworkMessage::ValidatorSetTransitionSource {
+                        validator_set_version: session.validator_set.version(),
+                        scope: session.subject.scope().clone(),
+                        bytes: source,
+                    });
+            }
+            ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint) => {
+                output
+                    .outbound
+                    .push(BftNetworkMessage::StateRecoveryCheckpointSource {
+                        validator_set_version: session.validator_set.version(),
+                        scope: session.subject.scope().clone(),
+                        bytes: checkpoint.encode_bytes(),
+                    });
+            }
+            ValidatorConsensusTarget::PreparedTask { .. }
+            | ValidatorConsensusTarget::PublicCheckpoint(_) => {}
+        }
         let proposal = session.driver.create_proposal(&session.subject)?;
         output.outbound.push(BftNetworkMessage::Proposal {
             proposal: proposal.clone(),
@@ -867,6 +924,10 @@ fn handle_inbound(
         | BftNetworkMessage::PreparedTaskSourceUnavailable { .. }
         | BftNetworkMessage::PreparedTaskAvailable { .. } => {
             unreachable!("prepared-task sync control is consumed before BFT dispatch")
+        }
+        BftNetworkMessage::ValidatorSetTransitionSource { .. }
+        | BftNetworkMessage::StateRecoveryCheckpointSource { .. } => {
+            unreachable!("governance source control is consumed before BFT dispatch")
         }
     };
 

@@ -8,8 +8,9 @@ use crate::prepared_plan::{PreparedTask, PreparedTaskPhase};
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CertifiedStateRecoveryCheckpoint,
     CertifiedValidatorSetTransition, FinalityCertificate, PersistenceError,
-    PublicCurrencyCheckpointProof, SecondState, StateRecoveryCheckpoint, StateRecoveryPayload,
-    TaskId, ValidatorId, ValidatorRegistry, ValidatorSet, ValidatorTransitionError,
+    PublicCurrencyCheckpointProof, SecondState, StateRecoveryCheckpoint,
+    StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId, ValidatorRegistry,
+    ValidatorSet, ValidatorTransitionError,
 };
 
 use super::bft_store::{
@@ -21,7 +22,9 @@ use super::slot::{
     load_latest, lock_store_file, remove_slots, shared_path_lock, slot_path, write_slots,
 };
 use super::snapshot_validation::resolve_validator_set;
-use super::{PersistedNodeState, RecoveryCheckpointFloor, VoteLockStatus};
+use super::{
+    PendingValidatorSafetyRecovery, PersistedNodeState, RecoveryCheckpointFloor, VoteLockStatus,
+};
 
 pub(super) struct StateStoreGuard<'a> {
     _process_guard: MutexGuard<'a, ()>,
@@ -78,10 +81,12 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: true,
                 minimum_signing_validator_set_version: validator_set.version(),
+                pending_validator_safety_recovery: None,
                 validator_registry: &validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -117,10 +122,12 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: true,
                 minimum_signing_validator_set_version: validator_set.version(),
+                pending_validator_safety_recovery: None,
                 validator_registry,
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -154,6 +161,7 @@ impl StateStore {
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
         let bft_local_states = BTreeMap::new();
+        let recovery_checkpoint_proof = checkpoint.to_unverified_proof();
         self.write_next_unlocked(
             None,
             SnapshotContents {
@@ -161,10 +169,12 @@ impl StateStore {
                 validator_set: payload.validator_set(),
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: false,
                 minimum_signing_validator_set_version: payload.validator_set().version(),
+                pending_validator_safety_recovery: None,
                 validator_registry: payload.validator_registry(),
                 prepared_tasks: &prepared_tasks,
                 validator_vote_locks: &validator_vote_locks,
@@ -270,10 +280,12 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: true,
                 minimum_signing_validator_set_version: latest.validator_set.version(),
+                pending_validator_safety_recovery: None,
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -282,9 +294,94 @@ impl StateStore {
         )
     }
 
+    pub(crate) fn try_complete_pending_validator_safety_recovery(
+        &self,
+        validator_id: ValidatorId,
+        new_consensus_public_key: [u8; 32],
+    ) -> Result<Option<u64>, PersistenceError> {
+        let _guard = self.lock()?;
+        let latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+
+        if latest.validator_safety_ready {
+            return Ok(None);
+        }
+        let Some(pending) = latest.pending_validator_safety_recovery.as_ref() else {
+            return Ok(None);
+        };
+        if pending.validator_id != validator_id {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+        pending.validate(&latest.validator_set)?;
+
+        let current = latest
+            .validator_set
+            .validator(validator_id)
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        if current.consensus_public_key() != new_consensus_public_key {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        let recovery_proof = latest
+            .recovery_checkpoint_proof
+            .as_ref()
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        if recovery_proof.checkpoint().validator_set_version() != latest.validator_set.version() {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+        let recovery_floor = latest
+            .recovery_checkpoint_floors
+            .get(&latest.validator_set.version())
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        if !recovery_floor.certified
+            || recovery_floor.serial != recovery_proof.checkpoint().serial()
+            || recovery_floor.checkpoint_digest != recovery_proof.checkpoint().digest()
+        {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+
+        let generation = self.write_next_unlocked(
+            Some(latest.generation),
+            SnapshotContents {
+                state: &latest.state,
+                validator_set: &latest.validator_set,
+                retained_validator_sets: &latest.retained_validator_sets,
+                public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
+                checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
+                recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
+                validator_safety_ready: true,
+                minimum_signing_validator_set_version: latest.validator_set.version(),
+                pending_validator_safety_recovery: None,
+                validator_registry: &latest.validator_registry,
+                prepared_tasks: &latest.prepared_tasks,
+                validator_vote_locks: &latest.validator_vote_locks,
+                bft_local_states: &latest.bft_local_states,
+            },
+        )?;
+        Ok(Some(generation))
+    }
+
     pub fn activate_validator_set_transition(
         &self,
         certified_transition: &CertifiedValidatorSetTransition,
+    ) -> Result<u64, PersistenceError> {
+        self.activate_validator_set_transition_inner(certified_transition, None)
+    }
+
+    pub(crate) fn activate_validator_set_transition_for_runtime(
+        &self,
+        certified_transition: &CertifiedValidatorSetTransition,
+        local_validator_id: ValidatorId,
+    ) -> Result<u64, PersistenceError> {
+        self.activate_validator_set_transition_inner(certified_transition, Some(local_validator_id))
+    }
+
+    fn activate_validator_set_transition_inner(
+        &self,
+        certified_transition: &CertifiedValidatorSetTransition,
+        local_validator_id: Option<ValidatorId>,
     ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self
@@ -311,6 +408,21 @@ impl StateStore {
             next_validator_set.version(),
         );
 
+        let pending_validator_safety_recovery = if latest.validator_safety_ready {
+            None
+        } else {
+            local_validator_id
+                .map(|validator_id| {
+                    PendingValidatorSafetyRecovery::from_certified_transition(
+                        validator_id,
+                        &latest.validator_set,
+                        certified_transition,
+                    )
+                })
+                .transpose()?
+                .flatten()
+        };
+
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
@@ -318,10 +430,12 @@ impl StateStore {
                 validator_set: &next_validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: None,
+                recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: pending_validator_safety_recovery.as_ref(),
                 validator_registry: &validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -372,10 +486,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof,
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -408,10 +526,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: Some(&proof),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -444,10 +566,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -486,6 +612,7 @@ impl StateStore {
             checkpoint.checkpoint().digest(),
             RecoveryCheckpointFloorUpdate::Certified,
         )?;
+        let recovery_checkpoint_proof = checkpoint.to_unverified_proof();
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -494,10 +621,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -554,6 +685,12 @@ impl StateStore {
                 validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint.as_ref(),
+                recovery_checkpoint_proof: latest
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.recovery_checkpoint_proof.as_ref())
+                    .filter(|proof| {
+                        recovery_checkpoint_matches(proof, state, validator_set, &registry)
+                    }),
                 checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: latest
@@ -564,6 +701,9 @@ impl StateStore {
                     .as_ref()
                     .map(|snapshot| snapshot.minimum_signing_validator_set_version)
                     .unwrap_or(validator_set.version()),
+                pending_validator_safety_recovery: latest
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.pending_validator_safety_recovery.as_ref()),
                 validator_registry: &registry,
                 prepared_tasks,
                 validator_vote_locks: &vote_locks,
@@ -607,10 +747,23 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: checkpoint,
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref().filter(
+                    |proof| {
+                        recovery_checkpoint_matches(
+                            proof,
+                            state,
+                            &latest.validator_set,
+                            &latest.validator_registry,
+                        )
+                    },
+                ),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -669,10 +822,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -706,10 +863,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -807,10 +968,14 @@ impl StateStore {
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &latest.recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
                 minimum_signing_validator_set_version: latest.minimum_signing_validator_set_version,
+                pending_validator_safety_recovery: latest
+                    .pending_validator_safety_recovery
+                    .as_ref(),
                 validator_registry: &latest.validator_registry,
                 prepared_tasks: &latest.prepared_tasks,
                 validator_vote_locks: &latest.validator_vote_locks,
@@ -992,6 +1157,23 @@ pub(super) fn next_recovery_checkpoint_serial(
                 })
         }
     }
+}
+
+fn recovery_checkpoint_matches(
+    proof: &StateRecoveryCheckpointProof,
+    state: &SecondState,
+    validator_set: &ValidatorSet,
+    validator_registry: &ValidatorRegistry,
+) -> bool {
+    let Ok(certified) = proof.clone().verify_checkpoint(validator_set) else {
+        return false;
+    };
+    let Ok(payload) =
+        StateRecoveryPayload::from_shared_parts(state, validator_set, validator_registry)
+    else {
+        return false;
+    };
+    certified.verify_payload(&payload, validator_set).is_ok()
 }
 
 fn checkpoint_floor_for_write(

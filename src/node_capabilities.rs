@@ -24,7 +24,13 @@ pub(crate) fn load(
         }),
         (true, true) => {
             let config = crate::validator_config::load(snapshot_base)?;
-            let keys = crate::validator_keyring::load(snapshot_base, persisted)?;
+            let additional_consensus_keys =
+                crate::validator_rotation_keys::load_consensus_keys(base, persisted)?;
+            let keys = crate::validator_keyring::load_with_additional(
+                snapshot_base,
+                persisted,
+                additional_consensus_keys,
+            )?;
             let validator_id = keys.validator_id();
             Ok(LoadedNodeCapabilities {
                 runtime: NodeRuntimeCapabilities::default().with_validator(keys, config),

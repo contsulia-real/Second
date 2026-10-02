@@ -1,6 +1,7 @@
 mod bft;
 mod bft_codec;
 mod codec;
+mod governance;
 mod identity;
 mod peer_manager;
 mod peer_record;
@@ -27,6 +28,15 @@ pub use bft::{ValidatorBftPeer, authenticate_validator_bft_peer, serve_validator
 pub(crate) use bft_codec::MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
 pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
+pub use governance::{
+    RemoteRecoveryCheckpointSubmission, RemoteValidatorTransitionSubmission,
+    client_submit_recovery_checkpoint, client_submit_validator_transition,
+};
+pub(crate) use governance::{
+    recovery_accepted as governance_recovery_accepted, rejected as governance_rejected,
+    transition_accepted as governance_transition_accepted, verify_recovery_request,
+    verify_transition_request,
+};
 pub use identity::{QuicTransportIdentity, transport_identity_path};
 pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
 pub(crate) use peer_record::validate_peer_limit;
@@ -57,7 +67,7 @@ pub(crate) use submission::{
     rejected as legal_task_submission_rejected, validate_submission_chunk, validate_submission_open,
 };
 
-pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 2;
+pub const CURRENT_NETWORK_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_NETWORK_FRAME_SIZE: usize = 64 * 1024;
 pub const MAX_PUBLIC_CURRENCY_PAGE: u16 = 256;
 
@@ -127,6 +137,14 @@ pub struct RemoteStateRecoveryPayload {
 pub enum LegalTaskSubmissionRejection {
     Unavailable,
     Busy,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GovernanceRejection {
+    Unavailable,
+    Busy,
+    Unauthorized,
     Rejected,
 }
 
@@ -215,6 +233,30 @@ pub enum NetworkMessage {
     LegalTaskSubmissionRejected {
         reason: LegalTaskSubmissionRejection,
     },
+    ValidatorTransitionSubmit {
+        validator_id: ValidatorId,
+        validator_set_version: u64,
+        source: Vec<u8>,
+        signature: [u8; 64],
+    },
+    ValidatorTransitionAccepted {
+        current_validator_set_version: u64,
+        next_validator_set_version: u64,
+        transition_digest: [u8; 32],
+    },
+    StateRecoveryCheckpointSubmit {
+        validator_id: ValidatorId,
+        validator_set_version: u64,
+        signature: [u8; 64],
+    },
+    StateRecoveryCheckpointAccepted {
+        validator_set_version: u64,
+        serial: u64,
+        checkpoint_digest: [u8; 32],
+    },
+    GovernanceRejected {
+        reason: GovernanceRejection,
+    },
     BftDenied,
 }
 
@@ -241,6 +283,9 @@ pub enum NetworkError {
     UnknownMessageType(u8),
     InvalidLegalTaskSubmission,
     LegalTaskSubmissionRejected(LegalTaskSubmissionRejection),
+    InvalidGovernanceRequest,
+    GovernanceUnauthorized,
+    GovernanceRejected(GovernanceRejection),
     InvalidMessageLength {
         message_type: u8,
         expected: usize,

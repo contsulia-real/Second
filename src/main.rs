@@ -4,6 +4,8 @@ mod network_init;
 mod node_capabilities;
 mod validator_config;
 mod validator_keyring;
+mod validator_operator;
+mod validator_rotation_keys;
 
 use std::env;
 use std::io::{self, Write};
@@ -41,6 +43,49 @@ async fn run() -> Result<(), String> {
     match args.as_slice() {
         [command, validator_id, keyring_file] if command == "validator-keygen" => {
             validator_keygen(parse_u64("validator id", validator_id)?, keyring_file)
+        }
+        [command, keyring_file, request_file] if command == "validator-admission" => {
+            validator_operator::create_admission(keyring_file, request_file)
+        }
+        [command, snapshot_base, authority, request_file] if command == "validator-rotate" => {
+            validator_operator::prepare_rotation(snapshot_base, authority, request_file)
+        }
+        [command, snapshot_base, plan_file, source_file]
+            if command == "validator-transition-build" =>
+        {
+            validator_operator::build_transition(snapshot_base, plan_file, source_file)
+        }
+        [command, address, snapshot_base, source_file, server_certificate]
+            if command == "validator-transition-submit" =>
+        {
+            validator_operator::submit_transition(
+                address,
+                snapshot_base,
+                source_file,
+                server_certificate,
+            )
+            .await
+        }
+        [command, address, snapshot_base, server_certificate]
+            if command == "recovery-checkpoint" =>
+        {
+            validator_operator::request_recovery_checkpoint(
+                address,
+                snapshot_base,
+                server_certificate,
+            )
+            .await
+        }
+        [command, address, destination_snapshot_base, trust_snapshot_base, server_certificate]
+            if command == "recovery-install" =>
+        {
+            validator_operator::install_recovery(
+                address,
+                destination_snapshot_base,
+                trust_snapshot_base,
+                server_certificate,
+            )
+            .await
         }
         [command, config_file, output_dir] if command == "init-network" => {
             init_network(config_file, output_dir)
@@ -84,7 +129,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second validator-keygen <validator-id> <keyring-file> | second init-network <config-json> <output-dir> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }
@@ -390,7 +435,7 @@ async fn query_public(
     Ok(())
 }
 
-fn quic_client(server_certificate: &str) -> Result<QuicClient, String> {
+pub(crate) fn quic_client(server_certificate: &str) -> Result<QuicClient, String> {
     let certificate = STANDARD
         .decode(server_certificate)
         .map_err(|error| format!("invalid server certificate base64: {error}"))?;
@@ -411,8 +456,13 @@ fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
         .map_err(|error| format!("failed to load snapshot: {error:?}"))?
         .ok_or_else(|| format!("no snapshot found at {snapshot_base}"))?;
 
+    let recovery_serial = persisted
+        .recovery_checkpoint_proof
+        .as_ref()
+        .map(|proof| proof.checkpoint().serial().to_string())
+        .unwrap_or_else(|| "none".to_owned());
     println!(
-        "SNAPSHOT generation={} supply={} reserve={} next_currency={} validator_set={} validators={} quorum={}",
+        "SNAPSHOT generation={} supply={} reserve={} next_currency={} validator_set={} validators={} quorum={} safety={} recovery_serial={}",
         persisted.generation,
         persisted.state.current_supply(),
         persisted.state.reserve_count(),
@@ -420,18 +470,24 @@ fn snapshot_status(snapshot_base: &str) -> Result<(), String> {
         persisted.validator_set.version(),
         persisted.validator_set.len(),
         persisted.validator_set.quorum_threshold(),
+        if persisted.validator_safety_ready {
+            "ready"
+        } else {
+            "locked"
+        },
+        recovery_serial,
     );
 
     Ok(())
 }
 
-fn parse_socket_address(value: &str) -> Result<SocketAddr, String> {
+pub(crate) fn parse_socket_address(value: &str) -> Result<SocketAddr, String> {
     value
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid socket address {value:?}: {error}"))
 }
 
-fn hex_digest(digest: &[u8]) -> String {
+pub(crate) fn hex_digest(digest: &[u8]) -> String {
     digest
         .iter()
         .map(|byte| format!("{byte:02x}"))

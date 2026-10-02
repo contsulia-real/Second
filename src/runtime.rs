@@ -28,6 +28,7 @@ use crate::network::{
 use crate::runtime_bft::{
     ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
 };
+use crate::runtime_governance::serve_governance_request_from_request;
 use crate::runtime_submission::serve_legal_task_submission_from_request;
 use crate::{
     AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
@@ -161,6 +162,21 @@ impl NodeRuntime {
         persisted: PersistedNodeState,
         capabilities: NodeRuntimeCapabilities,
     ) -> Result<Self, NodeRuntimeError> {
+        let recovered_provider = match persisted.recovery_checkpoint_proof.as_ref() {
+            Some(proof) => {
+                let certified = proof
+                    .clone()
+                    .verify_checkpoint(&persisted.validator_set)
+                    .map_err(|_| NetworkError::InvalidStateRecoveryPayload)?;
+                Some(Arc::new(StateRecoveryProvider::new(
+                    &persisted.state,
+                    &persisted.validator_set,
+                    &persisted.validator_registry,
+                    &certified,
+                )?))
+            }
+            None => None,
+        };
         let validator_bft = match capabilities.validator {
             Some((keys, config)) => Some(ValidatorBftRuntime::new(
                 keys,
@@ -187,6 +203,11 @@ impl NodeRuntime {
         };
         let peer_manager = PeerManager::new(transport_identity.node_id());
         let peer_store = PeerStore::load(peer_store_path(store))?;
+        let state_recovery_provider = new_state_recovery_provider_handle();
+        *state_recovery_provider
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = recovered_provider;
+
         Ok(Self {
             server,
             transport_identity,
@@ -194,7 +215,7 @@ impl NodeRuntime {
             peer_manager,
             peer_store,
             local_peer_record,
-            state_recovery_provider: new_state_recovery_provider_handle(),
+            state_recovery_provider,
             validator_bft,
             active_connections: Arc::new(AtomicUsize::new(0)),
             active_submissions: Arc::new(AtomicUsize::new(0)),
@@ -296,6 +317,14 @@ impl NodeRuntime {
         &self,
         checkpoint: CertifiedStateRecoveryCheckpoint,
     ) -> Result<(), NodeRuntimeError> {
+        self.store.advance_recovery_checkpoint_floor(&checkpoint)?;
+        self.publish_state_recovery_provider(&checkpoint)
+    }
+
+    pub(crate) fn publish_state_recovery_provider(
+        &self,
+        checkpoint: &CertifiedStateRecoveryCheckpoint,
+    ) -> Result<(), NodeRuntimeError> {
         let persisted = self
             .store
             .load()?
@@ -304,9 +333,8 @@ impl NodeRuntime {
             &persisted.state,
             &persisted.validator_set,
             &persisted.validator_registry,
-            &checkpoint,
+            checkpoint,
         )?);
-        self.store.advance_recovery_checkpoint_floor(&checkpoint)?;
         *self
             .state_recovery_provider
             .write()
@@ -452,6 +480,7 @@ impl NodeRuntime {
             let peer_manager = self.peer_manager.clone();
             let validator_bft = self.validator_bft.clone();
             let task_submission_context = self.task_submission_context();
+            let governance_context = self.governance_context();
             let active_submissions = Arc::clone(&self.active_submissions);
             tokio::spawn(async move {
                 let Ok(peer) = incoming.handshake().await else {
@@ -489,6 +518,28 @@ impl NodeRuntime {
                         .is_err()
                     {
                         peer.close_with_reason(b"LegalTask submission failed");
+                    }
+                    return;
+                }
+
+                if matches!(
+                    first_request.message(),
+                    NetworkMessage::ValidatorTransitionSubmit { .. }
+                        | NetworkMessage::StateRecoveryCheckpointSubmit { .. }
+                ) {
+                    let Some(context) = governance_context else {
+                        let _ = first_request
+                            .respond(&NetworkMessage::GovernanceRejected {
+                                reason: crate::network::GovernanceRejection::Unavailable,
+                            })
+                            .await;
+                        return;
+                    };
+                    if serve_governance_request_from_request(context, &peer, first_request)
+                        .await
+                        .is_err()
+                    {
+                        peer.close_with_reason(b"governance request failed");
                     }
                     return;
                 }

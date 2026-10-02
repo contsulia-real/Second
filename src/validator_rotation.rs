@@ -11,10 +11,18 @@ pub enum ValidatorRotationAuthority {
 }
 
 impl ValidatorRotationAuthority {
-    const fn tag(self) -> u8 {
+    pub const fn tag(self) -> u8 {
         match self {
             Self::Identity => 1,
             Self::Recovery => 2,
+        }
+    }
+
+    pub const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Identity),
+            2 => Some(Self::Recovery),
+            _ => None,
         }
     }
 }
@@ -57,6 +65,49 @@ impl ValidatorConsensusKeyRotationRequest {
             new_consensus_public_key,
             signature: signing_key.sign(&message).to_bytes(),
         })
+    }
+
+    pub fn from_untrusted_parts(
+        protocol_version: u32,
+        authority: ValidatorRotationAuthority,
+        validator_id: ValidatorId,
+        current_validator_set_version: u64,
+        new_consensus_public_key: [u8; 32],
+        signature: [u8; 64],
+    ) -> Self {
+        Self {
+            protocol_version,
+            authority,
+            validator_id,
+            current_validator_set_version,
+            new_consensus_public_key,
+            signature,
+        }
+    }
+
+    pub fn encode_bytes(&self) -> [u8; 117] {
+        let mut bytes = [0_u8; 117];
+        bytes[0..4].copy_from_slice(&self.protocol_version.to_be_bytes());
+        bytes[4] = self.authority.tag();
+        bytes[5..13].copy_from_slice(&self.validator_id.value().to_be_bytes());
+        bytes[13..21].copy_from_slice(&self.current_validator_set_version.to_be_bytes());
+        bytes[21..53].copy_from_slice(&self.new_consensus_public_key);
+        bytes[53..117].copy_from_slice(&self.signature);
+        bytes
+    }
+
+    pub fn decode_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 117 {
+            return None;
+        }
+        Some(Self::from_untrusted_parts(
+            u32::from_be_bytes(bytes[0..4].try_into().ok()?),
+            ValidatorRotationAuthority::from_tag(bytes[4])?,
+            ValidatorId::new(u64::from_be_bytes(bytes[5..13].try_into().ok()?)),
+            u64::from_be_bytes(bytes[13..21].try_into().ok()?),
+            bytes[21..53].try_into().ok()?,
+            bytes[53..117].try_into().ok()?,
+        ))
     }
 
     pub const fn protocol_version(&self) -> u32 {

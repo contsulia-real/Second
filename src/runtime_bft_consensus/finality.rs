@@ -78,14 +78,8 @@ pub(super) fn ingest_finality_certificate(
     session
         .target
         .persist_certified(&session.store, &certificate)?;
-    if let CertifiedConsensusTarget::PreparedTask { task_id, .. } = &certified {
-        crate::PreparedTaskBook::commit_certified_from_store(
-            &session.store,
-            task_id.clone(),
-            &certificate,
-        )
-        .map_err(BftConsensusRuntimeError::Preparation)?;
-    }
+    apply_certified_side_effects(session, &certified, &certificate, output)?;
+    remember_recovery_provider(&certified, output);
 
     session.finality_certificate = Some(certificate.clone());
     relay_finality_certificate(session, certificate, output);
@@ -113,14 +107,8 @@ pub(super) fn certify_if_ready(
     session
         .target
         .persist_certified(&session.store, &certificate)?;
-    if let CertifiedConsensusTarget::PreparedTask { task_id, .. } = &certified {
-        crate::PreparedTaskBook::commit_certified_from_store(
-            &session.store,
-            task_id.clone(),
-            &certificate,
-        )
-        .map_err(BftConsensusRuntimeError::Preparation)?;
-    }
+    apply_certified_side_effects(session, &certified, &certificate, output)?;
+    remember_recovery_provider(&certified, output);
 
     session.finality_certificate = Some(certificate.clone());
     session.certified_emitted = true;
@@ -128,6 +116,58 @@ pub(super) fn certify_if_ready(
     session.finished = true;
     session.deadline = None;
     Ok(Some(certified_event(certified)))
+}
+
+fn remember_recovery_provider(
+    certified: &CertifiedConsensusTarget,
+    output: &mut BftConsensusOutput,
+) {
+    if let CertifiedConsensusTarget::StateRecoveryCheckpoint(checkpoint) = certified {
+        output.certified_recovery_checkpoint = Some(checkpoint.clone());
+    }
+}
+
+fn apply_certified_side_effects(
+    session: &BftConsensusSession,
+    certified: &CertifiedConsensusTarget,
+    certificate: &FinalityCertificate,
+    output: &mut BftConsensusOutput,
+) -> Result<(), BftConsensusRuntimeError> {
+    match certified {
+        CertifiedConsensusTarget::PreparedTask { task_id, .. } => {
+            crate::PreparedTaskBook::commit_certified_from_store(
+                &session.store,
+                task_id.clone(),
+                certificate,
+            )
+            .map_err(BftConsensusRuntimeError::Preparation)?;
+        }
+        CertifiedConsensusTarget::ValidatorSetTransition(certified) => {
+            session
+                .store
+                .activate_validator_set_transition_for_runtime(
+                    certified,
+                    session.signer.validator_id(),
+                )
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+            output.validator_set_changed = true;
+        }
+        CertifiedConsensusTarget::StateRecoveryCheckpoint(certified) => {
+            session
+                .store
+                .advance_recovery_checkpoint_floor(certified)
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+            session
+                .store
+                .try_complete_pending_validator_safety_recovery(
+                    session.signer.validator_id(),
+                    session.signer.consensus_public_key(),
+                )
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+        }
+        CertifiedConsensusTarget::PublicCheckpoint(_) => {}
+    }
+    Ok(())
 }
 
 pub(super) fn rebroadcast_finality_votes(

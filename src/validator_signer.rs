@@ -59,6 +59,9 @@ impl ValidatorSigner {
     pub const fn validator_id(&self) -> ValidatorId {
         self.validator_id
     }
+    pub(crate) fn consensus_public_key(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
 
     pub fn sign_public_checkpoint(
         &self,

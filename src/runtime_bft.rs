@@ -264,6 +264,20 @@ impl ValidatorBftRuntime {
             .collect()
     }
 
+    pub(crate) fn has_all_active_validator_peers(&self) -> bool {
+        let validator_set = self.validator_set();
+        let expected = validator_set
+            .credentials()
+            .map(|credential| credential.id())
+            .filter(|validator_id| *validator_id != self.validator_id())
+            .collect::<BTreeSet<_>>();
+        let connected = self
+            .connected_validator_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        expected.is_subset(&connected)
+    }
+
     pub(crate) fn validator_set(&self) -> ValidatorSet {
         self.inner
             .authority
@@ -288,7 +302,7 @@ impl ValidatorBftRuntime {
         let authority = ValidatorBftAuthority::new_with_completed(
             persisted.validator_set,
             persisted.retained_validator_sets.into_values(),
-            self.inner.consensus.completed_prepared_authorities(),
+            self.inner.consensus.completed_relay_authorities(),
         )?;
 
         if let Some(identity_public_key) = authority.identity_public_key(self.validator_id())
@@ -299,9 +313,10 @@ impl ValidatorBftRuntime {
             ));
         }
 
-        let local_authorized = authority.identity_public_key(self.validator_id()).is_some();
+        let allowed_validator_ids = authority.validator_ids().collect::<BTreeSet<_>>();
+        let local_authorized = allowed_validator_ids.contains(&self.validator_id());
         let allowed_validator_ids = if local_authorized {
-            authority.validator_ids().collect::<BTreeSet<_>>()
+            allowed_validator_ids
         } else {
             BTreeSet::new()
         };
