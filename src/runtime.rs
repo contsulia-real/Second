@@ -12,17 +12,13 @@ pub const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
 const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const PEER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
-const PEER_CHECKPOINT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
-const PEER_PUBLIC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::network::{
     MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
     PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
     QuicRequestStream, QuicServer, QuicTransportIdentity, RuntimeNetworkSnapshot,
     RuntimePublicSnapshot, StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
-    client_public_currency_checkpoint_proof,
-    client_sync_certified_public_currency_view_from_checkpoint, new_state_recovery_provider_handle,
-    outbound_bind_address, serve_public_network_connection,
+    new_state_recovery_provider_handle, outbound_bind_address, serve_public_network_connection,
     serve_public_network_connection_from_request, transport_identity_path,
 };
 use crate::runtime_bft::{
@@ -32,9 +28,9 @@ use crate::runtime_governance::serve_governance_request_from_request;
 use crate::runtime_submission::serve_legal_task_submission_from_request;
 use crate::runtime_task_status::serve_legal_task_status_from_request;
 use crate::{
-    AuthorizationError, BftConsensusRuntimeError, BftDriverError, CertifiedStateRecoveryCheckpoint,
-    PersistedNodeState, PersistedPublicNodeState, PersistenceError, PreparationError,
-    PublicStateStore, RemoteCertifiedPublicCurrencyView, StateStore, TaskEncodingError,
+    AuthorizationError, BftConsensusRuntimeError, BftDriverError, PersistedNodeState,
+    PersistedPublicNodeState, PersistenceError, PreparationError, PublicStateStore, StateStore,
+    TaskEncodingError,
 };
 
 #[derive(Debug)]
@@ -322,68 +318,6 @@ impl NodeRuntime {
         self.local_peer_record.as_ref()
     }
 
-    pub async fn sync_freshest_certified_public_currency_view(
-        &self,
-    ) -> Result<RemoteCertifiedPublicCurrencyView, NodeRuntimeError> {
-        let (validator_set, checkpoint_floor_epoch) = match &self.backend {
-            NodeStateBackend::Full(store) => {
-                let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
-                (persisted.validator_set, persisted.checkpoint_floor_epoch)
-            }
-            NodeStateBackend::Public(store) => {
-                let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
-                let floor = persisted
-                    .checkpoint_proof
-                    .as_ref()
-                    .map(|proof| proof.checkpoint().epoch())
-                    .unwrap_or(0);
-                (persisted.validator_set, floor)
-            }
-        };
-
-        let peers = self.peer_manager.peers();
-        if peers.is_empty() {
-            return Err(NodeRuntimeError::NoActivePeers);
-        }
-
-        let mut candidates = Vec::new();
-        for peer in peers {
-            let Ok(Ok(Some(proof))) = tokio::time::timeout(
-                PEER_CHECKPOINT_QUERY_TIMEOUT,
-                client_public_currency_checkpoint_proof(&peer),
-            )
-            .await
-            else {
-                continue;
-            };
-
-            let epoch = proof.checkpoint().epoch();
-            if epoch < checkpoint_floor_epoch {
-                continue;
-            }
-
-            let Ok(checkpoint) = proof.verify_checkpoint(&validator_set) else {
-                continue;
-            };
-            candidates.push((epoch, peer.remote_node_id(), peer, checkpoint));
-        }
-
-        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-
-        for (_, _, peer, checkpoint) in candidates {
-            let sync = client_sync_certified_public_currency_view_from_checkpoint(
-                &peer,
-                checkpoint,
-                &validator_set,
-            );
-            if let Ok(Ok(synced)) = tokio::time::timeout(PEER_PUBLIC_SYNC_TIMEOUT, sync).await {
-                return Ok(synced);
-            }
-        }
-
-        Err(NodeRuntimeError::NoCertifiedPublicPeer)
-    }
-
     fn known_active_peer_count(&self) -> usize {
         self.peer_store
             .recent(MAX_PEER_RECORDS, &[self.node_id()])
@@ -402,34 +336,8 @@ impl NodeRuntime {
         }
     }
 
-    pub fn publish_state_recovery_checkpoint(
-        &self,
-        checkpoint: CertifiedStateRecoveryCheckpoint,
-    ) -> Result<(), NodeRuntimeError> {
-        self.full_store()?
-            .advance_recovery_checkpoint_floor(&checkpoint)?;
-        self.publish_state_recovery_provider(&checkpoint)
-    }
-
-    pub(crate) fn publish_state_recovery_provider(
-        &self,
-        checkpoint: &CertifiedStateRecoveryCheckpoint,
-    ) -> Result<(), NodeRuntimeError> {
-        let persisted = self
-            .full_store()?
-            .load()?
-            .ok_or(NodeRuntimeError::SnapshotMissing)?;
-        let provider = Arc::new(StateRecoveryProvider::new(
-            &persisted.state,
-            &persisted.validator_set,
-            &persisted.validator_registry,
-            checkpoint,
-        )?);
-        *self
-            .state_recovery_provider
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
-        Ok(())
+    pub(crate) fn state_recovery_provider_handle(&self) -> &StateRecoveryProviderHandle {
+        &self.state_recovery_provider
     }
 
     pub async fn bootstrap(

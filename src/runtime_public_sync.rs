@@ -6,7 +6,8 @@ use crate::network::{
     client_validator_set_transition_proof,
 };
 use crate::{
-    NodeRuntime, NodeRuntimeError, ValidatorRegistry, ValidatorSet, ValidatorSetTransitionProof,
+    NodeRuntime, NodeRuntimeError, RemoteCertifiedPublicCurrencyView, ValidatorRegistry,
+    ValidatorSet, ValidatorSetTransitionProof,
 };
 
 const PUBLIC_STATE_SYNC_INTERVAL: Duration = Duration::from_secs(15);
@@ -15,6 +16,69 @@ const PUBLIC_SYNC_FULL_VIEW_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_VALIDATOR_TRANSITIONS_PER_SYNC: usize = 64;
 
 impl NodeRuntime {
+    pub async fn sync_freshest_certified_public_currency_view(
+        &self,
+    ) -> Result<RemoteCertifiedPublicCurrencyView, NodeRuntimeError> {
+        let (validator_set, checkpoint_floor_epoch) = if let Ok(store) = self.full_store() {
+            let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+            (persisted.validator_set, persisted.checkpoint_floor_epoch)
+        } else {
+            let store = self
+                .public_state_store()
+                .ok_or(NodeRuntimeError::SnapshotMissing)?;
+            let persisted = store.load()?.ok_or(NodeRuntimeError::SnapshotMissing)?;
+            let floor = persisted
+                .checkpoint_proof
+                .as_ref()
+                .map(|proof| proof.checkpoint().epoch())
+                .unwrap_or(0);
+            (persisted.validator_set, floor)
+        };
+
+        let peers = self.active_public_peers();
+        if peers.is_empty() {
+            return Err(NodeRuntimeError::NoActivePeers);
+        }
+
+        let mut candidates = Vec::new();
+        for peer in peers {
+            let Ok(Ok(Some(proof))) = tokio::time::timeout(
+                PUBLIC_SYNC_REQUEST_TIMEOUT,
+                client_public_currency_checkpoint_proof(&peer),
+            )
+            .await
+            else {
+                continue;
+            };
+
+            let epoch = proof.checkpoint().epoch();
+            if epoch < checkpoint_floor_epoch {
+                continue;
+            }
+
+            let Ok(checkpoint) = proof.verify_checkpoint(&validator_set) else {
+                continue;
+            };
+            candidates.push((epoch, peer.remote_node_id(), peer, checkpoint));
+        }
+
+        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+        for (_, _, peer, checkpoint) in candidates {
+            let sync = client_sync_certified_public_currency_view_from_checkpoint(
+                &peer,
+                checkpoint,
+                &validator_set,
+            );
+            if let Ok(Ok(synced)) = tokio::time::timeout(PUBLIC_SYNC_FULL_VIEW_TIMEOUT, sync).await
+            {
+                return Ok(synced);
+            }
+        }
+
+        Err(NodeRuntimeError::NoCertifiedPublicPeer)
+    }
+
     pub async fn sync_public_state_once(&self) -> Result<bool, NodeRuntimeError> {
         let Some(store) = self.public_state_store() else {
             return Ok(false);

@@ -24,6 +24,7 @@ mod runtime_bft_consensus;
 mod runtime_consensus_target;
 mod runtime_governance;
 mod runtime_public_sync;
+mod runtime_recovery;
 mod runtime_submission;
 mod runtime_task_status;
 mod runtime_tasks;

@@ -1166,6 +1166,8 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | runtime_bft_consensus.rs | NodeRuntime per-scope BFT coordinator、PreparedTask 自动/恢复注册、round/timeout、early/future-message buffering 与完成 scope 的有界 compact certificate cache |
 | runtime_submission.rs | 外部 LegalTask submission 的本地 Authorizer 验证、幂等 prepare/BFT 注册与 service handler |
 | runtime_task_status.rs | Full backend 上从 durable binding/PreparedTask 推导 exact LegalTask 状态的 service handler |
+| runtime_public_sync.rs | NodeRuntime certified public-state sync：Public backend long-running worker，以及 Full/Public backend 共用的一次性 certified network observation |
+| runtime_recovery.rs | NodeRuntime recovery checkpoint 发布与当前 private recovery provider 生命周期 |
 | runtime_bft_consensus/finality.rs | precommit-QC gated FinalityVote / FinalityCertificate 聚合、验证、relay、PreparedTask durable lifecycle 与 Certified* 事件收敛 |
 | runtime_consensus_target.rs | PreparedTask / PublicCheckpoint / ValidatorSetTransition / StateRecoveryCheckpoint 到既有 proposal/finality 类型的单一适配层 |
 | runtime_tasks.rs | Validator 间 PreparedTask 私有 source pull / install / retry 与 durable task 恢复编排 |
@@ -1182,7 +1184,11 @@ local-safety re-enable 采用 **consensus-key rotation safety fence**，不尝�
 | node_capabilities.rs | `second node` 启动时的本地 capability composition；Validator sidecar 成对存在/缺失规则与 fail-closed 装配 |
 | validator_config.rs | Validator capability 非秘密 Authorizer / BFT timeout strict sidecar 的统一 load/write schema |
 | validator_keyring.rs | Validator keygen、统一 keyring read/write schema、runtime identity/recovery/current+historical consensus durable authority 校验 |
-| main.rs | 唯一长期 `second node` 入口，以及 validator-keygen / init-network / submit / 查询等短命 CLI 工具入口 |
+| main.rs | CLI 参数分发与 validator-keygen / init-network 薄入口；不承载各命令业务实现 |
+| cli_node.rs | 唯一长期 `second node` 命令的 Full/Public backend 装配与启动输出 |
+| cli_legal_task.rs | submit / task-status 的 signed LegalTask 本地输入与短命 client 流程 |
+| cli_public.rs | public-init / public sync / observe / query / snapshot-status 短命 CLI |
+| cli_network.rs | ping 与 CLI/validator operator 共用 QUIC client、地址解析、digest 输出 helper |
 
 新增能力应优先落入对应领域模块，不继续向无关大文件堆职责。
 
