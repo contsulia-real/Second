@@ -152,7 +152,7 @@ NodeRuntime 释放时显式关闭该共享 endpoint，使仍持有 outbound hand
 
 ### Windows / WSL 混合集群验收入口
 
-`mixed_windows_linux_validators_pay_and_recover_into_required_quorum` 是显式本地验收，不加入普通测试默认执行：它需要 Windows、已有 WSL Linux 工具链、Python 3，以及可双向访问 localhost UDP 的 mirrored 网络。它不修改 WSL 设置、路由或防火墙；普通 NAT 网络或独立主机须另按真实可达地址部署。先在 Linux 原生源码目录构建主程序和本地验收 probe：
+`mixed_windows_linux_validators_pay_and_recover_into_required_quorum` 是必须执行的本地验收，已纳入 Windows 普通全量测试，禁止 ignored 或因环境缺失静默跳过。它需要 Windows、已有 WSL Linux 工具链、Python 3，以及可双向访问 localhost UDP 的 mirrored 网络。它不修改 WSL 设置、路由或防火墙；普通 NAT 网络或独立主机须另按真实可达地址部署。两端必须使用同一份当前源码，先在 Linux 原生源码目录构建主程序和本地验收 probe：
 
 ```bash
 cargo build --release --locked --bin second --example mixed_snapshot_probe
@@ -162,8 +162,10 @@ cargo build --release --locked --bin second --example mixed_snapshot_probe
 
 ```powershell
 $env:SECOND_WSL_DISTRO = 'Ubuntu-26.04'
-$env:SECOND_WSL_BINARY = '/home/why23/second-validation-20261008-cross/target/release/second'
-cargo test --release --test integration mixed_windows_linux -- --ignored --nocapture
+$env:SECOND_WSL_BINARY = '/home/why23/second-m0-mixed-20261009-8281392/target/release/second'
+cargo test --release --test integration mixed_windows_linux -- --nocapture
+# 上述变量同样必须提供给普通 Windows 全量门禁。
+cargo test --all-targets
 ```
 
 同一集群的持续运行验收可在该命令前设置 `$env:SECOND_MIXED_SOAK_SECONDS = '600'`。显式验收至少执行 96 笔交替支付，并持续到指定秒数（上限 3600）；每 16 笔轮流停一个成员，三成员必要 quorum 完成四笔业务后重启。业务客户端依次向重启成员精确重提遗漏的原签名请求，逐笔等待持久成功，再核对完整共享状态；这是正式接入的精确重试路径，不要求节点自动广播全部历史。每笔仍使用原 45 秒判定期限，检查余额、V2 签名围栏和证书连续；超过 64 项 receipt 缓存后精确重放首笔，必须保持成功幂等。周期采样本次节点的 CPU/RSS，输出客户端观察的提交延迟。该选项只影响显式测试，不改变节点配置或新增生产监控循环。
@@ -177,6 +179,8 @@ Windows 父测试持有本次 Windows 子进程句柄；WSL worker 持有本次 
 验收检查双向固定证书 QUIC 与错误证书拒绝；Windows 单源提交开户、发行、支付，全体余额/地址绑定和 canonical shared payload 一致；停 Windows 1 后，Windows 2 + Linux 3/4 形成必要 3/4 quorum；Windows 1 重启补齐成功任务。随后 Linux 3 离线，由其余混合成员认证恢复状态，恢复到全新 Linux base；故意在三个健康成员完成 V2 并全部重启后才上线恢复目标，读取持久 membership proof 后仍 locked。中间重启，再取得 V2 recovery proof 自动恢复签名安全。再次重启检查 transport identity/证书连续，停止 Linux 4，仅 Windows 1/2 + 恢复后的 Linux 3 完成新业务，核对精确余额、签名 floor 和完整 canonical shared payload。
 
 2026-10-09 从最新源码重建 Windows / WSL Ubuntu 26.04 原生 Release，257 个源码输入 SHA-256 一致；上述完整场景 1 项通过、0 失败，31.53 秒，日志 `target/closure-mixed-release.log`。此前 2026-10-08 验收 41.78 秒，日志 `target/cross-mixed-acceptance.log`，只对应当时源码。Linux 数据位于原生文件系统，全部原有期限和断言保留；成功后停止本次子进程并清理临时节点目录。验收只证明同机跨系统场景，独立主机路由、防火墙和整机 boot 行为未验证。
+
+2026-10-09 M0 补验并强制门禁：从当前生产源码重建两端原生 Release，205 个生产构建输入在 CRLF→LF 归一化后 SHA-256 一致（target/m0-mixed-source-verification.json）。Release 混合验收 1 项通过、0 失败、0 忽略，25.83 秒（target/m0-required-mixed-release.log）；普通 Windows all-targets 的 250 项主集成全部通过，包含混合场景、0 忽略，44.86 秒（target/m0-required-mixed-all-targets.log）。库 105 项、34 节点目标及 examples 同样通过，fmt/check/clippy(-D warnings)/diff 检查通过。故意移除 SECOND_WSL_BINARY 的负向验收立即退出 101、1 失败、0 忽略，证明缺少环境不能被当作通过（target/m0-required-mixed-missing-env.log）。本次没有修改生产代码、测试期限或安全断言；成功现场与 owned 子进程清理完毕。该验收是同机跨系统支付/恢复基线，不是专门的账户查询跨系统对抗测试，也不覆盖独立物理主机或整机 boot。
 
 ### Membership 持久追赶边界
 

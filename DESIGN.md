@@ -2127,3 +2127,9 @@ AccountQuery 结构与账户签名先验证，再加载私有快照。每个账�
 每页 128 行、每枚举 100000 行、每投影 16 MiB、每进程 4 个投影；额度在加载前取得。总期限 30 秒、等下一页最多 5 秒，不由 keepalive 续期。终页、断开、异常或过期回收投影；超预算拒绝而非截断，冷磁盘读取返回后检查取消。无新增持久化状态、资产真值、共识、广播、长期缓存或兼容格式；未发布协议版本保持 1。读取仍是信任回答节点的私有快照查询，不是独立 BFT 资产证明、最新余额或线性化读取。详细协议与预算见 docs/cli-wallet-design.md。
 
 本地 fmt/check/clippy/all-targets test/diff 门禁通过：105 项库测试、249 项集成测试及 1 项 34 节点发现测试通过；默认忽略 2 项，其中跨进程锁 helper 在子进程实际执行通过，WSL 混合运行未验收。新增 8 项账户查询定向测试及现有真实钱包支付测试中的 assets/history 断言覆盖本次安全、分页、资源回收与功能回归。
+
+### 2026-10-09：Windows–WSL 混合验收改为必做
+
+移除 mixed_windows_linux_validators_pay_and_recover_into_required_quorum 的 ignored 标记，将其纳入 Windows 普通全量测试，并在 AGENTS.md 与 node-operations.md 明确同源 Windows/WSL 原生产物、mirrored 网络及 SECOND_WSL_BINARY 前提。条件缺失必须失败，不能跳过后宣称验收完成。前文和历史文档中的忽略记录保留为当时事实，不代表当前门禁要求。
+
+当前生产输入两端 205 项归一化 SHA-256 一致，原生 Release 混合场景 25.83 秒通过（target/m0-required-mixed-release.log）；默认 Windows 全量门禁库 105 项、主集成 250 项（包含混合场景，0 忽略，44.86 秒）、34 节点目标与 examples 均通过（target/m0-required-mixed-all-targets.log）。fmt/check/clippy(-D warnings)/diff 通过；故意缺失 SECOND_WSL_BINARY 时测试立即失败且 0 忽略（target/m0-required-mixed-missing-env.log），符合必须执行的 fail-closed 要求。本次不改变生产代码、期限、线程数或安全断言；节点与临时状态清理完毕。混合基线覆盖支付和恢复，不冒充私有账户查询跨系统对抗证明。

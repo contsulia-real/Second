@@ -1,4 +1,4 @@
-//! Explicit local acceptance: two native Windows and two native Linux validators.
+//! Required local acceptance: two native Windows and two native Linux validators.
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::UdpSocket;
@@ -171,7 +171,6 @@ fn equal_shared(bases: &[PathBuf], worker: &mut LinuxWorker) {
 }
 
 #[test]
-#[ignore = "requires WSL mirrored networking and SECOND_WSL_BINARY; see node-operations.md"]
 fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
     let soak_seconds = std::env::var("SECOND_MIXED_SOAK_SECONDS")
         .map(|seconds| {

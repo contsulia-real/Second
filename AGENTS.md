@@ -110,6 +110,7 @@ Second 当前是私有 GitHub 仓库，用户当前没有可用的 GitHub Action
 - 不把新增 GitHub Actions / CI workflow 当作默认下一步、发布前置条件或工程整改项。
 - 不反复建议、催促或要求用户补 CI。
 - 当前开发验证以本地 `cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 和必要的 `git diff --check` 为准。
+- Windows–WSL 混合环境验收是必须执行的本地门禁。Windows 全量测试必须运行 `mixed_windows_linux_validators_pay_and_recover_into_required_quorum`，不允许标记 `ignored`、按缺少环境静默跳过，或仅凭 Windows 原生测试通过宣称验收完成。先从同一份当前源码构建 Windows 与 WSL 原生产物，设置 `SECOND_WSL_DISTRO`、`SECOND_WSL_BINARY`；缺少 WSL、mirrored 网络、工具链或匹配产物时必须明确失败并补齐前提，实际阻塞时报告未完成，不能视为通过。
 - 只有用户明确要求启用 GitHub Actions，或仓库条件发生变化并由用户重新确认后，才重新讨论 CI。
 
 原则：**当前没有 Actions 预算不是代码缺陷，不应阻塞 Second 的继续开发。**
