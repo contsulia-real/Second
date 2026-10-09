@@ -83,3 +83,5 @@ Windows–WSL 混合验收是必须执行的门禁，测试不再标记 ignored�
 M0 专属跨系统补验扩展上述强制混合测试：原生 Windows 钱包仅连接 Linux Validator，原生 Linux 钱包仅连接 Windows Validator；真实账户分别查询 balance、257 份资产（三页）、地址和交易历史，完整清单与余额一致，来源说明保留不提供最终性/最新/线性化保证的边界。两端没有备用本系统端点；无需复制现有签名规则或新增生产协议。Release 场景 1 项通过、0 失败、0 忽略，29.68 秒（target/m0-query-mixed-release.log）。此前只有支付恢复基线的补验记录不能代替本段实际查询验收；恶意页、认证前加载、资源预算和元数据并发等对抗行为仍由账户查询定向测试覆盖。
 
 本段最终全量门禁并未全部通过：fmt/check/clippy(-D warnings)/diff 通过，库 105 项及主集成 250 项通过（包含专属 M0 混合查询，集成 0 忽略，64.48 秒）；随后 34 节点发现目标失败，PeerStore 报系统找不到指定文件，重启节点 30 秒内恢复连接数为 0（target/m0-query-mixed-all-targets.log）。该目标单独诊断重跑 11.76 秒通过（target/m0-query-discovery-diagnostic.log），不能据此抹掉全量失败或宣称间歇根因已修复。账户查询专项与跨系统真实调用已通过，但按完整门禁要求，M0 整体验收不能标记完成。失败日志与私有测试现场保留；本段只扩展验收夹具，没有擅自修改 PeerStore、共识或持久化实现。
+
+最终闭环：继续定位上述 PeerStore 失败，受控双实例写同一 `.peers.new` 复现 14 次 NotFound；复用已有按路径锁修复重启期间旧 blocking worker 与新实例写入的竞争。并发回归与现有缓存失败安全测试通过；修复后的 fmt/check/clippy(-D warnings)/diff、普通 Windows all-targets 全部通过（库 106、主集成 250 且混合实际执行/0 忽略、34 节点目标 1），两端同源原生 Release 混合钱包查询另行通过（33.89 秒）。本轮约定 M0 功能与必做验收现已完成；历史失败记录保留为当时事实。确认由本次创建的临时日志、测试状态及 WSL 构建目录已清理，具体根因、数字和边界见 node-operations.md 的 PeerStore 修复段。M0 仍不提供独立 BFT 资产完整性、新鲜度或线性化证明。

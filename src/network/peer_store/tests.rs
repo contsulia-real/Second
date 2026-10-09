@@ -96,6 +96,63 @@ fn record(id: u16) -> PeerRecord {
 }
 
 #[test]
+fn independent_instances_can_persist_the_same_cache_without_staging_collisions() {
+    let (_store, base) = crate::prepared::tests::temp_store();
+    let path = crate::persistence::slot::append_suffix(&base, ".peers");
+    let caches = [
+        PeerStore::load(path.clone()).unwrap(),
+        PeerStore::load(path.clone()).unwrap(),
+    ];
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let workers = caches
+        .into_iter()
+        .enumerate()
+        .map(|(index, cache)| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut errors = Vec::new();
+                for round in 0..512 {
+                    barrier.wait();
+                    if let Err(error) =
+                        cache.record_authenticated(&record(index as u16 * 512 + round + 1))
+                    {
+                        errors.push(error);
+                    }
+                }
+                errors
+            })
+        })
+        .collect::<Vec<_>>();
+    let errors = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    let persisted = PeerStore::load(path.clone())
+        .unwrap()
+        .recent(MAX_LOCAL_PEER_CANDIDATES, &[]);
+    for file in [
+        path.clone(),
+        crate::persistence::slot::append_suffix(&path, ".new"),
+        base,
+    ] {
+        match fs::remove_file(file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to clean peer cache regression fixture: {error}"),
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "independent cache writers collided: {errors:?}"
+    );
+    assert_eq!(
+        persisted.len(),
+        usize::from(MAX_LOCAL_PEER_CANDIDATES),
+        "the final file must contain one complete cache snapshot"
+    );
+}
+
+#[test]
 fn validator_candidates_survive_public_churn_restart_and_authority_retirement() {
     let path = std::env::temp_dir().join(format!(
         "second-peer-priority-{}-{}.peers",
@@ -150,12 +207,10 @@ fn validator_candidates_survive_public_churn_restart_and_authority_retirement() 
 
 #[test]
 fn one_validator_cannot_pin_multiple_transport_identities() {
-    let cache = PeerStore {
-        path: Arc::new(
-            std::env::temp_dir().join(format!("second-peer-identity-{}.peers", std::process::id())),
-        ),
-        records: Arc::new(Mutex::new(Vec::new())),
-    };
+    let cache = PeerStore::load(
+        std::env::temp_dir().join(format!("second-peer-identity-{}.peers", std::process::id())),
+    )
+    .unwrap();
     for id in 1..=150 {
         cache
             .record_validator_authenticated(&record(id), ValidatorId::new(1))

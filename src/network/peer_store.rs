@@ -20,6 +20,7 @@ struct CachedPeer {
 pub(crate) struct PeerStore {
     path: Arc<PathBuf>,
     records: Arc<Mutex<Vec<CachedPeer>>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl PeerStore {
@@ -48,6 +49,10 @@ impl PeerStore {
     }
 
     pub(crate) fn load(path: PathBuf) -> Result<Self, NetworkError> {
+        let write_lock = crate::persistence::slot::shared_path_lock(&path);
+        let guard = write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let records = match fs::File::open(&path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
@@ -59,10 +64,12 @@ impl PeerStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(peer_store_error(error)),
         };
+        drop(guard);
 
         Ok(Self {
             path: Arc::new(path),
             records: Arc::new(Mutex::new(records)),
+            write_lock,
         })
     }
 
@@ -111,7 +118,7 @@ impl PeerStore {
                     entry.validator = None;
                 }
             }
-            persist_records(&self.path, &updated)?;
+            self.persist_records(&updated)?;
             *records = updated;
         }
         let mut candidates = records
@@ -167,7 +174,7 @@ impl PeerStore {
         }
         updated.push(entry);
 
-        persist_records(&self.path, &updated)?;
+        self.persist_records(&updated)?;
         *records = updated;
         Ok(())
     }
@@ -191,15 +198,19 @@ impl PeerStore {
         let mut updated = records.clone();
         let failed = updated.remove(position);
         updated.insert(0, failed);
-        persist_records(&self.path, &updated)?;
+        self.persist_records(&updated)?;
         *records = updated;
         Ok(())
     }
-}
-
-fn persist_records(path: &Path, records: &[CachedPeer]) -> Result<(), NetworkError> {
-    let encoded = codec::encode(records)?;
-    write_store(path, &encoded)
+    fn persist_records(&self, records: &[CachedPeer]) -> Result<(), NetworkError> {
+        let encoded = codec::encode(records)?;
+        // Restarted runtimes can overlap with the old runtime's blocking cache writes.
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        write_store(&self.path, &encoded)
+    }
 }
 
 fn write_store(path: &Path, encoded: &[u8]) -> Result<(), NetworkError> {

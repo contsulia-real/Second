@@ -162,7 +162,7 @@ cargo build --release --locked --bin second --example mixed_snapshot_probe
 
 ```powershell
 $env:SECOND_WSL_DISTRO = 'Ubuntu-26.04'
-$env:SECOND_WSL_BINARY = '/home/why23/second-m0-mixed-20261009-8281392/target/release/second'
+$env:SECOND_WSL_BINARY = '/path/to/native-checkout/target/release/second' # 替换为实际 Linux 原生构建路径。
 cargo test --release --test integration mixed_windows_linux -- --nocapture
 # 上述变量同样必须提供给普通 Windows 全量门禁。
 cargo test --all-targets
@@ -185,6 +185,18 @@ M0 专属验收同时运行原生 Windows 与 Linux 钱包，每个钱包只配�
 2026-10-09 M0 补验并强制门禁：从当前生产源码重建两端原生 Release，205 个生产构建输入在 CRLF→LF 归一化后 SHA-256 一致（target/m0-mixed-source-verification.json）。Release 混合验收 1 项通过、0 失败、0 忽略，25.83 秒（target/m0-required-mixed-release.log）；普通 Windows all-targets 的 250 项主集成全部通过，包含混合场景、0 忽略，44.86 秒（target/m0-required-mixed-all-targets.log）。库 105 项、34 节点目标及 examples 同样通过，fmt/check/clippy(-D warnings)/diff 检查通过。故意移除 SECOND_WSL_BINARY 的负向验收立即退出 101、1 失败、0 忽略，证明缺少环境不能被当作通过（target/m0-required-mixed-missing-env.log）。本次没有修改生产代码、测试期限或安全断言；成功现场与 owned 子进程清理完毕。该验收是同机跨系统支付/恢复基线，不是专门的账户查询跨系统对抗测试，也不覆盖独立物理主机或整机 boot。
 
 随后加入上述 M0 专属钱包调用的 Release 场景 29.68 秒通过（target/m0-query-mixed-release.log），两端主程序及 probe 摘要与此前重建产物相同。默认 Windows 全量库 105、主集成 250 通过，包含混合查询；但后续 34 节点目标在 PeerStore 文件未找到与重启发现阶段失败（target/m0-query-mixed-all-targets.log）。单独重跑通过（11.76 秒，target/m0-query-discovery-diagnostic.log）只提供定位线索，不能覆盖原失败。当前整套验收未全绿；混合查询成功现场已清理，34 节点失败现场保留，不延长期限或将其标为 ignored。
+
+### 2026-10-09：PeerStore 重启并发写入修复
+
+上述失败继续排查后复现：旧 runtime 被 abort 后，其已启动的 spawn_blocking 缓存写入仍可继续；新 runtime 加载同一路径产生独立 PeerStore，原先只有各实例的 records 锁，两个实例同时截断、写入并 rename 同一 `.peers.new`。受控双线程、各 512 次写入的回归测试在修改前产生 14 次 NotFound；这解释了后台缓存失败使重启发现退出的故障路径。
+
+PeerStore 现在复用 persistence::slot::shared_path_lock，加载文件及写入 staging/fsync/rename 共用同路径进程内锁。不同缓存路径仍独立，编码和内存校验不增加磁盘读写；写入失败仍不发布新缓存或认证连接。缓存保持 best-effort，不保证独立实例内存视图合并；CLI 的跨进程 runtime 目录锁继续负责进程隔离。没有新增锁文件、共识状态或 owner 索引。
+
+修改后并发回归与现有缓存测试 4 项通过，既有 cache_write_failure_cannot_publish_an_authenticated_validator_connection 通过。完整门禁结果另记，不能用这些定向通过替代全量验收。
+
+修复后最终验收：fmt/check/clippy(-D warnings)/diff 通过；默认 Windows all-targets 全部通过，库 106 项（跨进程锁 helper 的直接入口仍 ignored，但由父测试启动的子进程实际通过）、主集成 250 项且 0 忽略（45.40 秒）、34 节点重启发现目标 1 项（32.60 秒），examples 通过。没有改变线程数、期限或断言。修复后的两端原生 Release、205 个归一化生产构建输入一致；独立 Release 混合场景 1 项通过、0 忽略，33.89 秒，包含 Windows→Linux 与 Linux→Windows 专属 M0 钱包查询。此前失败是实际失败，本次用并发复现、根因修复和重新全量通过闭环，而非仅凭单独重跑改判。
+
+清理记录：本次确认的 9 个 target/m0-* 临时日志、源码归档与摘要文件、1043 个已结束测试的临时文件，以及 `/home/why23/second-m0-mixed-20261009-8281392` 临时原生构建目录（261116364 字节）已删除；历史段落中的这些日志路径只标识当时运行，不再指向保留附件。最终复核本轮新增临时项为零、两端 mixed 临时目录为空、本次节点和测试进程已停止。未删除既有 target 编译缓存、未改变用户 WSL 配置或其他服务。上面的构建路径示例为占位符，后续验收需提供实际同源原生构建产物，不依赖这份已删除的临时目录。
 
 ### Membership 持久追赶边界
 

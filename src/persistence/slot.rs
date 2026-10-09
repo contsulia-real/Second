@@ -13,7 +13,7 @@ use super::commit::{self, CommitReference};
 
 type PathLockMap = BTreeMap<PathBuf, Weak<Mutex<()>>>;
 
-pub(super) fn shared_path_lock(path: &Path) -> Arc<Mutex<()>> {
+pub(crate) fn shared_path_lock(path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<PathLockMap>> = OnceLock::new();
 
     let mut locks = LOCKS

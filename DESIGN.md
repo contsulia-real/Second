@@ -2137,3 +2137,5 @@ AccountQuery 结构与账户签名先验证，再加载私有快照。每个账�
 M0 专属混合查询验收：在原强制混合集群加入原生 Windows→Linux 与 Linux→Windows 的真实钱包调用，每钱包仅配置对方的一个固定证书端点，分别验证 balance、257 份 Currency 的三页 assets、地址及历史；账户/数量/余额/终页/来源说明与两端清单一致。签名复用现有测试 account_key，原支付账户发行量调整为足以实际分页，后续掉线/恢复断言相应保持精确余额；不改变生产代码、协议、期限或安全边界。Release 混合场景 29.68 秒通过（target/m0-query-mixed-release.log）。此前基线未触及账户查询的验收缺口由这次实际调用补齐，不据此声称恶意 Validator 的独立资产完整性或新鲜度证明。
 
 本段最终 fmt/check/clippy(-D warnings)/diff 通过，默认 Windows 全量库 105 项与主集成 250 项通过（专属 M0 混合查询实际执行，0 忽略，64.48 秒）；34 节点目标失败，PeerStore 文件未找到导致重启发现连接数为 0（target/m0-query-mixed-all-targets.log）。该目标单独重跑 11.76 秒通过（target/m0-query-discovery-diagnostic.log），不据此声称间歇根因修复。当前 M0 专项通过，完整门禁仍有失败，整体验收不标记完成；失败日志与私有现场保留，没有为过门禁而扩展生产改动、放宽期限或忽略目标。
+
+最终闭环：继续复现并修复 PeerStore 独立实例共用 staging 文件却未共用锁的竞争，复用既有 persistence 按路径锁串行化同路径读写，保留缓存写入失败不发布认证连接的安全边界。受控并发回归修改前出现 14 次 NotFound，修改后通过；最终普通 Windows 全量门禁库 106、主集成 250（含专属 M0 混合查询，0 忽略）、34 节点目标 1 及 examples 全通过，fmt/check/clippy(-D warnings)/diff 通过。修复后的两端同源原生 Release 混合验收 33.89 秒通过。本轮 M0 功能与必做验收现已完成；此前失败及未验收记录仍代表当时事实。确认由本次创建的临时日志、失败/成功测试残留及临时 WSL 构建目录已清理，详细记录见 docs/node-operations.md。没有引入 M1/M2 或改变 Currency.owner 真值及 BFT 最终性。
