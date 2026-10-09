@@ -405,6 +405,19 @@ impl StateStore {
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
         validate_vote_validator_set(&latest, statement.scope(), validator_set)?;
+        let key = (validator_id, statement.scope().clone());
+        if latest
+            .validator_vote_locks
+            .get(&key)
+            .is_some_and(|locked| *locked != digest)
+            || latest
+                .bft_local_states
+                .get(&key)
+                .and_then(|state| state.finality_ready_digest())
+                .is_some_and(|ready| ready != digest)
+        {
+            return Err(PersistenceError::BftFinalityNotReady);
+        }
         let opens_voting = matches!(statement.scope(), ConsensusScope::PreparedTask(task_id)
             if latest.prepared_tasks[task_id].phase == PreparedTaskPhase::Prepared);
         open_prepared_voting(&mut latest, statement.scope())?;
@@ -424,6 +437,7 @@ impl StateStore {
             && state.round() >= statement.round()
             && state.finality_ready_round() == Some(statement.round())
             && state.finality_ready_digest() == Some(digest)
+            && state.finality_qc().is_some()
         {
             return Ok(latest.generation);
         }
@@ -431,6 +445,7 @@ impl StateStore {
             state.set_round(statement.round());
         }
         state.mark_finality_ready(statement.round(), digest);
+        state.remember_finality_qc(certificate);
         self.write_local_metadata_unlocked(&latest)
     }
 

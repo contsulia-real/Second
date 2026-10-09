@@ -41,6 +41,7 @@ mod runtime_allocation_capacity;
 mod runtime_bft;
 mod runtime_checkpoint_connectivity;
 mod runtime_conflicts;
+mod runtime_finality_recovery;
 mod runtime_governance_restart;
 mod runtime_historical_source;
 mod runtime_prepared_source;

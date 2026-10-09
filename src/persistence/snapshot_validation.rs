@@ -215,6 +215,45 @@ pub(super) fn validate_bft_local_state_registry(
                 .verify(validator_set)
                 .map_err(|_| PersistenceError::InvalidSnapshot)?;
         }
+        if let Some(certificate) = state.finality_qc() {
+            let statement = certificate.statement();
+            let validator_set = resolve_validator_set(
+                active_validator_set,
+                retained_validator_sets,
+                state.validator_set_version(),
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+            if statement.scope() != scope
+                || statement.validator_set_version() != state.validator_set_version()
+                || statement.phase() != crate::BftPhase::Precommit
+                || !matches!(statement.value(), crate::BftValue::Digest(_))
+                || state.finality_ready_round() != Some(statement.round())
+                || state.finality_ready_digest() != statement.value().digest()
+                || statement.round() > state.round()
+            {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            if let ConsensusScope::PreparedTask(task_id) = scope {
+                let plan = &prepared_tasks[task_id];
+                let digest = statement
+                    .value()
+                    .digest()
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                if digest
+                    != crate::task_abort::statement(task_id, plan.request_digest, validator_set)
+                        .subject_digest()
+                    && plan
+                        .candidate(digest)
+                        .map_err(|_| PersistenceError::InvalidSnapshot)?
+                        .is_none()
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+            certificate
+                .verify(validator_set)
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        }
     }
 
     Ok(())

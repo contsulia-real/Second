@@ -303,7 +303,7 @@ impl NodeRuntime {
             .as_ref()
             .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
         let now = runtime.now();
-        // A verified terminal quorum proves prior admission of this exact plan.
+        // A verified finality or Precommit quorum proves prior admission of this exact plan.
         // It preserves time eligibility, not business validity or resource rights.
         let now = if verified.is_expired(now)
             && runtime.consensus().has_certified_source(

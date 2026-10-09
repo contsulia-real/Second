@@ -359,6 +359,7 @@ pub struct BftLocalState {
     precommit: Option<BftValue>,
     finality_ready_round: Option<u64>,
     finality_ready_digest: Option<[u8; 32]>,
+    finality_qc: Option<BftQuorumCertificate>,
 }
 
 impl BftLocalState {
@@ -373,6 +374,7 @@ impl BftLocalState {
             precommit: None,
             finality_ready_round: None,
             finality_ready_digest: None,
+            finality_qc: None,
         }
     }
 
@@ -387,6 +389,7 @@ impl BftLocalState {
         precommit: Option<BftValue>,
         finality_ready_round: Option<u64>,
         finality_ready_digest: Option<[u8; 32]>,
+        finality_qc: Option<BftQuorumCertificate>,
     ) -> Self {
         Self {
             validator_set_version,
@@ -398,6 +401,7 @@ impl BftLocalState {
             precommit,
             finality_ready_round,
             finality_ready_digest,
+            finality_qc,
         }
     }
 
@@ -452,6 +456,14 @@ impl BftLocalState {
 
     pub(crate) const fn finality_ready_digest(&self) -> Option<[u8; 32]> {
         self.finality_ready_digest
+    }
+
+    pub(crate) fn finality_qc(&self) -> Option<&BftQuorumCertificate> {
+        self.finality_qc.as_ref()
+    }
+
+    pub(crate) fn remember_finality_qc(&mut self, certificate: &BftQuorumCertificate) {
+        self.finality_qc = Some(certificate.clone());
     }
 
     pub(crate) fn set_round(&mut self, round: u64) {

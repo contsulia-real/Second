@@ -623,10 +623,15 @@ impl BftConsensusCoordinator {
             scope.clone(),
         )?;
         driver.register_subject(&subject)?;
-        let valid_prevote_qc = store
+        let durable_bft = store
             .bft_local_state(signer.validator_id(), &scope)
-            .map_err(BftConsensusRuntimeError::Persistence)?
+            .map_err(BftConsensusRuntimeError::Persistence)?;
+        let valid_prevote_qc = durable_bft
+            .as_ref()
             .and_then(|state| state.valid_prevote_qc().cloned());
+        let finality_qc = durable_bft
+            .as_ref()
+            .and_then(|state| state.finality_qc().cloned());
         self.sessions.insert(
             scope.clone(),
             BftConsensusSession {
@@ -639,7 +644,7 @@ impl BftConsensusCoordinator {
                 valid_prevote_qc,
                 subject,
                 finality_votes: BTreeMap::new(),
-                finality_qc: None,
+                finality_qc,
                 finality_certificate: None,
                 relayed_finality_certificate: false,
                 bft_finality_ready: false,

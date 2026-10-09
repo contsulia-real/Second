@@ -36,18 +36,7 @@ pub(super) fn encode_local_state(
         out.extend_from_slice(&state.validator_set_version().to_be_bytes());
         out.extend_from_slice(&state.round().to_be_bytes());
         encode_optional_lock(out, state.locked_round(), state.locked_digest());
-        match state.valid_prevote_qc() {
-            Some(certificate) => {
-                out.push(1);
-                let bytes = crate::encode_bft_network_message(
-                    &crate::BftNetworkMessage::QuorumCertificate(certificate.clone()),
-                )
-                .map_err(|_| PersistenceError::InvalidSnapshot)?;
-                push_len(out, bytes.len())?;
-                out.extend_from_slice(&bytes);
-            }
-            None => out.push(0),
-        }
+        encode_optional_qc(out, state.valid_prevote_qc())?;
         encode_optional_bft_value(out, state.prevote());
         encode_optional_bft_value(out, state.precommit());
         encode_optional_lock(
@@ -55,6 +44,7 @@ pub(super) fn encode_local_state(
             state.finality_ready_round(),
             state.finality_ready_digest(),
         );
+        encode_optional_qc(out, state.finality_qc())?;
     }
 
     Ok(())
@@ -97,25 +87,14 @@ pub(super) fn decode_local_state(
         if locked_round.is_some_and(|locked| locked > round) {
             return Err(PersistenceError::InvalidSnapshot);
         }
-        let valid_prevote_qc = match decoder.read_u8()? {
-            0 => None,
-            1 => {
-                let length = decoder.read_len()?;
-                match crate::decode_bft_network_message(decoder.read_exact(length)?)
-                    .map_err(|_| PersistenceError::InvalidSnapshot)?
-                {
-                    crate::BftNetworkMessage::QuorumCertificate(certificate) => Some(certificate),
-                    _ => return Err(PersistenceError::InvalidSnapshot),
-                }
-            }
-            _ => return Err(PersistenceError::InvalidSnapshot),
-        };
+        let valid_prevote_qc = decode_optional_qc(decoder)?;
         let prevote = decode_optional_bft_value(decoder)?;
         let precommit = decode_optional_bft_value(decoder)?;
         let (finality_ready_round, finality_ready_digest) = decode_optional_lock(decoder)?;
         if finality_ready_round.is_some_and(|ready| ready > round) {
             return Err(PersistenceError::InvalidSnapshot);
         }
+        let finality_qc = decode_optional_qc(decoder)?;
 
         let state = BftLocalState::from_persisted(
             validator_set_version,
@@ -127,6 +106,7 @@ pub(super) fn decode_local_state(
             precommit,
             finality_ready_round,
             finality_ready_digest,
+            finality_qc,
         );
         if bft_states.insert((validator_id, scope), state).is_some() {
             return Err(PersistenceError::InvalidSnapshot);
@@ -134,6 +114,43 @@ pub(super) fn decode_local_state(
     }
 
     Ok((prepared_tasks, vote_locks, bft_states))
+}
+
+fn encode_optional_qc(
+    out: &mut Vec<u8>,
+    certificate: Option<&crate::BftQuorumCertificate>,
+) -> Result<(), PersistenceError> {
+    match certificate {
+        Some(certificate) => {
+            out.push(1);
+            let bytes = crate::encode_bft_network_message(
+                &crate::BftNetworkMessage::QuorumCertificate(certificate.clone()),
+            )
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+            push_len(out, bytes.len())?;
+            out.extend_from_slice(&bytes);
+        }
+        None => out.push(0),
+    }
+    Ok(())
+}
+
+fn decode_optional_qc(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<crate::BftQuorumCertificate>, PersistenceError> {
+    match decoder.read_u8()? {
+        0 => Ok(None),
+        1 => {
+            let length = decoder.read_len()?;
+            match crate::decode_bft_network_message(decoder.read_exact(length)?)
+                .map_err(|_| PersistenceError::InvalidSnapshot)?
+            {
+                crate::BftNetworkMessage::QuorumCertificate(certificate) => Ok(Some(certificate)),
+                _ => Err(PersistenceError::InvalidSnapshot),
+            }
+        }
+        _ => Err(PersistenceError::InvalidSnapshot),
+    }
 }
 
 fn encode_optional_lock(out: &mut Vec<u8>, round: Option<u64>, digest: Option<[u8; 32]>) {

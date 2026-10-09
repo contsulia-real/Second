@@ -180,7 +180,9 @@ impl StateStore {
             return Err(PersistenceError::InvalidSnapshot);
         }
         let mut changed = local.finality_ready_digest() != Some(digest);
-        local.mark_finality_ready(local.round(), digest);
+        if changed {
+            local.mark_finality_ready(local.round(), digest);
+        }
         let (choices_changed, losers) = protect_plan(&mut latest, task_id, digest)?;
         changed |= choices_changed;
         if changed {

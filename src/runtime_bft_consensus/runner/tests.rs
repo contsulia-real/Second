@@ -145,7 +145,10 @@ async fn running_node_resumes_business_after_external_certified_frontier_advance
     let _ = worker.await;
     assert!(
         completed.is_ok(),
-        "external certified frontier failed to resume its durable business"
+        "external certified frontier failed to resume its durable business: events={:?}, bindings={:?}, prepared={:?}",
+        node.drain_bft_consensus_events().unwrap(),
+        store.load().unwrap().unwrap().state.protocol.task_bindings,
+        store.load().unwrap().unwrap().prepared_tasks,
     );
     let cold = crate::StateStore::new(&base).load().unwrap().unwrap();
     assert_eq!(cold.state.next_currency_address(), 2);

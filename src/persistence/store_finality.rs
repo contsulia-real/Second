@@ -71,7 +71,11 @@ impl StateStore {
         latest
             .validator_vote_locks
             .insert((validator_id, scope.clone()), digest);
-        latest.bft_local_states.remove(&(validator_id, scope));
+        // A task's immutable vote still needs its decision proof to enlist a
+        // missing honest signer after restart. Terminal task writes retire it.
+        if !matches!(scope, ConsensusScope::PreparedTask(_)) {
+            latest.bft_local_states.remove(&(validator_id, scope));
+        }
 
         self.write_next_unlocked(
             Some(latest.generation),

@@ -293,6 +293,34 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
         Err(crate::PersistenceError::InvalidSnapshot)
     ));
     assert_eq!(store.load().unwrap().unwrap().generation, generation);
+    let waiting_scope = ConsensusScope::PreparedTask(waiting.task_id());
+    let statement = crate::BftStatement::new(
+        1,
+        waiting_scope.clone(),
+        0,
+        BftPhase::Precommit,
+        BftValue::Digest(waiting_digest),
+    );
+    let decision_qc = BftQuorumCertificate::new(
+        statement.clone(),
+        (2..=4)
+            .map(|id| {
+                crate::BftVote::sign_unchecked(
+                    &statement,
+                    ValidatorId::new(id),
+                    &key((id * 3 + 1) as u8),
+                )
+            })
+            .collect(),
+        &validators,
+    )
+    .unwrap();
+    store
+        .accept_bft_precommit_qc(ValidatorId::new(1), &decision_qc, &validators)
+        .unwrap();
+    store
+        .advance_bft_round(ValidatorId::new(1), &waiting_scope, 1)
+        .unwrap();
     let certificate = certify(waiting_digest);
     assert!(
         store
@@ -305,6 +333,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
             .is_empty()
     );
     let cold = crate::StateStore::new(&base).load().unwrap().unwrap();
+    let local = &cold.bft_local_states[&(ValidatorId::new(1), waiting_scope)];
+    assert_eq!(local.finality_ready_round(), Some(0));
+    assert_eq!(local.finality_qc(), Some(&decision_qc));
     assert!(!cold.prepared_tasks[&holder.task_id()].conflict_abort);
     assert!(
         !cold.prepared_tasks[&waiting.task_id()]

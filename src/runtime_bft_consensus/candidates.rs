@@ -235,13 +235,29 @@ impl ValidatorConsensusRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         pending_for(&coordinator, scope).any(|message| {
-            matches!(
-                &message.message,
-                BftNetworkMessage::FinalityCertificate { scope: candidate, certificate }
-                    if candidate == scope
-                        && certificate.statement().subject_digest() == digest
-                        && certificate.verify(validators).is_ok()
-            )
+            match &message.message {
+                BftNetworkMessage::FinalityCertificate {
+                    scope: candidate,
+                    certificate,
+                } if candidate == scope
+                    && certificate.statement().subject_digest() == digest
+                    && certificate.verify(validators).is_ok() =>
+                {
+                    true
+                }
+                // A decided exact task was admitted by an honest member of the
+                // original quorum. This restores time eligibility only.
+                BftNetworkMessage::QuorumCertificate(qc)
+                    if matches!(scope, ConsensusScope::PreparedTask(_))
+                        && qc.statement().scope() == scope
+                        && qc.statement().phase() == BftPhase::Precommit
+                        && qc.statement().value() == BftValue::Digest(digest)
+                        && qc.verify(validators).is_ok() =>
+                {
+                    true
+                }
+                _ => false,
+            }
         })
     }
 
