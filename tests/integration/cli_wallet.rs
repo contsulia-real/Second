@@ -281,6 +281,25 @@ fn two_real_wallets_transfer_without_authorizer_and_reject_tampering() {
     assert!(retry.contains("state=succeeded"), "{retry}");
     let bob_balance = checked(wallet(exe, "balance", &bob_dir, &pass, &[]));
     assert!(bob_balance.contains("\"balance\": 1"), "{bob_balance}");
+    assert!(bob_balance.contains("independent_account_finality_proof=false"));
+    let assets = checked(wallet(exe, "assets", &bob_dir, &pass, &[]));
+    let json_end = assets.find("\nSOURCE ").unwrap();
+    let assets: Value = serde_json::from_str(&assets[..json_end]).unwrap();
+    assert_eq!(assets["total"], 1);
+    assert_eq!(assets["currencies"].as_array().unwrap().len(), 1);
+    assert_eq!(assets["next"], Value::Null);
+    let history = checked(wallet(exe, "history", &bob_dir, &pass, &[]));
+    let json_end = history.find("\nSOURCE ").unwrap();
+    let history: Value = serde_json::from_str(&history[..json_end]).unwrap();
+    assert!(
+        history["transfers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["task_id"] == task_text
+                && row["incoming"] == true
+                && row["amount"] == 1)
+    );
 
     // Export only the intended request and signature, then mutate the payload.
     // A wrong amount and a signature falsely attributed to Bob must both fail

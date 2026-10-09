@@ -646,7 +646,9 @@ fn print_view(view: &second::AccountView) -> Result<(), String> {
         "{}",
         serde_json::to_string_pretty(view).map_err(|error| error.to_string())?
     );
-    println!("SOURCE authenticated_node_snapshot=true independent_account_finality_proof=false");
+    println!(
+        "SOURCE authenticated_node_snapshot=true independent_account_finality_proof=false network_latest_guaranteed=false linearizable_read=false"
+    );
     Ok(())
 }
 

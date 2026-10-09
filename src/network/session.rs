@@ -366,6 +366,15 @@ async fn serve_public_connection(
             }
         };
 
+        if matches!(request.message(), NetworkMessage::AccountQuery { .. }) {
+            let loader = services
+                .as_ref()
+                .and_then(|services| services.recovery_snapshot_loader.clone());
+            let result = super::account_query::serve(peer, request, loader).await;
+            peer.close_with_reason(b"account query session ended");
+            return result;
+        }
+
         let response = if let Some(services) = &services
             && !matches!(request.message(), NetworkMessage::Ping { .. })
         {
@@ -398,13 +407,6 @@ fn public_connection_response(
     static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
     services: Option<&PublicNetworkServices>,
 ) -> Result<NetworkMessage, NetworkError> {
-    if matches!(message, NetworkMessage::AccountQuery { .. }) {
-        let snapshot = services
-            .and_then(|services| services.recovery_snapshot_loader.as_ref())
-            .map(|loader| loader())
-            .transpose()?;
-        return super::account_query::response(peer, message, snapshot.as_deref());
-    }
     let recovery_response = services.and_then(|services| {
         services
             .recovery_snapshot_loader

@@ -12,9 +12,7 @@ pub(super) fn encode(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> 
             nonce,
             signature,
         } => {
-            if !(1..=4).contains(kind) {
-                return Err(NetworkError::InvalidAccountQuery);
-            }
+            super::super::account_query::validate_request(*kind, *cursor, *generation)?;
             out.push(44);
             out.extend_from_slice(account);
             out.push(*kind);
@@ -35,7 +33,10 @@ pub(super) fn encode(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> 
             out.push(match reason.as_str() {
                 "unauthorized" => 1,
                 "unavailable" => 2,
-                "state_changed" => 3,
+                "invalid_query" => 3,
+                "budget_exceeded" => 4,
+                "busy" => 5,
+                "session_expired" => 6,
                 _ => return Err(NetworkError::InvalidAccountQuery),
             });
         }
@@ -54,9 +55,11 @@ pub(super) fn decode(kind: u8, payload: &[u8]) -> Result<NetworkMessage, Network
                 1 => Some(generation),
                 _ => return Err(NetworkError::InvalidAccountQuery),
             };
-            if !(1..=4).contains(&payload[33]) {
-                return Err(NetworkError::InvalidAccountQuery);
-            }
+            super::super::account_query::validate_request(
+                payload[33],
+                u64::from_be_bytes(payload[34..42].try_into().unwrap()),
+                generation,
+            )?;
             Ok(NetworkMessage::AccountQuery {
                 account: payload[1..33].try_into().unwrap(),
                 kind: payload[33],
@@ -76,7 +79,10 @@ pub(super) fn decode(kind: u8, payload: &[u8]) -> Result<NetworkMessage, Network
                 reason: match payload[1] {
                     1 => "unauthorized",
                     2 => "unavailable",
-                    3 => "state_changed",
+                    3 => "invalid_query",
+                    4 => "budget_exceeded",
+                    5 => "busy",
+                    6 => "session_expired",
                     _ => return Err(NetworkError::InvalidAccountQuery),
                 }
                 .to_owned(),

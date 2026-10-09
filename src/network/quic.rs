@@ -203,6 +203,10 @@ impl QuicPeer {
         peer_channel_binding(&self.connection)
     }
 
+    pub(crate) async fn closed(&self) {
+        self.connection.closed().await;
+    }
+
     pub fn close(&self) {
         self.close_with_reason(b"done");
     }

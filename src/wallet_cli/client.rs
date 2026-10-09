@@ -82,45 +82,9 @@ impl WalletNode {
         let mut last = String::new();
         for attempt in 0..3 {
             let (client, peer) = self.connect(data, attempt).await?;
-            let result = tokio::time::timeout(Duration::from_secs(30), async {
-                let mut cursor = 0;
-                let mut combined: Option<AccountView> = None;
-                loop {
-                    let generation = combined.as_ref().map(|view| view.generation);
-                    let page = second::client_account_query(&peer, &key, kind, cursor, generation)
-                        .await
-                        .map_err(|error| format!("account query: {error:?}"))?;
-                    let next = page.next;
-                    if let Some(view) = &mut combined {
-                        if page.exists != view.exists
-                            || page.balance != view.balance
-                            || page.validator_set_version != view.validator_set_version
-                        {
-                            return Err("inconsistent account pages".to_owned());
-                        }
-                        view.addresses.extend(page.addresses);
-                        view.transfers.extend(page.transfers);
-                        view.currencies.extend(page.currencies);
-                        view.next = None;
-                    } else {
-                        combined = Some(page);
-                    }
-                    if combined.as_ref().is_some_and(|view| {
-                        view.addresses.len() + view.transfers.len() + view.currencies.len()
-                            > 100_000
-                    }) {
-                        return Err("account query exceeds 100000-row client budget".to_owned());
-                    }
-                    match next {
-                        Some(next) => cursor = next,
-                        None => break,
-                    }
-                }
-                Ok(combined.unwrap())
-            })
-            .await
-            .map_err(|_| "account query timed out".to_owned())
-            .and_then(|result| result);
+            let result = second::client_account_view(&peer, &key, kind)
+                .await
+                .map_err(|error| format!("account query: {error:?}"));
             peer.close();
             client.wait_idle().await;
             match result {
