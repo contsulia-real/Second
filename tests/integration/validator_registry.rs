@@ -23,6 +23,7 @@ fn retired_validator_id_can_never_rejoin() {
         without_four.clone(),
         Vec::new(),
         Vec::new(),
+        1,
     )
     .unwrap();
     certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);
@@ -83,6 +84,7 @@ fn historical_consensus_key_can_never_be_reassigned() {
         rotated.clone(),
         Vec::new(),
         vec![rotation],
+        1,
     )
     .unwrap();
     certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);
@@ -122,6 +124,7 @@ fn retired_identity_history_survives_snapshot_restart() {
         without_four.clone(),
         Vec::new(),
         Vec::new(),
+        1,
     )
     .unwrap();
     certify_and_activate_validator_transition(&current, &mut registry, transition, [1, 2, 3]);

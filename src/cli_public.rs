@@ -13,6 +13,8 @@ pub(crate) fn public_init(
     destination_snapshot_base: &str,
     trust_snapshot_base: &str,
 ) -> Result<(), String> {
+    let _directory_lock =
+        crate::local_file::lock_node_directory(std::path::Path::new(destination_snapshot_base))?;
     if StateStore::new(destination_snapshot_base)
         .load()
         .map_err(|error| format!("failed to inspect destination full snapshot: {error:?}"))?

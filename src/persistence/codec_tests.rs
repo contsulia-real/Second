@@ -9,9 +9,9 @@ use crate::payment::{EstablishedTransfer, PaymentExecution};
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::state::TaskBinding;
 use crate::{
-    AccountAddress, CURRENT_PROTOCOL_VERSION, CurrencyAddress, LegalTask, LegalTaskPayload,
-    Operation, OperationClaimId, PaymentAddress, PersistenceError, PreparationError, SecondState,
-    TaskId, ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
+    CURRENT_PROTOCOL_VERSION, CurrencyAddress, LegalTask, LegalTaskPayload, Operation,
+    OperationClaimId, PaymentAddress, PersistenceError, PreparationError, SecondState, TaskId,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
 fn prepared_source(task_id: &TaskId) -> (LegalTask, [u8; 32]) {
@@ -20,12 +20,13 @@ fn prepared_source(task_id: &TaskId) -> (LegalTask, [u8; 32]) {
         CURRENT_PROTOCOL_VERSION,
         None,
         vec![Operation::Issue {
-            account: AccountAddress::from_bytes([31; 32]),
+            account: crate::test_helpers::account(31),
             count: 1,
         }],
     );
-    let task = LegalTask::sign(payload, &ed25519_dalek::SigningKey::from_bytes(&[32; 32]))
-        .expect("test LegalTask must encode");
+    let task =
+        crate::test_helpers::sign(payload, &ed25519_dalek::SigningKey::from_bytes(&[32; 32]))
+            .expect("test LegalTask must encode");
     let digest = task.request_digest().expect("test LegalTask must encode");
     (task, digest)
 }
@@ -36,8 +37,8 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let (source_task, request_digest) = prepared_source(&task_id);
     let source = PaymentAddress::from_bytes([1; 32]);
     let destination = PaymentAddress::from_bytes([2; 32]);
-    let source_account = AccountAddress::from_bytes([3; 32]);
-    let destination_account = AccountAddress::from_bytes([4; 32]);
+    let source_account = crate::test_helpers::account(3);
+    let destination_account = crate::test_helpers::account(4);
     let transfer = EstablishedTransfer {
         source,
         destination,
@@ -50,8 +51,11 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let bindings = BTreeMap::from([(
         task_id.clone(),
         TaskBinding {
+            allocation: None,
+            allocation_task: None,
+            allocation_certificate: None,
             request_digest,
-            succeeded: false,
+            outcome: crate::state::TaskOutcome::Pending,
         },
     )]);
     let payment_addresses = BTreeMap::from([
@@ -96,6 +100,8 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
 
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &bindings,
             &payment_addresses,
             &executions,
@@ -108,12 +114,17 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     let wrong_bindings = BTreeMap::from([(
         task_id.clone(),
         TaskBinding {
+            allocation: None,
+            allocation_task: None,
+            allocation_certificate: None,
             request_digest: [8; 32],
-            succeeded: false,
+            outcome: crate::state::TaskOutcome::Pending,
         },
     )]);
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &wrong_bindings,
             &payment_addresses,
             &executions,
@@ -127,6 +138,8 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
     wrong_execution.get_mut(&claim_id).unwrap().amount = 2;
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &bindings,
             &payment_addresses,
             &wrong_execution,
@@ -141,12 +154,15 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
 fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     let task_id = TaskId::parse("vote-lock-plan").unwrap();
     let (source_task, request_digest) = prepared_source(&task_id);
-    let account = AccountAddress::from_bytes([3; 32]);
+    let account = crate::test_helpers::account(3);
     let bindings = BTreeMap::from([(
         task_id.clone(),
         TaskBinding {
+            allocation: None,
+            allocation_task: None,
+            allocation_certificate: None,
             request_digest,
-            succeeded: false,
+            outcome: crate::state::TaskOutcome::Pending,
         },
     )]);
     let mut prepared_task = PreparedTask::new(
@@ -173,6 +189,8 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     )]);
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &bindings,
             &BTreeMap::new(),
             &executions,
@@ -188,6 +206,8 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
     )]);
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &bindings,
             &BTreeMap::new(),
             &executions,
@@ -213,6 +233,8 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
 
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &executions,
@@ -225,12 +247,17 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
     let unfinished = BTreeMap::from([(
         task_id.clone(),
         TaskBinding {
+            allocation: None,
+            allocation_task: None,
+            allocation_certificate: None,
             request_digest: [8; 32],
-            succeeded: false,
+            outcome: crate::state::TaskOutcome::Pending,
         },
     )]);
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &unfinished,
             &BTreeMap::new(),
             &executions,
@@ -243,12 +270,17 @@ fn prepared_vote_lock_without_active_plan_requires_succeeded_binding() {
     let succeeded = BTreeMap::from([(
         task_id,
         TaskBinding {
+            allocation: None,
+            allocation_task: None,
+            allocation_certificate: None,
             request_digest: [8; 32],
-            succeeded: true,
+            outcome: crate::state::TaskOutcome::Succeeded,
         },
     )]);
     assert_eq!(
         validate_prepared_snapshot_links(
+            &crate::prepared::tests::validator_set(),
+            &BTreeMap::new(),
             &succeeded,
             &BTreeMap::new(),
             &executions,
@@ -264,8 +296,8 @@ fn prepared_transfer_rejects_currency_count_different_from_frozen_amount() {
     let task_id = TaskId::parse("transfer-count-mismatch").unwrap();
     let source = PaymentAddress::from_bytes([1; 32]);
     let destination = PaymentAddress::from_bytes([2; 32]);
-    let source_account = AccountAddress::from_bytes([3; 32]);
-    let destination_account = AccountAddress::from_bytes([4; 32]);
+    let source_account = crate::test_helpers::account(3);
+    let destination_account = crate::test_helpers::account(4);
     let (source_task, _) = prepared_source(&task_id);
     let prepared = PreparedTask::new(
         task_id,
@@ -294,7 +326,7 @@ fn prepared_transfer_rejects_currency_count_different_from_frozen_amount() {
 
 #[test]
 fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique() {
-    let account = AccountAddress::from_bytes([3; 32]);
+    let account = crate::test_helpers::account(3);
     let state = SecondState::genesis([account], 10);
 
     let valid = BTreeMap::from([(
@@ -432,7 +464,7 @@ fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
         prepared_source(&task_id).0,
         1,
         vec![PreparedOperation::Issue {
-            account: AccountAddress::from_bytes([3; 32]),
+            account: crate::test_helpers::account(3),
             addresses: vec![CurrencyAddress::new(1)],
         }],
     );

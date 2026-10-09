@@ -15,9 +15,11 @@ const ROTATION_SIZE: usize = 4 + 1 + 8 + 8 + 32 + 64;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatorSetTransitionSource {
     protocol_version: u32,
+    currency_frontier: u64,
     next_validator_set: ValidatorSet,
     admissions: Vec<ValidatorAdmissionRequest>,
     consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
+    handoff_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,17 +135,20 @@ impl ValidatorSetTransitionSource {
         next_validator_set: ValidatorSet,
         admissions: Vec<ValidatorAdmissionRequest>,
         consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
+        currency_frontier: u64,
     ) -> Self {
         Self {
             protocol_version: CURRENT_PROTOCOL_VERSION,
+            currency_frontier,
             next_validator_set,
             admissions,
             consensus_key_rotations,
+            handoff_digest: None,
         }
     }
 
     pub fn from_transition(transition: &ValidatorSetTransition) -> Self {
-        Self::new(
+        let mut source = Self::new(
             transition.next_validator_set().clone(),
             transition
                 .admissions()
@@ -151,15 +156,25 @@ impl ValidatorSetTransitionSource {
                 .map(|admission| admission.request().clone())
                 .collect(),
             transition.consensus_key_rotations().to_vec(),
-        )
+            transition.currency_frontier(),
+        );
+        source.handoff_digest = transition.handoff_digest;
+        source
     }
 
     pub const fn protocol_version(&self) -> u32 {
         self.protocol_version
     }
+    pub const fn task_handoff_digest(&self) -> Option<[u8; 32]> {
+        self.handoff_digest
+    }
 
     pub fn next_validator_set(&self) -> &ValidatorSet {
         &self.next_validator_set
+    }
+
+    pub(crate) fn currency_frontier(&self) -> u64 {
+        self.currency_frontier
     }
 
     pub fn admissions(&self) -> &[ValidatorAdmissionRequest] {
@@ -189,7 +204,9 @@ impl ValidatorSetTransitionSource {
             self.next_validator_set.clone(),
             admissions,
             self.consensus_key_rotations.clone(),
+            self.currency_frontier,
         )
+        .map(|transition| transition.with_handoff_digest(self.handoff_digest))
         .map_err(ValidatorTransitionSourceError::Transition)
     }
 
@@ -203,6 +220,11 @@ impl ValidatorSetTransitionSource {
 
         let mut out = Vec::new();
         out.extend_from_slice(&self.protocol_version.to_be_bytes());
+        out.extend_from_slice(&self.currency_frontier.to_be_bytes());
+        out.push(u8::from(self.handoff_digest.is_some()));
+        if let Some(digest) = self.handoff_digest {
+            out.extend_from_slice(&digest);
+        }
         out.extend_from_slice(&self.next_validator_set.version().to_be_bytes());
         out.extend_from_slice(&validator_count.to_be_bytes());
         for credential in self.next_validator_set.credentials() {
@@ -228,6 +250,12 @@ impl ValidatorSetTransitionSource {
         }
         let mut decoder = Decoder::new(bytes);
         let protocol_version = decoder.u32()?;
+        let currency_frontier = decoder.u64()?;
+        let handoff_digest = match decoder.take(1)?[0] {
+            0 => None,
+            1 => Some(decoder.array_32()?),
+            _ => return Err(ValidatorTransitionSourceCodecError::InvalidLength),
+        };
         let next_version = decoder.u64()?;
         let validator_count = usize::from(decoder.u16()?);
         let maximum_credentials = MAX_VALIDATOR_TRANSITION_SOURCE_SIZE / CREDENTIAL_SIZE;
@@ -264,9 +292,11 @@ impl ValidatorSetTransitionSource {
 
         Ok(Self {
             protocol_version,
+            currency_frontier,
             next_validator_set,
             admissions,
             consensus_key_rotations: rotations,
+            handoff_digest,
         })
     }
 }

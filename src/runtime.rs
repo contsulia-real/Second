@@ -6,23 +6,33 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+mod peer_connectivity;
+mod public_serving;
+#[cfg(test)]
+mod scheduling_tests;
+use public_serving::serve_managed_peer;
+
 pub(crate) const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_ACTIVE_LEGAL_TASK_SUBMISSIONS: usize = 8;
 pub const DEFAULT_ACTIVE_PEER_TARGET: usize = 8;
-const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
 const PEER_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const PEER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
+type PublicViewCache = Arc<std::sync::Mutex<Option<(u64, Arc<crate::PublicCurrencyView>)>>>;
+
 use crate::network::{
-    MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId, PeerDirection, PeerLease, PeerManager,
-    PeerRecord, PeerRegistrationError, PeerStore, PublicNetworkServices, QuicClient, QuicPeer,
-    QuicRequestStream, QuicServer, QuicTransportIdentity, RuntimeNetworkSnapshot,
-    RuntimePublicSnapshot, StateRecoveryProvider, StateRecoveryProviderHandle, client_peer_records,
-    new_state_recovery_provider_handle, outbound_bind_address, serve_public_network_connection,
+    MAX_LOCAL_PEER_CANDIDATES, MAX_PEER_RECORDS, NetworkError, NetworkMessage, NodeId,
+    PeerDirection, PeerLease, PeerManager, PeerRecord, PeerRegistrationError, PeerStore,
+    PublicNetworkServices, QuicClient, QuicPeer, QuicRequestStream, QuicServer,
+    QuicTransportIdentity, RuntimeNetworkSnapshot, RuntimePublicSnapshot, StateRecoveryProvider,
+    StateRecoveryProviderHandle, client_peer_records, new_state_recovery_provider_handle,
+    outbound_bind_address, serve_public_network_connection,
     serve_public_network_connection_from_request, transport_identity_path,
 };
 use crate::runtime_bft::{
     ValidatorBftRuntime, ValidatorBftRuntimeError, ValidatorRuntimeConfig, ValidatorRuntimeKeys,
+    load_transition_proof,
 };
 use crate::runtime_governance::serve_governance_request_from_request;
 use crate::runtime_submission::serve_legal_task_submission_from_request;
@@ -35,6 +45,7 @@ use crate::{
 
 #[derive(Debug)]
 pub enum NodeRuntimeError {
+    RuntimeTaskFailed(tokio::task::JoinError),
     Persistence(PersistenceError),
     Authorization(AuthorizationError),
     Preparation(PreparationError),
@@ -128,8 +139,9 @@ struct PublicNetworkContext {
     backend: NodeStateBackend,
     peer_store: PeerStore,
     local_node_id: NodeId,
-    local_peer_record: Option<PeerRecord>,
+    local_peer_record: Option<Arc<PeerRecord>>,
     state_recovery_provider: StateRecoveryProviderHandle,
+    public_view_cache: PublicViewCache,
 }
 
 #[derive(Default)]
@@ -149,7 +161,7 @@ impl NodeRuntimeCapabilities {
 }
 
 pub struct NodeRuntime {
-    server: QuicServer,
+    pub(crate) server: QuicServer,
     pub(crate) transport_identity: QuicTransportIdentity,
     backend: NodeStateBackend,
     peer_manager: PeerManager,
@@ -159,6 +171,13 @@ pub struct NodeRuntime {
     pub(crate) validator_bft: Option<ValidatorBftRuntime>,
     pub(crate) active_connections: Arc<AtomicUsize>,
     active_submissions: Arc<AtomicUsize>,
+    public_view_cache: PublicViewCache,
+}
+
+impl Drop for NodeRuntime {
+    fn drop(&mut self) {
+        self.server.close();
+    }
 }
 
 impl NodeRuntime {
@@ -188,10 +207,7 @@ impl NodeRuntime {
                     .verify_checkpoint(&persisted.validator_set)
                     .map_err(|_| NetworkError::InvalidStateRecoveryPayload)?;
                 Some(Arc::new(StateRecoveryProvider::new(
-                    &persisted.state,
-                    &persisted.validator_set,
-                    &persisted.validator_registry,
-                    &certified,
+                    &persisted, &certified,
                 )?))
             }
             None => None,
@@ -278,6 +294,7 @@ impl NodeRuntime {
             validator_bft,
             active_connections: Arc::new(AtomicUsize::new(0)),
             active_submissions: Arc::new(AtomicUsize::new(0)),
+            public_view_cache: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -318,21 +335,14 @@ impl NodeRuntime {
         self.local_peer_record.as_ref()
     }
 
-    fn known_active_peer_count(&self) -> usize {
-        self.peer_store
-            .recent(MAX_PEER_RECORDS, &[self.node_id()])
-            .into_iter()
-            .filter(|record| self.peer_manager.peer(record.node_id()).is_some())
-            .count()
-    }
-
     fn public_network_context(&self) -> PublicNetworkContext {
         PublicNetworkContext {
             backend: self.backend.clone(),
             peer_store: self.peer_store.clone(),
             local_node_id: self.node_id(),
-            local_peer_record: self.local_peer_record.clone(),
+            local_peer_record: self.local_peer_record.clone().map(Arc::new),
             state_recovery_provider: self.state_recovery_provider.clone(),
+            public_view_cache: Arc::clone(&self.public_view_cache),
         }
     }
 
@@ -340,125 +350,10 @@ impl NodeRuntime {
         &self.state_recovery_provider
     }
 
-    pub async fn bootstrap(
-        &self,
+    pub async fn run(
+        self: &Arc<Self>,
         bootstrap_records: &[PeerRecord],
-        target_connections: usize,
-    ) -> Result<usize, NodeRuntimeError> {
-        if target_connections > MAX_ACTIVE_CONNECTIONS {
-            return Err(NodeRuntimeError::ConnectionCapacityReached {
-                maximum: MAX_ACTIVE_CONNECTIONS,
-            });
-        }
-
-        let mut candidates = VecDeque::new();
-        candidates.extend(self.peer_store.recent(MAX_PEER_RECORDS, &[self.node_id()]));
-        candidates.extend(
-            bootstrap_records
-                .iter()
-                .filter(|record| record.node_id() != self.node_id())
-                .cloned(),
-        );
-
-        let mut attempted = HashSet::new();
-        while self.known_active_peer_count() < target_connections {
-            let Some(record) = candidates.pop_front() else {
-                break;
-            };
-            if !attempted.insert(record.clone()) {
-                continue;
-            }
-
-            let peer = if let Some(peer) = self.peer_manager.peer(record.node_id()) {
-                peer
-            } else {
-                match self.dial(&record).await {
-                    Ok(peer) => peer,
-                    Err(error @ NodeRuntimeError::Network(NetworkError::PeerStore(_))) => {
-                        return Err(error);
-                    }
-                    Err(NodeRuntimeError::ConnectionCapacityReached { .. }) => break,
-                    Err(_) => continue,
-                }
-            };
-
-            if let Ok(records) = client_peer_records(&peer, MAX_PEER_RECORDS).await {
-                for record in records {
-                    if record.node_id() == peer.remote_node_id() {
-                        self.peer_store.record_authenticated(&record)?;
-                    } else if record.node_id() != self.node_id() {
-                        candidates.push_back(record);
-                    }
-                }
-            }
-        }
-
-        Ok(self.known_active_peer_count())
-    }
-
-    pub async fn dial(&self, record: &PeerRecord) -> Result<QuicPeer, NodeRuntimeError> {
-        let permit = ActiveConnectionPermit::try_acquire(&self.active_connections).ok_or(
-            NodeRuntimeError::ConnectionCapacityReached {
-                maximum: MAX_ACTIVE_CONNECTIONS,
-            },
-        )?;
-
-        let client = match QuicClient::new(
-            outbound_bind_address(record.address()),
-            record.certificate_der(),
-            self.transport_identity.clone(),
-        ) {
-            Ok(client) => client,
-            Err(error) => {
-                self.peer_store.record_failure(record)?;
-                return Err(error.into());
-            }
-        };
-        let peer = match client
-            .connect_expected(record.address(), record.node_id())
-            .await
-        {
-            Ok(peer) => peer,
-            Err(error) => {
-                self.peer_store.record_failure(record)?;
-                return Err(error.into());
-            }
-        };
-        let peer_lease = match self.peer_manager.register(&peer, PeerDirection::Outbound) {
-            Ok(lease) => lease,
-            Err(PeerRegistrationError::Duplicate(node_id)) => {
-                peer.close_with_reason(b"duplicate peer");
-                return self
-                    .peer_manager
-                    .peer(node_id)
-                    .ok_or(NodeRuntimeError::DuplicatePeer(node_id));
-            }
-            Err(PeerRegistrationError::SelfConnection) => {
-                peer.close_with_reason(b"self connection");
-                return Err(NodeRuntimeError::SelfConnection);
-            }
-        };
-
-        if let Err(error) = self.peer_store.record_authenticated(record) {
-            peer.close_with_reason(b"peer store failure");
-            drop(peer_lease);
-            return Err(error.into());
-        }
-
-        let active_peer = peer.clone();
-        tokio::spawn(serve_managed_peer(
-            peer,
-            self.public_network_context(),
-            peer_lease,
-            permit,
-            Some(client),
-            None,
-        ));
-
-        Ok(active_peer)
-    }
-
-    pub async fn run(&self, bootstrap_records: &[PeerRecord]) -> Result<(), NodeRuntimeError> {
+    ) -> Result<(), NodeRuntimeError> {
         tokio::select! {
             result = self.run_listener() => result,
             result = self.maintain_peers(bootstrap_records) => result,
@@ -467,7 +362,7 @@ impl NodeRuntime {
         }
     }
 
-    async fn run_listener(&self) -> Result<(), NodeRuntimeError> {
+    pub(crate) async fn run_listener(&self) -> Result<(), NodeRuntimeError> {
         loop {
             let incoming = self.server.accept_incoming().await?;
             let Some(permit) = ActiveConnectionPermit::try_acquire(&self.active_connections) else {
@@ -486,7 +381,10 @@ impl NodeRuntime {
                 let Ok(peer) = incoming.handshake().await else {
                     return;
                 };
-                let Ok(Some(first_request)) = peer.accept_request().await else {
+                let Ok(Ok(Some(first_request))) =
+                    tokio::time::timeout(Duration::from_secs(5), peer.accept_request()).await
+                else {
+                    peer.close_with_reason(b"first request timed out");
                     return;
                 };
 
@@ -502,7 +400,7 @@ impl NodeRuntime {
                             .await;
                         return;
                     };
-                    if serve_legal_task_status_from_request(context, first_request)
+                    if serve_legal_task_status_from_request(context, first_request, permit)
                         .await
                         .is_err()
                     {
@@ -523,7 +421,7 @@ impl NodeRuntime {
                             .await;
                         return;
                     };
-                    let Some(_submission_permit) = ActiveConnectionPermit::try_acquire_with_limit(
+                    let Some(submission_permit) = ActiveConnectionPermit::try_acquire_with_limit(
                         &active_submissions,
                         MAX_ACTIVE_LEGAL_TASK_SUBMISSIONS,
                     ) else {
@@ -534,10 +432,19 @@ impl NodeRuntime {
                             .await;
                         return;
                     };
-                    if serve_legal_task_submission_from_request(context, &peer, first_request)
-                        .await
-                        .is_err()
-                    {
+                    if !matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(30),
+                            serve_legal_task_submission_from_request(
+                                context,
+                                &peer,
+                                first_request,
+                                submission_permit,
+                            )
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
                         peer.close_with_reason(b"LegalTask submission failed");
                     }
                     return;
@@ -546,6 +453,7 @@ impl NodeRuntime {
                 if matches!(
                     first_request.message(),
                     NetworkMessage::ValidatorTransitionSubmit { .. }
+                        | NetworkMessage::PublicCheckpointSubmit { .. }
                         | NetworkMessage::StateRecoveryCheckpointSubmit { .. }
                 ) {
                     let Some(context) = governance_context else {
@@ -556,7 +464,7 @@ impl NodeRuntime {
                             .await;
                         return;
                     };
-                    if serve_governance_request_from_request(context, &peer, first_request)
+                    if serve_governance_request_from_request(context, &peer, first_request, permit)
                         .await
                         .is_err()
                     {
@@ -579,6 +487,29 @@ impl NodeRuntime {
                     return;
                 }
 
+                if matches!(
+                    first_request.message(),
+                    NetworkMessage::GetValidatorSetTransitionProof { .. }
+                ) {
+                    let holder = Arc::new((context, permit));
+                    let loader = Arc::new(move |version| {
+                        load_transition_proof(holder.0.backend.full_store(), version)
+                    });
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        crate::network::serve_transition_proof_requests(
+                            &peer,
+                            first_request,
+                            loader,
+                        ),
+                    )
+                    .await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        peer.close_with_reason(b"membership proof query failed");
+                    }
+                    return;
+                }
+
                 let peer_lease = match peer_manager.register(&peer, PeerDirection::Inbound) {
                     Ok(lease) => lease,
                     Err(PeerRegistrationError::SelfConnection) => {
@@ -596,149 +527,6 @@ impl NodeRuntime {
             });
         }
     }
-
-    async fn maintain_peers(
-        &self,
-        bootstrap_records: &[PeerRecord],
-    ) -> Result<(), NodeRuntimeError> {
-        let mut retry_delay = PEER_RETRY_INITIAL_DELAY;
-        let mut retry_at = tokio::time::Instant::now();
-
-        loop {
-            let active_before = self.known_active_peer_count();
-            if active_before >= DEFAULT_ACTIVE_PEER_TARGET {
-                retry_delay = PEER_RETRY_INITIAL_DELAY;
-                retry_at = tokio::time::Instant::now();
-            } else if tokio::time::Instant::now() >= retry_at {
-                let active_after = self
-                    .bootstrap(bootstrap_records, DEFAULT_ACTIVE_PEER_TARGET)
-                    .await?;
-                if active_after > active_before {
-                    retry_delay = PEER_RETRY_INITIAL_DELAY;
-                    retry_at = tokio::time::Instant::now() + retry_delay;
-                } else {
-                    retry_at = tokio::time::Instant::now() + retry_delay;
-                    retry_delay = retry_delay
-                        .checked_mul(2)
-                        .unwrap_or(PEER_RETRY_MAX_DELAY)
-                        .min(PEER_RETRY_MAX_DELAY);
-                }
-            }
-
-            self.maintain_validator_bft_peers(bootstrap_records).await?;
-            tokio::time::sleep(PEER_MAINTENANCE_INTERVAL).await;
-        }
-    }
-}
-
-async fn serve_managed_peer(
-    peer: QuicPeer,
-    context: PublicNetworkContext,
-    peer_lease: PeerLease,
-    permit: ActiveConnectionPermit,
-    outbound_client: Option<QuicClient>,
-    first_request: Option<QuicRequestStream>,
-) {
-    let _peer_lease = peer_lease;
-    let _permit = permit;
-    let _outbound_client = outbound_client;
-
-    let refresh_peer = peer.clone();
-    let refresh_store = context.peer_store.clone();
-    tokio::spawn(async move {
-        if let Ok(records) = client_peer_records(&refresh_peer, 1).await
-            && let Some(record) = records
-                .into_iter()
-                .find(|record| record.node_id() == refresh_peer.remote_node_id())
-            && refresh_store.record_authenticated(&record).is_err()
-        {
-            refresh_peer.close_with_reason(b"peer store failure");
-        }
-    });
-
-    let load_public_snapshot = || match &context.backend {
-        NodeStateBackend::Full(store) => {
-            let persisted = store
-                .load()
-                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
-                .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
-            let view = crate::PublicCurrencyView::new(
-                persisted.state.public_currency_summary(),
-                persisted.state.public_currency_states(),
-            )
-            .map_err(NetworkError::PublicState)?;
-            Ok(RuntimePublicSnapshot {
-                view,
-                checkpoint_proof: persisted.public_checkpoint_proof,
-                latest_delta: persisted.latest_public_delta,
-            })
-        }
-        NodeStateBackend::Public(store) => {
-            let persisted = store
-                .load()
-                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
-                .ok_or_else(|| {
-                    NetworkError::PublicStateSource("public snapshot missing".to_owned())
-                })?;
-            let view = persisted.view.ok_or_else(|| {
-                NetworkError::PublicStateSource("public state not synchronized".to_owned())
-            })?;
-            Ok(RuntimePublicSnapshot {
-                view,
-                checkpoint_proof: persisted.checkpoint_proof,
-                latest_delta: None,
-            })
-        }
-    };
-    let load_transition_proof = |current_validator_set_version: u64| match &context.backend {
-        NodeStateBackend::Full(store) => {
-            let persisted = store
-                .load()
-                .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
-                .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
-            Ok(persisted
-                .validator_transition_proofs
-                .get(&current_validator_set_version)
-                .cloned())
-        }
-        NodeStateBackend::Public(_) => Ok(None),
-    };
-    let load_recovery_snapshot = || {
-        let store = context.backend.full_store().ok_or_else(|| {
-            NetworkError::PublicStateSource(
-                "state recovery unavailable on public-only node".to_owned(),
-            )
-        })?;
-        let persisted = store
-            .load()
-            .map_err(|error| NetworkError::PublicStateSource(format!("{error:?}")))?
-            .ok_or_else(|| NetworkError::PublicStateSource("snapshot missing".to_owned()))?;
-        Ok(RuntimeNetworkSnapshot {
-            state: persisted.state,
-            validator_set: persisted.validator_set,
-            validator_registry: persisted.validator_registry,
-        })
-    };
-    let recovery_loader = context.backend.full_store().map(|_| {
-        &load_recovery_snapshot
-            as &(dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync)
-    });
-    let services = PublicNetworkServices::new(
-        &context.peer_store,
-        context.local_node_id,
-        context.local_peer_record.as_ref(),
-        &context.state_recovery_provider,
-        &load_public_snapshot,
-        &load_transition_proof,
-        recovery_loader,
-    );
-    let result = match first_request {
-        Some(first_request) => {
-            serve_public_network_connection_from_request(&peer, services, first_request).await
-        }
-        None => serve_public_network_connection(&peer, services).await,
-    };
-    let _ = result;
 }
 
 pub(crate) struct ActiveConnectionPermit {

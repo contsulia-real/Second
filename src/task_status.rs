@@ -6,4 +6,5 @@ pub enum LegalTaskStatus {
     Voting,
     Finalized,
     Succeeded,
+    Cancelled,
 }

@@ -202,18 +202,6 @@ impl SecondState {
         Ok(())
     }
 
-    pub(crate) fn require_account(
-        &self,
-        working: &BusinessState,
-        account: AccountAddress,
-    ) -> Result<(), ExecutionError> {
-        if working.accounts.contains(&account) {
-            Ok(())
-        } else {
-            Err(ExecutionError::AccountNotFound(account))
-        }
-    }
-
     pub(crate) fn require_unique_currency_list(
         &self,
         currencies: &[CurrencyAddress],

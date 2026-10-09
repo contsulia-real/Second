@@ -12,6 +12,9 @@ use second::{
 };
 use serde::Deserialize;
 
+mod handoff;
+pub(crate) use handoff::install_handoff;
+
 const MAX_TRANSITION_PLAN_SIZE: usize = 256 * 1024;
 const ADMISSION_REQUEST_SIZE: usize = 300;
 const ROTATION_REQUEST_SIZE: usize = 117;
@@ -173,7 +176,12 @@ pub(crate) fn build_transition(
         .ok_or_else(|| "ValidatorSet version overflow".to_owned())?;
     let next_validator_set = ValidatorSet::new(next_version, next.into_values())
         .map_err(|error| format!("invalid next ValidatorSet: {error:?}"))?;
-    let source = ValidatorSetTransitionSource::new(next_validator_set, admissions, rotations);
+    let source = ValidatorSetTransitionSource::new(
+        next_validator_set,
+        admissions,
+        rotations,
+        persisted.state.next_currency_address(),
+    );
     let transition = source
         .verify(&persisted.validator_set, &persisted.validator_registry)
         .map_err(|error| format!("validator transition plan is invalid: {error:?}"))?;
@@ -251,10 +259,11 @@ pub(crate) async fn submit_transition(
     Ok(())
 }
 
-pub(crate) async fn request_recovery_checkpoint(
+pub(crate) async fn request_checkpoint(
     address: &str,
     snapshot_base: &str,
     server_certificate: &str,
+    public: bool,
 ) -> Result<(), String> {
     let store = StateStore::new(snapshot_base);
     let persisted = store
@@ -271,23 +280,50 @@ pub(crate) async fn request_recovery_checkpoint(
         .connect(crate::parse_socket_address(address)?)
         .await
         .map_err(|error| format!("failed to connect QUIC peer {address}: {error:?}"))?;
-    let result = client_submit_recovery_checkpoint(
-        &peer,
-        material.validator_id(),
-        material.identity_key(),
-        persisted.validator_set.version(),
-    )
-    .await;
+    let result = if public {
+        second::client_submit_public_checkpoint(
+            &peer,
+            material.validator_id(),
+            material.identity_key(),
+            persisted.validator_set.version(),
+        )
+        .await
+        .map(|accepted| {
+            (
+                accepted.validator_set_version,
+                accepted.epoch,
+                accepted.checkpoint_digest,
+            )
+        })
+    } else {
+        client_submit_recovery_checkpoint(
+            &peer,
+            material.validator_id(),
+            material.identity_key(),
+            persisted.validator_set.version(),
+        )
+        .await
+        .map(|accepted| {
+            (
+                accepted.validator_set_version,
+                accepted.serial,
+                accepted.checkpoint_digest,
+            )
+        })
+    };
     peer.close();
     client.wait_idle().await;
 
-    let accepted =
-        result.map_err(|error| format!("recovery checkpoint submission failed: {error:?}"))?;
+    let (version, sequence, digest) =
+        result.map_err(|error| format!("checkpoint submission failed: {error:?}"))?;
+    let (kind, field) = if public {
+        ("PUBLIC", "epoch")
+    } else {
+        ("RECOVERY", "serial")
+    };
     println!(
-        "RECOVERY-CHECKPOINT-ACCEPTED validator_set={} serial={} digest={}",
-        accepted.validator_set_version,
-        accepted.serial,
-        crate::hex_digest(&accepted.checkpoint_digest),
+        "{kind}-CHECKPOINT-ACCEPTED validator_set={version} {field}={sequence} digest={}",
+        crate::hex_digest(&digest)
     );
     Ok(())
 }
@@ -298,6 +334,8 @@ pub(crate) async fn install_recovery(
     trust_snapshot_base: &str,
     server_certificate: &str,
 ) -> Result<(), String> {
+    let _directory_lock =
+        crate::local_file::lock_node_directory(Path::new(destination_snapshot_base))?;
     let destination = StateStore::new(destination_snapshot_base);
     if destination
         .load()

@@ -13,6 +13,7 @@ use super::{
 const GOVERNANCE_AUTH_DOMAIN: &[u8] = b"SECOND_GOVERNANCE_AUTH_V1\0";
 const TRANSITION_ACTION: u8 = 1;
 const RECOVERY_ACTION: u8 = 2;
+const PUBLIC_CHECKPOINT_ACTION: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteValidatorTransitionSubmission {
@@ -26,6 +27,72 @@ pub struct RemoteRecoveryCheckpointSubmission {
     pub validator_set_version: u64,
     pub serial: u64,
     pub checkpoint_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemotePublicCheckpointSubmission {
+    pub validator_set_version: u64,
+    pub epoch: u64,
+    pub checkpoint_digest: [u8; 32],
+}
+
+pub async fn client_submit_public_checkpoint(
+    peer: &QuicPeer,
+    validator_id: ValidatorId,
+    identity_key: &SigningKey,
+    validator_set_version: u64,
+) -> Result<RemotePublicCheckpointSubmission, NetworkError> {
+    let signature = sign_governance_request(
+        peer,
+        identity_key,
+        PUBLIC_CHECKPOINT_ACTION,
+        validator_id,
+        validator_set_version,
+        [0; 32],
+    )?;
+    match peer
+        .exchange(&NetworkMessage::PublicCheckpointSubmit {
+            validator_id,
+            validator_set_version,
+            signature,
+        })
+        .await?
+    {
+        NetworkMessage::PublicCheckpointAccepted {
+            validator_set_version,
+            epoch,
+            checkpoint_digest,
+        } => Ok(RemotePublicCheckpointSubmission {
+            validator_set_version,
+            epoch,
+            checkpoint_digest,
+        }),
+        NetworkMessage::GovernanceRejected { reason } => {
+            Err(NetworkError::GovernanceRejected(reason))
+        }
+        _ => Err(NetworkError::UnexpectedMessage),
+    }
+}
+
+pub(crate) fn verify_public_checkpoint_request(
+    peer: &QuicPeer,
+    validator_id: ValidatorId,
+    validator_set_version: u64,
+    signature: [u8; 64],
+    validator_set: &ValidatorSet,
+) -> Result<(), NetworkError> {
+    if validator_set_version != validator_set.version() {
+        return Err(NetworkError::GovernanceUnauthorized);
+    }
+    verify_governance_request(
+        peer,
+        PUBLIC_CHECKPOINT_ACTION,
+        validator_id,
+        validator_set_version,
+        [0; 32],
+        signature,
+        validator_set,
+    )
 }
 
 pub async fn client_submit_validator_transition(

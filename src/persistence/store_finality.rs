@@ -1,6 +1,6 @@
 use crate::{ConsensusScope, PersistenceError, ValidatorId, ValidatorSet};
 
-use super::bft_store::{open_prepared_voting, validate_vote_validator_set};
+use super::bft_store::{open_prepared_voting, validate_bft_signing_context};
 use super::codec::SnapshotContents;
 use super::store::StateStore;
 use super::store_recovery::{
@@ -38,16 +38,7 @@ impl StateStore {
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
 
-        if !latest.validator_safety_ready {
-            return Err(PersistenceError::ValidatorSafetyStateUnavailable);
-        }
-        if validator_set.version() < latest.minimum_signing_validator_set_version {
-            return Err(PersistenceError::SigningFenceViolation {
-                minimum_validator_set_version: latest.minimum_signing_validator_set_version,
-                actual_validator_set_version: validator_set.version(),
-            });
-        }
-        validate_vote_validator_set(&latest, &scope, validator_set)?;
+        validate_bft_signing_context(&latest, validator_id, &scope, validator_set)?;
 
         match latest
             .validator_vote_locks
@@ -85,6 +76,8 @@ impl StateStore {
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,

@@ -267,6 +267,21 @@ impl CurrencyClaimBook {
     pub fn claimed_currency_count(&self) -> usize {
         self.claimed_by_currency.len()
     }
+    pub(crate) fn claimed_addresses(&self) -> impl Iterator<Item = CurrencyAddress> + '_ {
+        self.claimed_by_currency.keys().copied()
+    }
+
+    pub(crate) fn conflicting_tasks(&self, candidate: &Self) -> BTreeSet<TaskId> {
+        candidate
+            .claimed_by_currency
+            .iter()
+            .filter_map(|(address, candidate_owner)| {
+                self.claimed_by_currency.get(address).and_then(|owner| {
+                    (owner.task_id != candidate_owner.task_id).then(|| owner.task_id.clone())
+                })
+            })
+            .collect()
+    }
 
     pub(crate) fn restore_transfer(
         &mut self,

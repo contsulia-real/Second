@@ -94,7 +94,8 @@ async fn runtime_maintains_bootstrap_connection_beyond_quic_idle_timeout() {
     let client_task =
         support::spawn_node_runtime_with_bootstrap(&client, vec![support::peer_record(&seed)]);
 
-    tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+    // A one-peer network has backed off discovery before this connection is lost.
+    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
 
     let peer = client
         .peer(seed.node_id())
@@ -196,7 +197,7 @@ async fn wait_for_persisted_peer_address(
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Ok(bytes) = fs::read(support::peer_store_path(base))
-            && let Ok(NetworkMessage::Peers { records }) = decode_network_message(&bytes)
+            && let Some(records) = cached_peer_records(&bytes)
             && records
                 .iter()
                 .any(|record| record.node_id() == node_id && record.address() == address)
@@ -265,10 +266,122 @@ async fn failed_persisted_peer_is_demoted_behind_recent_success() {
     support::cleanup_node_runtime(bad_store, bad_base);
 }
 
+#[tokio::test]
+async fn bootstrap_skips_authenticated_peer_that_stalls_discovery_response() {
+    let (runtime, store, base) = support::node_runtime_fixture("discovery-silent-peer");
+
+    let (silent_server, silent_certificate) = support::quic_server();
+    let silent_record = second::PeerRecord::new(
+        silent_server.node_id(),
+        silent_server.local_addr().unwrap(),
+        silent_certificate,
+    )
+    .unwrap();
+
+    let (healthy_server, healthy_certificate) = support::quic_server();
+    let healthy_id = healthy_server.node_id();
+    let healthy_record = second::PeerRecord::new(
+        healthy_id,
+        healthy_server.local_addr().unwrap(),
+        healthy_certificate,
+    )
+    .unwrap();
+
+    let silent_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_close = Arc::clone(&silent_closed);
+    let (silent_requested, silent_request) = tokio::sync::oneshot::channel();
+    let silent = tokio::spawn(async move {
+        let peer = silent_server.accept().await.unwrap();
+        let _request = peer.accept_request().await.unwrap().unwrap();
+        silent_requested.send(()).unwrap();
+        assert!(peer.accept_request().await.unwrap().is_none());
+        observed_close.store(true, std::sync::atomic::Ordering::Release);
+        std::future::pending::<()>().await;
+    });
+    let healthy = tokio::spawn(async move {
+        let peer = healthy_server.accept().await.unwrap();
+        let request = peer.accept_request().await.unwrap().unwrap();
+        silent_request.await.unwrap();
+        assert!(
+            !silent_closed.load(std::sync::atomic::Ordering::Acquire),
+            "healthy discovery must progress before the silent candidate closes"
+        );
+        request
+            .respond(&NetworkMessage::Peers {
+                records: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), peer.accept_request())
+                .await
+                .is_err(),
+            "bootstrap must not race a second discovery request on the same connection"
+        );
+        std::future::pending::<()>().await;
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(7),
+        runtime.bootstrap(&[silent_record, healthy_record], 2),
+    )
+    .await
+    .expect("silent peer deadline must permit the next bootstrap candidate")
+    .unwrap();
+    assert!(runtime.peer(healthy_id).is_some());
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !healthy.is_finished(),
+        "healthy discovery worker must remain live"
+    );
+
+    silent.abort();
+    healthy.abort();
+    let _ = silent.await;
+    let _ = healthy.await;
+    drop(runtime);
+    support::cleanup_node_runtime(store, base);
+}
+
+#[tokio::test]
+async fn malformed_peer_cache_is_discarded_without_blocking_node_startup() {
+    let base = support::temp_base("malformed-peer-cache");
+    let store = StateStore::new(&base);
+    store
+        .initialize(
+            &second::SecondState::genesis([], 1),
+            &support::validator_set(1, 1..=4),
+        )
+        .unwrap();
+    fs::write(support::peer_store_path(&base), b"partial peer cache").unwrap();
+
+    let runtime = NodeRuntime::load_and_bind("127.0.0.1:0".parse().unwrap(), &store).unwrap();
+    drop(runtime);
+    support::cleanup_node_runtime(store, base);
+}
+
 fn persisted_peer_records(base: &std::path::Path) -> Vec<second::PeerRecord> {
     let bytes = fs::read(support::peer_store_path(base)).unwrap();
-    match decode_network_message(&bytes).unwrap() {
-        NetworkMessage::Peers { records } => records,
-        other => panic!("unexpected peer store payload: {other:?}"),
+    cached_peer_records(&bytes).expect("valid local peer cache")
+}
+
+fn cached_peer_records(bytes: &[u8]) -> Option<Vec<second::PeerRecord>> {
+    if !bytes.starts_with(b"S2PC\0\0\0\x01") {
+        return None;
     }
+    let mut remaining = &bytes[8..];
+    let mut peers = Vec::new();
+    while !remaining.is_empty() {
+        let length = u32::from_be_bytes(remaining.get(9..13)?.try_into().ok()?) as usize;
+        remaining = remaining.get(13..)?;
+        let NetworkMessage::Peers { records } =
+            decode_network_message(remaining.get(..length)?).ok()?
+        else {
+            return None;
+        };
+        peers.extend(records);
+        remaining = remaining.get(length..)?;
+    }
+    Some(peers)
 }

@@ -3,6 +3,9 @@ use std::net::SocketAddr;
 use super::{NetworkError, NodeId};
 
 pub const MAX_PEER_RECORDS: u16 = 32;
+pub const MAX_LOCAL_PEER_CANDIDATES: u16 = 128;
+// 55 inbound + 55 outbound BFT connections leave 18 of the 128 permits for services.
+pub const MAX_DEPLOYED_VALIDATORS: usize = 56;
 pub const MAX_PEER_CERTIFICATE_SIZE: usize = 1024;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

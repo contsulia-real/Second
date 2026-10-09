@@ -1,12 +1,15 @@
+mod account;
 mod authorization;
 mod bft;
 mod bft_driver;
 mod bft_proposal;
 mod claims;
 mod currency;
+mod currency_allocation;
 mod error;
 mod executor;
 mod finality;
+mod finality_codec;
 mod ids;
 mod legal_task_codec;
 mod network;
@@ -31,7 +34,10 @@ mod runtime_tasks;
 mod state;
 mod state_recovery_checkpoint;
 mod task;
+mod task_abort;
 mod task_status;
+#[cfg(test)]
+mod test_helpers;
 mod transaction;
 mod validator;
 mod validator_admission;
@@ -41,7 +47,7 @@ mod validator_signer;
 mod validator_transition;
 mod validator_transition_source;
 
-pub use authorization::{AuthorizerSet, LegalTask, VerifiedLegalTask};
+pub use authorization::{AccountSignature, AuthorizerSet, LegalTask, VerifiedLegalTask};
 pub use bft::{
     BftLocalState, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
 };
@@ -51,6 +57,7 @@ pub use bft_driver::{
 pub use bft_proposal::{BftProposal, BftProposalSubject};
 pub use claims::{ClaimError, CurrencyClaimBook, OperationClaimId};
 pub use currency::{CurrencyRole, PublicCurrencyState};
+pub use currency_allocation::CurrencyAllocation;
 pub use error::{
     AuthorizationError, BftError, ExecutionError, FinalityError, PersistenceError,
     SignatureParseError, TaskEncodingError, TaskValidationError, ValidatorAdmissionError,
@@ -62,26 +69,32 @@ pub use ids::{
     TaskId, TaskIdParseError, ValidatorId,
 };
 pub use network::{
-    BftNetworkMessage, CURRENT_NETWORK_PROTOCOL_VERSION, GovernanceRejection,
-    LegalTaskStatusRejection, LegalTaskSubmissionRejection, MAX_LEGAL_TASK_SUBMISSION_SIZE,
-    MAX_NETWORK_FRAME_SIZE, MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE,
-    NetworkError, NetworkMessage, NodeId, PeerRecord, PublicCurrencyPage, QuicClient, QuicPeer,
+    AccountPaymentAddress, AccountTransfer, AccountView, BftNetworkMessage,
+    CURRENT_NETWORK_PROTOCOL_VERSION, GovernanceRejection, LegalTaskStatusRejection,
+    LegalTaskSubmissionRejection, MAX_ACCOUNT_QUERY_PAGE, MAX_DEPLOYED_VALIDATORS,
+    MAX_LEGAL_TASK_SUBMISSION_SIZE, MAX_LOCAL_PEER_CANDIDATES, MAX_NETWORK_FRAME_SIZE,
+    MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, MAX_PUBLIC_CURRENCY_PAGE, NetworkError,
+    NetworkMessage, NodeId, PeerRecord, PublicCurrencyPage, QuicClient, QuicPeer,
     QuicRequestStream, QuicServer, QuicTransportIdentity, RemoteCertifiedPublicCurrencyView,
-    RemoteLegalTaskStatus, RemoteLegalTaskSubmission, RemotePublicCurrencyPage,
-    RemotePublicCurrencySummary, RemotePublicCurrencyView, RemoteRecoveryCheckpointSubmission,
-    RemoteStateRecoveryPayload, RemoteValidatorTransitionSubmission, SECOND_QUIC_SERVER_NAME,
-    ValidatorBftPeer, authenticate_validator_bft_peer, client_fetch_state_recovery,
-    client_legal_task_status, client_peer_records, client_ping,
+    RemoteLegalTaskStatus, RemoteLegalTaskSubmission, RemotePublicCheckpointSubmission,
+    RemotePublicCurrencyPage, RemotePublicCurrencySummary, RemotePublicCurrencyView,
+    RemoteRecoveryCheckpointSubmission, RemoteStateRecoveryPayload,
+    RemoteValidatorTransitionSubmission, SECOND_QUIC_SERVER_NAME, ValidatorBftPeer,
+    authenticate_validator_bft_peer, client_account_query, client_fetch_state_recovery,
+    client_fetch_validator_handoff, client_legal_task_status, client_peer_records, client_ping,
     client_public_currency_checkpoint_proof, client_public_currency_delta,
     client_public_currency_page, client_public_currency_summary, client_submit_legal_task,
-    client_submit_recovery_checkpoint, client_submit_validator_transition,
-    client_sync_certified_public_currency_view, client_sync_public_currency_view,
-    client_validator_set_transition_proof, decode_bft_network_message, decode_network_message,
-    encode_bft_network_message, encode_network_message, serve_ping_session,
-    serve_public_currency_connection, serve_validator_bft_connection, transport_identity_path,
+    client_submit_public_checkpoint, client_submit_recovery_checkpoint,
+    client_submit_validator_transition, client_sync_certified_public_currency_view,
+    client_sync_public_currency_view, client_validator_set_transition_proof,
+    decode_bft_network_message, decode_network_message, encode_bft_network_message,
+    encode_network_message, serve_ping_session, serve_public_currency_connection,
+    serve_validator_bft_connection, transport_identity_path,
 };
 pub use payment::PaymentAddressStatus;
-pub use persistence::{PersistedNodeState, PersistedPublicNodeState, PublicStateStore, StateStore};
+pub use persistence::{
+    DurableBlobStore, PersistedNodeState, PersistedPublicNodeState, PublicStateStore, StateStore,
+};
 pub use prepared::{PreparationError, PreparationOutcome, PreparedTaskBook};
 pub use public_checkpoint::{
     CertifiedPublicCurrencyCheckpoint, PublicCheckpointError, PublicCurrencyCheckpoint,
@@ -107,7 +120,10 @@ pub use state_recovery_checkpoint::{
 };
 pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
 pub use task_status::LegalTaskStatus;
-pub use transaction::{TransactionRequestParseError, parse_transaction_request_json};
+pub use transaction::{
+    TransactionRequestParseError, parse_transaction_request_json,
+    sign_account_transaction_request_json, sign_transaction_request_json,
+};
 pub use validator::{ValidatorCredential, ValidatorSet};
 pub use validator_admission::{ValidatorAdmissionRequest, VerifiedValidatorAdmission};
 pub use validator_registry::{ValidatorRegistry, ValidatorStatus};

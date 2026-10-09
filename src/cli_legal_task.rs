@@ -8,7 +8,7 @@ use second::{
 
 use crate::{local_file, parse_socket_address, quic_client};
 
-const MAX_TRANSACTION_REQUEST_JSON_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_TRANSACTION_REQUEST_JSON_SIZE: usize = 16 * 1024 * 1024;
 
 pub(crate) async fn submit(
     address: &str,
@@ -30,6 +30,7 @@ pub(crate) async fn submit(
     let submitted = result.map_err(submission_error)?;
     let state = match submitted.outcome {
         LegalTaskSubmissionOutcome::Prepared => "prepared",
+        LegalTaskSubmissionOutcome::Allocating => "allocating",
         LegalTaskSubmissionOutcome::AlreadyPending => "pending",
         LegalTaskSubmissionOutcome::AlreadySucceeded => "succeeded",
     };
@@ -61,6 +62,7 @@ pub(crate) async fn task_status(
         LegalTaskStatus::Voting => "voting",
         LegalTaskStatus::Finalized => "finalized",
         LegalTaskStatus::Succeeded => "succeeded",
+        LegalTaskStatus::Cancelled => "cancelled",
     };
     println!("TASK task={} state={state}", remote.task_id);
     Ok(())

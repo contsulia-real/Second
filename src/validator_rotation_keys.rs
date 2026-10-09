@@ -52,7 +52,7 @@ pub(crate) fn prepare(
         );
     }
 
-    let new_key = crate::validator_keyring::random_signing_key()?;
+    let new_key = crate::local_file::random_signing_key()?;
     let signing_key = match authority {
         ValidatorRotationAuthority::Identity => material.identity_key(),
         ValidatorRotationAuthority::Recovery => material.recovery_key(),

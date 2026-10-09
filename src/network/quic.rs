@@ -13,12 +13,31 @@ use super::{NetworkError, NetworkMessage, NodeId};
 
 const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn request_deadline<T>(
+    stage: &'static str,
+    future: impl std::future::Future<Output = Result<T, NetworkError>>,
+) -> Result<T, NetworkError> {
+    request_deadline_at(tokio::time::Instant::now() + REQUEST_TIMEOUT, stage, future).await
+}
+
+async fn request_deadline_at<T>(
+    deadline: tokio::time::Instant,
+    stage: &'static str,
+    future: impl std::future::Future<Output = Result<T, NetworkError>>,
+) -> Result<T, NetworkError> {
+    tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| NetworkError::Transport(format!("protocol request timed out while {stage}")))?
+}
 pub(crate) const MAX_CONCURRENT_REQUEST_STREAMS: usize = 8;
 pub(crate) const MAX_CONCURRENT_ONE_WAY_STREAMS: usize = 8;
 const PEER_AUTH_EXPORTER_LABEL: &[u8] = b"SECOND_QUIC_PEER_AUTH_V1";
 
 pub const SECOND_QUIC_SERVER_NAME: &str = "second.local";
 
+#[derive(Clone)]
 pub struct QuicServer {
     endpoint: Endpoint,
     identity: Arc<QuicTransportIdentity>,
@@ -52,6 +71,27 @@ impl QuicServer {
         self.identity.node_id()
     }
 
+    pub(crate) fn close(&self) {
+        self.endpoint.close(0_u32.into(), b"node stopped");
+    }
+
+    pub(crate) fn shared_client(
+        &self,
+        remote: SocketAddr,
+        certificate: &[u8],
+    ) -> Result<Option<QuicClient>, NetworkError> {
+        if self.local_addr()?.is_ipv4() != remote.is_ipv4() {
+            return Ok(None);
+        }
+        // The socket/driver is shared; each handle keeps its own certificate pin.
+        let mut endpoint = self.endpoint.clone();
+        endpoint.set_default_client_config(pinned_client_config(certificate)?);
+        Ok(Some(QuicClient {
+            endpoint,
+            identity: Arc::clone(&self.identity),
+        }))
+    }
+
     pub(crate) async fn accept_incoming(&self) -> Result<QuicIncoming, NetworkError> {
         let incoming = self
             .endpoint
@@ -76,8 +116,11 @@ pub(crate) struct QuicIncoming {
 
 impl QuicIncoming {
     pub(crate) async fn handshake(self) -> Result<QuicPeer, NetworkError> {
-        let connection = self.incoming.await.map_err(transport_error)?;
-        server_handshake(connection, &self.identity).await
+        request_deadline("authenticating incoming connection", async {
+            let connection = self.incoming.await.map_err(transport_error)?;
+            server_handshake(connection, &self.identity).await
+        })
+        .await
     }
 }
 
@@ -92,16 +135,7 @@ impl QuicClient {
         trusted_server_certificate_der: &[u8],
         identity: QuicTransportIdentity,
     ) -> Result<Self, NetworkError> {
-        let mut roots = RootCertStore::empty();
-        roots
-            .add(CertificateDer::from(
-                trusted_server_certificate_der.to_vec(),
-            ))
-            .map_err(transport_error)?;
-
-        let mut config = quinn::ClientConfig::with_root_certificates(Arc::new(roots))
-            .map_err(transport_error)?;
-        config.transport_config(transport_config());
+        let config = pinned_client_config(trusted_server_certificate_der)?;
 
         let mut endpoint = Endpoint::client(bind_address).map_err(transport_error)?;
         endpoint.set_default_client_config(config);
@@ -121,8 +155,11 @@ impl QuicClient {
             .endpoint
             .connect(address, SECOND_QUIC_SERVER_NAME)
             .map_err(transport_error)?;
-        let connection = connecting.await.map_err(transport_error)?;
-        client_handshake(connection, &self.identity).await
+        request_deadline("connecting and authenticating peer", async {
+            let connection = connecting.await.map_err(transport_error)?;
+            client_handshake(connection, &self.identity).await
+        })
+        .await
     }
 
     pub async fn connect_expected(
@@ -158,6 +195,10 @@ impl QuicPeer {
         self.remote_node_id
     }
 
+    pub(crate) fn remote_address(&self) -> SocketAddr {
+        self.connection.remote_address()
+    }
+
     pub(crate) fn channel_binding(&self) -> Result<[u8; 32], NetworkError> {
         peer_channel_binding(&self.connection)
     }
@@ -171,9 +212,18 @@ impl QuicPeer {
     }
 
     pub async fn exchange(&self, message: &NetworkMessage) -> Result<NetworkMessage, NetworkError> {
-        let (mut send, mut recv) = self.connection.open_bi().await.map_err(transport_error)?;
-        write_request_message(&mut send, message).await?;
-        read_stream_message(&mut recv).await
+        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        let (mut send, mut recv) = request_deadline_at(deadline, "opening request stream", async {
+            self.connection.open_bi().await.map_err(transport_error)
+        })
+        .await?;
+        request_deadline_at(
+            deadline,
+            "sending request",
+            write_request_message(&mut send, message),
+        )
+        .await?;
+        read_stream_message_at(&mut recv, deadline, "awaiting response").await
     }
 
     pub async fn accept_request(&self) -> Result<Option<QuicRequestStream>, NetworkError> {
@@ -189,8 +239,11 @@ impl QuicPeer {
     }
 
     pub(crate) async fn send_one_way(&self, message: &NetworkMessage) -> Result<(), NetworkError> {
-        let mut send = self.connection.open_uni().await.map_err(transport_error)?;
-        write_stream_message(&mut send, message).await
+        request_deadline("sending one-way message", async {
+            let mut send = self.connection.open_uni().await.map_err(transport_error)?;
+            write_stream_message(&mut send, message).await
+        })
+        .await
     }
 
     pub(crate) async fn accept_one_way(&self) -> Result<Option<NetworkMessage>, NetworkError> {
@@ -245,6 +298,20 @@ fn transport_config() -> Arc<TransportConfig> {
     config.keep_alive_interval(Some(QUIC_OUTBOUND_KEEP_ALIVE_INTERVAL));
     Arc::new(config)
 }
+
+fn pinned_client_config(certificate: &[u8]) -> Result<quinn::ClientConfig, NetworkError> {
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate.to_vec()))
+        .map_err(transport_error)?;
+    let mut config =
+        quinn::ClientConfig::with_root_certificates(Arc::new(roots)).map_err(transport_error)?;
+    config.transport_config(transport_config());
+    Ok(config)
+}
+
+#[cfg(test)]
+mod tests;
 
 async fn client_handshake(
     connection: Connection,
@@ -337,21 +404,40 @@ async fn write_stream_message(
     send: &mut SendStream,
     message: &NetworkMessage,
 ) -> Result<(), NetworkError> {
-    write_request_message(send, message).await?;
-    match send.stopped().await.map_err(transport_error)? {
-        None => Ok(()),
-        Some(code) => Err(NetworkError::Transport(format!(
-            "QUIC stream stopped by peer with code {code}"
-        ))),
-    }
+    request_deadline("waiting for stream delivery", async {
+        write_request_message(send, message).await?;
+        match send.stopped().await.map_err(transport_error)? {
+            None => Ok(()),
+            Some(code) => Err(NetworkError::Transport(format!(
+                "QUIC stream stopped by peer with code {code}"
+            ))),
+        }
+    })
+    .await
 }
 
 async fn read_stream_message(recv: &mut RecvStream) -> Result<NetworkMessage, NetworkError> {
-    let frame = recv
-        .read_to_end(MAX_NETWORK_MESSAGE_SIZE)
-        .await
-        .map_err(transport_error)?;
-    decode_network_message(&frame)
+    read_stream_message_at(
+        recv,
+        tokio::time::Instant::now() + REQUEST_TIMEOUT,
+        "reading framed message",
+    )
+    .await
+}
+
+async fn read_stream_message_at(
+    recv: &mut RecvStream,
+    deadline: tokio::time::Instant,
+    stage: &'static str,
+) -> Result<NetworkMessage, NetworkError> {
+    request_deadline_at(deadline, stage, async {
+        let frame = recv
+            .read_to_end(MAX_NETWORK_MESSAGE_SIZE)
+            .await
+            .map_err(transport_error)?;
+        decode_network_message(&frame)
+    })
+    .await
 }
 
 fn transport_error(error: impl std::fmt::Display) -> NetworkError {

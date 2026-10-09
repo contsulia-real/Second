@@ -1,14 +1,14 @@
-use std::fs;
-use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use second::{MAX_PEER_RECORDS, NodeId, PeerRecord};
+use second::{MAX_LOCAL_PEER_CANDIDATES, NodeId, PeerRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::local_file::{append_suffix, write_new};
+use crate::local_file::{append_suffix, read_bounded, write_new};
+
+const MAX_BOOTSTRAP_FILE_SIZE: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,25 +20,24 @@ struct BootstrapRecordFile {
 
 pub(crate) fn load(snapshot_base: &str) -> Result<Vec<PeerRecord>, String> {
     let path = bootstrap_path(Path::new(snapshot_base));
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "failed to read bootstrap file {}: {error}",
-                path.display()
-            ));
-        }
-    };
+    if !path.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect bootstrap file {}: {error}",
+            path.display()
+        )
+    })? {
+        return Ok(Vec::new());
+    }
+    let contents = read_bounded(&path, MAX_BOOTSTRAP_FILE_SIZE, "bootstrap file")?;
 
-    let records = serde_json::from_str::<Vec<BootstrapRecordFile>>(&contents)
+    let records = serde_json::from_slice::<Vec<BootstrapRecordFile>>(&contents)
         .map_err(|error| format!("invalid bootstrap file {}: {error}", path.display()))?;
-    if records.len() > usize::from(MAX_PEER_RECORDS) {
+    if records.len() > usize::from(MAX_LOCAL_PEER_CANDIDATES) {
         return Err(format!(
             "bootstrap file {} contains {} records; maximum is {}",
             path.display(),
             records.len(),
-            MAX_PEER_RECORDS
+            MAX_LOCAL_PEER_CANDIDATES
         ));
     }
 
@@ -50,11 +49,11 @@ pub(crate) fn load(snapshot_base: &str) -> Result<Vec<PeerRecord>, String> {
 }
 
 pub(crate) fn write(snapshot_base: &Path, records: &[PeerRecord]) -> Result<(), String> {
-    if records.len() > usize::from(MAX_PEER_RECORDS) {
+    if records.len() > usize::from(MAX_LOCAL_PEER_CANDIDATES) {
         return Err(format!(
             "bootstrap record count {} exceeds maximum {}",
             records.len(),
-            MAX_PEER_RECORDS
+            MAX_LOCAL_PEER_CANDIDATES
         ));
     }
     let file = records

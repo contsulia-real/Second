@@ -40,9 +40,20 @@ pub(super) fn encode(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> 
             validator_id,
             validator_set_version,
             signature,
+        }
+        | NetworkMessage::PublicCheckpointSubmit {
+            validator_id,
+            validator_set_version,
+            signature,
         } => {
             let mut payload = Vec::with_capacity(81);
-            payload.push(30);
+            payload.push(
+                if matches!(message, NetworkMessage::PublicCheckpointSubmit { .. }) {
+                    42
+                } else {
+                    30
+                },
+            );
             payload.extend_from_slice(&validator_id.value().to_be_bytes());
             payload.extend_from_slice(&validator_set_version.to_be_bytes());
             payload.extend_from_slice(signature);
@@ -52,9 +63,20 @@ pub(super) fn encode(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> 
             validator_set_version,
             serial,
             checkpoint_digest,
+        }
+        | NetworkMessage::PublicCheckpointAccepted {
+            validator_set_version,
+            epoch: serial,
+            checkpoint_digest,
         } => {
             let mut payload = Vec::with_capacity(49);
-            payload.push(31);
+            payload.push(
+                if matches!(message, NetworkMessage::PublicCheckpointAccepted { .. }) {
+                    43
+                } else {
+                    31
+                },
+            );
             payload.extend_from_slice(&validator_set_version.to_be_bytes());
             payload.extend_from_slice(&serial.to_be_bytes());
             payload.extend_from_slice(checkpoint_digest);
@@ -71,8 +93,8 @@ pub(super) fn decode(message_type: u8, payload: &[u8]) -> Result<NetworkMessage,
     match message_type {
         28 => decode_validator_transition_submit(payload),
         29 => decode_validator_transition_accepted(payload),
-        30 => decode_state_recovery_checkpoint_submit(payload),
-        31 => decode_state_recovery_checkpoint_accepted(payload),
+        30 | 42 => decode_checkpoint_submit(message_type, payload),
+        31 | 43 => decode_checkpoint_accepted(message_type, payload),
         32 => decode_governance_rejected(payload),
         other => Err(NetworkError::UnknownMessageType(other)),
     }
@@ -137,43 +159,49 @@ fn decode_validator_transition_accepted(payload: &[u8]) -> Result<NetworkMessage
     })
 }
 
-fn decode_state_recovery_checkpoint_submit(payload: &[u8]) -> Result<NetworkMessage, NetworkError> {
-    require_message_length(30, payload, 81)?;
-    Ok(NetworkMessage::StateRecoveryCheckpointSubmit {
-        validator_id: ValidatorId::new(u64::from_be_bytes(
-            payload[1..9]
-                .try_into()
-                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
-        )),
-        validator_set_version: u64::from_be_bytes(
-            payload[9..17]
-                .try_into()
-                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
-        ),
-        signature: payload[17..81]
-            .try_into()
-            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+fn decode_checkpoint_submit(
+    message_type: u8,
+    payload: &[u8],
+) -> Result<NetworkMessage, NetworkError> {
+    require_message_length(message_type, payload, 81)?;
+    let validator_id = ValidatorId::new(u64::from_be_bytes(payload[1..9].try_into().unwrap()));
+    let validator_set_version = u64::from_be_bytes(payload[9..17].try_into().unwrap());
+    let signature = payload[17..81].try_into().unwrap();
+    Ok(if message_type == 42 {
+        NetworkMessage::PublicCheckpointSubmit {
+            validator_id,
+            validator_set_version,
+            signature,
+        }
+    } else {
+        NetworkMessage::StateRecoveryCheckpointSubmit {
+            validator_id,
+            validator_set_version,
+            signature,
+        }
     })
 }
 
-fn decode_state_recovery_checkpoint_accepted(
+fn decode_checkpoint_accepted(
+    message_type: u8,
     payload: &[u8],
 ) -> Result<NetworkMessage, NetworkError> {
-    require_message_length(31, payload, 49)?;
-    Ok(NetworkMessage::StateRecoveryCheckpointAccepted {
-        validator_set_version: u64::from_be_bytes(
-            payload[1..9]
-                .try_into()
-                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
-        ),
-        serial: u64::from_be_bytes(
-            payload[9..17]
-                .try_into()
-                .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
-        ),
-        checkpoint_digest: payload[17..49]
-            .try_into()
-            .map_err(|_| NetworkError::InvalidGovernanceRequest)?,
+    require_message_length(message_type, payload, 49)?;
+    let validator_set_version = u64::from_be_bytes(payload[1..9].try_into().unwrap());
+    let sequence = u64::from_be_bytes(payload[9..17].try_into().unwrap());
+    let checkpoint_digest = payload[17..49].try_into().unwrap();
+    Ok(if message_type == 43 {
+        NetworkMessage::PublicCheckpointAccepted {
+            validator_set_version,
+            epoch: sequence,
+            checkpoint_digest,
+        }
+    } else {
+        NetworkMessage::StateRecoveryCheckpointAccepted {
+            validator_set_version,
+            serial: sequence,
+            checkpoint_digest,
+        }
     })
 }
 

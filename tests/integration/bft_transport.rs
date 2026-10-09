@@ -43,7 +43,7 @@ async fn validator_only_bft_transport_carries_proposals_votes_and_qcs() {
             &server_validators,
             |sender, message| {
                 server_captured.lock().unwrap().push((sender, message));
-                Ok(())
+                std::future::ready(Ok(()))
             },
         )
         .await
@@ -156,7 +156,7 @@ async fn validator_only_bft_transport_completes_concurrent_messages_without_head
             &server_validators,
             |_sender, _message| {
                 server_received.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                std::future::ready(Ok(()))
             },
         )
         .await
@@ -234,6 +234,7 @@ async fn validator_only_bft_transport_rejects_forged_server_validator_identity()
         request
             .respond(&NetworkMessage::BftAuthenticated {
                 validator_id: ValidatorId::new(2),
+                validator_set_version: 7,
                 signature: [0; 64],
             })
             .await
@@ -263,7 +264,9 @@ async fn validator_only_bft_transport_rejects_forged_identity_authentication() {
             ValidatorId::new(2),
             &key(6),
             &server_validators,
-            |_sender, _message| panic!("forged authentication must not reach BFT message handler"),
+            |_sender, _message| async {
+                panic!("forged authentication must not reach BFT message handler")
+            },
         )
         .await
     });
@@ -273,6 +276,7 @@ async fn validator_only_bft_transport_rejects_forged_identity_authentication() {
     let response = peer
         .exchange(&NetworkMessage::BftAuthenticate {
             validator_id: ValidatorId::new(1),
+            validator_set_version: 7,
             signature: [0; 64],
         })
         .await

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -23,7 +24,8 @@ pub(crate) type SharedValidatorBftAuthority = Arc<RwLock<ValidatorBftAuthority>>
 pub(crate) struct ValidatorBftAuthority {
     active_validator_set_version: u64,
     validator_sets: BTreeMap<u64, ValidatorSet>,
-    completed_scopes: BTreeMap<ConsensusScope, ValidatorSet>,
+    // Derived terminal-proof audiences, including certified inherited duties.
+    terminal_scopes: BTreeMap<ConsensusScope, ValidatorSet>,
     live_validator_ids: BTreeSet<ValidatorId>,
     identity_public_keys: BTreeMap<ValidatorId, [u8; 32]>,
 }
@@ -33,17 +35,17 @@ impl ValidatorBftAuthority {
         active_validator_set: ValidatorSet,
         retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
     ) -> Result<Self, NetworkError> {
-        Self::new_with_completed(
+        Self::new_with_terminal_scopes(
             active_validator_set,
             retained_validator_sets,
             std::iter::empty(),
         )
     }
 
-    pub(crate) fn new_with_completed(
+    pub(crate) fn new_with_terminal_scopes(
         active_validator_set: ValidatorSet,
         retained_validator_sets: impl IntoIterator<Item = ValidatorSet>,
-        completed_scopes: impl IntoIterator<Item = (ConsensusScope, ValidatorSet)>,
+        terminal_scopes: impl IntoIterator<Item = (ConsensusScope, ValidatorSet)>,
     ) -> Result<Self, NetworkError> {
         let active_validator_set_version = active_validator_set.version();
         let mut validator_sets = BTreeMap::new();
@@ -58,7 +60,7 @@ impl ValidatorBftAuthority {
         }
 
         let mut completed = BTreeMap::new();
-        for (scope, validator_set) in completed_scopes {
+        for (scope, validator_set) in terminal_scopes {
             if !scope.matches_validator_set_version(validator_set.version())
                 || completed.insert(scope, validator_set).is_some()
             {
@@ -88,7 +90,7 @@ impl ValidatorBftAuthority {
         Ok(Self {
             active_validator_set_version,
             validator_sets,
-            completed_scopes: completed,
+            terminal_scopes: completed,
             live_validator_ids,
             identity_public_keys,
         })
@@ -129,10 +131,27 @@ impl ValidatorBftAuthority {
                 .get(&version)
                 .ok_or(NetworkError::BftUnauthorized);
         }
-        self.completed_scopes
+        self.terminal_scopes
             .get(message.scope())
             .filter(|validator_set| validator_set.version() == version)
             .ok_or(NetworkError::BftUnauthorized)
+    }
+
+    fn accepts_recipient(
+        &self,
+        recipient: ValidatorId,
+        message: &BftNetworkMessage,
+    ) -> Result<bool, NetworkError> {
+        let origin = self.validator_set_for_message(message)?;
+        Ok(origin.contains(recipient)
+            || (matches!(
+                message,
+                BftNetworkMessage::FinalityCertificate {
+                    scope: ConsensusScope::PreparedTask(_),
+                    ..
+                }
+            ) && self.terminal_scopes.get(message.scope()) == Some(origin)
+                && self.active_validator_set().contains(recipient)))
     }
 }
 
@@ -141,10 +160,14 @@ pub struct ValidatorBftPeer {
     peer: QuicPeer,
     local_validator_id: ValidatorId,
     remote_validator_id: ValidatorId,
+    remote_validator_set_version: u64,
     authority: SharedValidatorBftAuthority,
 }
 
 impl ValidatorBftPeer {
+    pub(crate) fn remote_validator_set_version(&self) -> u64 {
+        self.remote_validator_set_version
+    }
     pub const fn local_validator_id(&self) -> ValidatorId {
         self.local_validator_id
     }
@@ -157,14 +180,17 @@ impl ValidatorBftPeer {
         self.peer.remote_node_id()
     }
 
-    pub(crate) fn accepts_recipient(&self, message: &BftNetworkMessage) -> bool {
+    pub(crate) fn can_send(&self, message: &BftNetworkMessage) -> bool {
         let authority = self
             .authority
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         authority
             .validator_set_for_message(message)
-            .is_ok_and(|validator_set| validator_set.contains(self.remote_validator_id))
+            .is_ok_and(|origin| origin.contains(self.local_validator_id))
+            && authority
+                .accepts_recipient(self.remote_validator_id, message)
+                .unwrap_or(false)
     }
 
     pub async fn send(&self, message: &BftNetworkMessage) -> Result<(), NetworkError> {
@@ -173,8 +199,7 @@ impl ValidatorBftPeer {
                 .authority
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let validator_set = authority.validator_set_for_message(message)?;
-            if !validator_set.contains(self.remote_validator_id) {
+            if !authority.accepts_recipient(self.remote_validator_id, message)? {
                 return Err(NetworkError::BftUnauthorized);
             }
             verify_bft_sender(message, self.local_validator_id, &authority)?;
@@ -223,25 +248,37 @@ pub(crate) async fn authenticate_validator_bft_peer_with_authority(
         return Err(NetworkError::BftUnauthorized);
     }
 
+    let validator_set_version = authority
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .active_validator_set_version;
     let binding = peer.channel_binding()?;
     let signature = identity_key
-        .sign(&bft_auth_bytes(binding, BftAuthRole::Client, validator_id))
+        .sign(&bft_auth_bytes(
+            binding,
+            BftAuthRole::Client,
+            validator_id,
+            validator_set_version,
+        ))
         .to_bytes();
     match peer
         .exchange(&NetworkMessage::BftAuthenticate {
             validator_id,
+            validator_set_version,
             signature,
         })
         .await?
     {
         NetworkMessage::BftAuthenticated {
             validator_id: remote_validator_id,
+            validator_set_version: remote_validator_set_version,
             signature,
         } => {
             if !verify_bft_auth_shared(
                 &peer,
                 BftAuthRole::Server,
                 remote_validator_id,
+                remote_validator_set_version,
                 signature,
                 authority,
             )? {
@@ -251,6 +288,7 @@ pub(crate) async fn authenticate_validator_bft_peer_with_authority(
                 peer,
                 local_validator_id: validator_id,
                 remote_validator_id,
+                remote_validator_set_version,
                 authority: Arc::clone(authority),
             })
         }
@@ -259,7 +297,7 @@ pub(crate) async fn authenticate_validator_bft_peer_with_authority(
     }
 }
 
-pub async fn serve_validator_bft_connection<F>(
+pub async fn serve_validator_bft_connection<F, Fut>(
     peer: &QuicPeer,
     local_validator_id: ValidatorId,
     local_identity_key: &SigningKey,
@@ -267,7 +305,8 @@ pub async fn serve_validator_bft_connection<F>(
     on_message: F,
 ) -> Result<ValidatorId, NetworkError>
 where
-    F: FnMut(ValidatorId, BftNetworkMessage) -> Result<(), NetworkError>,
+    F: FnMut(ValidatorId, BftNetworkMessage) -> Fut,
+    Fut: Future<Output = Result<(), NetworkError>>,
 {
     let Some(auth_request) = peer.accept_request().await? else {
         return Err(NetworkError::BftUnauthorized);
@@ -286,7 +325,7 @@ where
     .await
 }
 
-pub(crate) async fn serve_validator_bft_connection_from_request<F>(
+pub(crate) async fn serve_validator_bft_connection_from_request<F, Fut>(
     peer: &QuicPeer,
     auth_request: super::QuicRequestStream,
     local_validator_id: ValidatorId,
@@ -295,16 +334,33 @@ pub(crate) async fn serve_validator_bft_connection_from_request<F>(
     mut on_message: F,
 ) -> Result<ValidatorId, NetworkError>
 where
-    F: FnMut(ValidatorId, BftNetworkMessage) -> Result<(), NetworkError>,
+    F: FnMut(ValidatorId, BftNetworkMessage) -> Fut,
+    Fut: Future<Output = Result<(), NetworkError>>,
 {
+    // Pin only the trusted handshake committee, for validating and discarding
+    // control messages already in flight when local membership changes.
+    let authenticated_validator_set = match auth_request.message() {
+        NetworkMessage::BftAuthenticate {
+            validator_set_version,
+            ..
+        } => authority
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .validator_sets
+            .get(validator_set_version)
+            .cloned(),
+        _ => None,
+    };
     let validator_id = match auth_request.message() {
         NetworkMessage::BftAuthenticate {
             validator_id,
+            validator_set_version,
             signature,
         } if verify_bft_auth_shared(
             peer,
             BftAuthRole::Client,
             *validator_id,
+            *validator_set_version,
             *signature,
             authority,
         )? =>
@@ -319,17 +375,23 @@ where
                 auth_request.respond(&NetworkMessage::BftDenied).await?;
                 return Err(NetworkError::BftUnauthorized);
             }
+            let validator_set_version = authority
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .active_validator_set_version;
             let binding = peer.channel_binding()?;
             let signature = local_identity_key
                 .sign(&bft_auth_bytes(
                     binding,
                     BftAuthRole::Server,
                     local_validator_id,
+                    validator_set_version,
                 ))
                 .to_bytes();
             auth_request
                 .respond_without_delivery_wait(&NetworkMessage::BftAuthenticated {
                     validator_id: local_validator_id,
+                    validator_set_version,
                     signature,
                 })
                 .await?;
@@ -380,13 +442,25 @@ where
             let authority = authority
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let validator_set = authority.validator_set_for_message(&message)?;
-            if !validator_set.contains(local_validator_id) {
+            if message.validator_set_version() < authority.active_validator_set_version
+                && !matches!(message.scope(), ConsensusScope::PreparedTask(_))
+                && authority.validator_set_for_message(&message).is_err()
+                && let Some(origin) = authenticated_validator_set
+                    .as_ref()
+                    .filter(|origin| origin.version() == message.validator_set_version())
+            {
+                if !origin.contains(local_validator_id) {
+                    return Err(NetworkError::BftUnauthorized);
+                }
+                verify_bft_sender_for_set(&message, validator_id, origin)?;
+                continue;
+            }
+            if !authority.accepts_recipient(local_validator_id, &message)? {
                 return Err(NetworkError::BftUnauthorized);
             }
             verify_bft_sender(&message, validator_id, &authority)?;
         }
-        on_message(validator_id, message)?;
+        on_message(validator_id, message).await?;
     }
 }
 
@@ -396,6 +470,14 @@ fn verify_bft_sender(
     authority: &ValidatorBftAuthority,
 ) -> Result<(), NetworkError> {
     let validator_set = authority.validator_set_for_message(message)?;
+    verify_bft_sender_for_set(message, sender, validator_set)
+}
+
+fn verify_bft_sender_for_set(
+    message: &BftNetworkMessage,
+    sender: ValidatorId,
+    validator_set: &ValidatorSet,
+) -> Result<(), NetworkError> {
     if !validator_set.contains(sender) {
         return Err(NetworkError::BftUnauthorized);
     }
@@ -451,12 +533,20 @@ fn verify_bft_sender(
         | BftNetworkMessage::PreparedTaskSourceChunk { scope, .. }
         | BftNetworkMessage::PreparedTaskSourceUnavailable { scope, .. }
         | BftNetworkMessage::PreparedTaskAvailable { scope, .. } => {
-            if !matches!(scope, ConsensusScope::PreparedTask(_)) {
+            if !matches!(
+                scope,
+                ConsensusScope::PreparedTask(_) | ConsensusScope::CurrencyAllocation { .. }
+            ) {
                 return Err(NetworkError::BftUnauthorized);
             }
         }
         BftNetworkMessage::ValidatorSetTransitionSource { scope, .. } => {
-            if !matches!(scope, ConsensusScope::ValidatorSetTransition { .. }) {
+            if !matches!(scope, ConsensusScope::CurrencyAllocation { .. }) {
+                return Err(NetworkError::BftUnauthorized);
+            }
+        }
+        BftNetworkMessage::PublicCheckpointSource { scope, .. } => {
+            if !matches!(scope, ConsensusScope::PublicCheckpoint { .. }) {
                 return Err(NetworkError::BftUnauthorized);
             }
         }
@@ -473,19 +563,28 @@ fn verify_bft_auth_shared(
     peer: &QuicPeer,
     role: BftAuthRole,
     validator_id: ValidatorId,
+    validator_set_version: u64,
     signature: [u8; 64],
     authority: &SharedValidatorBftAuthority,
 ) -> Result<bool, NetworkError> {
     let authority = authority
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    verify_bft_auth(peer, role, validator_id, signature, &authority)
+    verify_bft_auth(
+        peer,
+        role,
+        validator_id,
+        validator_set_version,
+        signature,
+        &authority,
+    )
 }
 
 fn verify_bft_auth(
     peer: &QuicPeer,
     role: BftAuthRole,
     validator_id: ValidatorId,
+    validator_set_version: u64,
     signature: [u8; 64],
     authority: &ValidatorBftAuthority,
 ) -> Result<bool, NetworkError> {
@@ -497,18 +596,48 @@ fn verify_bft_auth(
     let binding = peer.channel_binding()?;
     Ok(key
         .verify_strict(
-            &bft_auth_bytes(binding, role, validator_id),
+            &bft_auth_bytes(binding, role, validator_id, validator_set_version),
             &Signature::from_bytes(&signature),
         )
         .is_ok())
 }
 
-fn bft_auth_bytes(binding: [u8; 32], role: BftAuthRole, validator_id: ValidatorId) -> Vec<u8> {
-    let mut out = Vec::with_capacity(BFT_AUTH_DOMAIN.len() + 4 + 32 + 1 + 8);
+fn bft_auth_bytes(
+    binding: [u8; 32],
+    role: BftAuthRole,
+    validator_id: ValidatorId,
+    validator_set_version: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BFT_AUTH_DOMAIN.len() + 4 + 32 + 1 + 8 + 8);
     out.extend_from_slice(BFT_AUTH_DOMAIN);
     out.extend_from_slice(&CURRENT_NETWORK_PROTOCOL_VERSION.to_be_bytes());
     out.extend_from_slice(&binding);
     out.push(role as u8);
     out.extend_from_slice(&validator_id.value().to_be_bytes());
+    out.extend_from_slice(&validator_set_version.to_be_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_membership_version_cannot_be_changed_without_resigning() {
+        let key = SigningKey::from_bytes(&[17; 32]);
+        let binding = [9; 32];
+        let id = ValidatorId::new(2);
+        let original = bft_auth_bytes(binding, BftAuthRole::Server, id, 7);
+        let signature = key.sign(&original);
+        let public = key.verifying_key();
+        assert!(public.verify_strict(&original, &signature).is_ok());
+        assert!(
+            public
+                .verify_strict(
+                    &bft_auth_bytes(binding, BftAuthRole::Server, id, 8),
+                    &signature
+                )
+                .is_err()
+        );
+    }
 }

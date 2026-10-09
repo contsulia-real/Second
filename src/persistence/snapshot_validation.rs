@@ -9,7 +9,7 @@ use crate::{
     SecondState, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
 };
 
-pub(super) fn resolve_validator_set<'a>(
+pub(crate) fn resolve_validator_set<'a>(
     active_validator_set: &'a ValidatorSet,
     retained_validator_sets: &'a BTreeMap<u64, ValidatorSet>,
     version: u64,
@@ -54,6 +54,8 @@ pub(super) fn validate_prepared_finality_proofs(
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
 ) -> Result<(), PersistenceError> {
     for prepared in prepared_tasks.values() {
+        // Candidate position is metadata; each candidate retains its own rights.
+        // A finalized unowned choice carries a certificate, not signing rights.
         match (prepared.phase, &prepared.finality_votes) {
             (PreparedTaskPhase::Finalized, Some(_)) => {}
             (PreparedTaskPhase::Finalized, None)
@@ -84,12 +86,13 @@ pub(super) fn validate_retained_validator_sets(
     active_validator_set: &ValidatorSet,
     retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
     validator_registry: &ValidatorRegistry,
+    state: &SecondState,
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+    task_receipts: &super::TaskReceipts,
 ) -> Result<(), PersistenceError> {
-    let referenced_versions = prepared_tasks
-        .values()
-        .map(|prepared| prepared.validator_set_version)
-        .collect::<BTreeSet<_>>();
+    let mut referenced_versions =
+        super::allocation_validation::referenced_versions(state, prepared_tasks);
+    referenced_versions.extend(super::task_receipts::referenced_versions(task_receipts));
 
     for (version, retained) in retained_validator_sets {
         if *version != retained.version()
@@ -147,6 +150,13 @@ pub(super) fn validate_bft_local_state_registry(
                 let prepared = prepared_tasks
                     .get(task_id)
                     .ok_or(PersistenceError::InvalidSnapshot)?;
+                if prepared.phase == PreparedTaskPhase::Finalized
+                    && state
+                        .finality_ready_digest()
+                        .is_some_and(|digest| prepared.plan_digest().ok() != Some(digest))
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
                 if prepared.validator_set_version != state.validator_set_version() {
                     return Err(PersistenceError::InvalidSnapshot);
                 }
@@ -160,7 +170,11 @@ pub(super) fn validate_bft_local_state_registry(
                     return Err(PersistenceError::InvalidSnapshot);
                 }
             }
-            ConsensusScope::PublicCheckpoint {
+            ConsensusScope::CurrencyAllocation {
+                validator_set_version,
+                ..
+            }
+            | ConsensusScope::PublicCheckpoint {
                 validator_set_version,
                 ..
             }
@@ -175,16 +189,31 @@ pub(super) fn validate_bft_local_state_registry(
                     return Err(PersistenceError::InvalidSnapshot);
                 }
             }
-            ConsensusScope::ValidatorSetTransition {
-                current_validator_set_version,
-            } => {
-                if *current_validator_set_version != active_validator_set.version()
-                    || state.validator_set_version() != active_validator_set.version()
-                    || !active_validator_set.contains(*validator_id)
-                {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
+        }
+        if let Some(certificate) = state.valid_prevote_qc() {
+            let statement = certificate.statement();
+            let validator_set = resolve_validator_set(
+                active_validator_set,
+                retained_validator_sets,
+                state.validator_set_version(),
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+            if statement.scope() != scope
+                || statement.validator_set_version() != state.validator_set_version()
+                || statement.phase() != crate::BftPhase::Prevote
+                || !matches!(statement.value(), crate::BftValue::Digest(_))
+                || statement.round() > state.round()
+                || state
+                    .locked_round()
+                    .is_some_and(|round| statement.round() < round)
+                || (state.locked_round() == Some(statement.round())
+                    && state.locked_digest() != statement.value().digest())
+            {
+                return Err(PersistenceError::InvalidSnapshot);
             }
+            certificate
+                .verify(validator_set)
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
         }
     }
 
@@ -196,15 +225,15 @@ pub(super) fn validate_prepared_plans_against_state(
     prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
 ) -> Result<(), PersistenceError> {
     let mut claims = CurrencyClaimBook::new();
-    let mut payment_address_claims = BTreeMap::new();
+    let mut lifecycle_claims = crate::prepared::lifecycle::LifecycleClaimBook::default();
     let mut preallocated = BTreeSet::new();
 
     for prepared in prepared_tasks.values() {
         prepared
-            .restore_claims(&mut claims)
+            .restore_owned_claims(&mut claims)
             .map_err(|_| PersistenceError::InvalidSnapshot)?;
         prepared
-            .restore_payment_address_claims(&mut payment_address_claims)
+            .restore_owned_lifecycle_claims(&mut lifecycle_claims)
             .map_err(|_| PersistenceError::InvalidSnapshot)?;
 
         for operation in &prepared.operations {
@@ -215,6 +244,7 @@ pub(super) fn validate_prepared_plans_against_state(
                     ..
                 } => Some(replacement_reserve.as_slice()),
                 PreparedOperation::Transfer { .. }
+                | PreparedOperation::RegisterAccount { .. }
                 | PreparedOperation::Destroy { .. }
                 | PreparedOperation::RegisterPaymentAddress { .. }
                 | PreparedOperation::RetirePaymentAddress { .. }
@@ -232,15 +262,50 @@ pub(super) fn validate_prepared_plans_against_state(
 
         let mut candidate = state.clone();
         let mut working = candidate.business.clone();
-        prepared
-            .apply(&mut candidate, &mut working)
-            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if prepared.commit_authorized {
+            prepared
+                .apply(&mut candidate, &mut working)
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        } else {
+            prepared
+                .encode_source()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        }
+        let mut digests = BTreeSet::from([prepared
+            .plan_digest()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?]);
+        let mut alternative = prepared.clone();
+        alternative.variants.clear();
+        for variant in &prepared.variants {
+            alternative.operations = variant.operations.clone();
+            alternative.commit_authorized = variant.commit_authorized;
+            if !digests.insert(
+                alternative
+                    .plan_digest()
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?,
+            ) {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            if !variant.commit_authorized {
+                alternative
+                    .encode_source()
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?;
+                continue;
+            }
+            let mut candidate = state.clone();
+            let mut working = candidate.business.clone();
+            alternative
+                .apply(&mut candidate, &mut working)
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        }
     }
 
     Ok(())
 }
 
 pub(super) fn validate_prepared_snapshot_links(
+    active_validator_set: &ValidatorSet,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
     task_bindings: &BTreeMap<TaskId, TaskBinding>,
     payment_addresses: &BTreeMap<PaymentAddress, PaymentAddressRecord>,
     payment_executions: &BTreeMap<OperationClaimId, PaymentExecution>,
@@ -253,7 +318,7 @@ pub(super) fn validate_prepared_snapshot_links(
         let binding = task_bindings
             .get(task_id)
             .ok_or(PersistenceError::InvalidSnapshot)?;
-        if binding.succeeded || binding.request_digest != prepared.request_digest {
+        if binding.outcome.is_terminal() || binding.request_digest != prepared.request_digest {
             return Err(PersistenceError::InvalidSnapshot);
         }
 
@@ -267,6 +332,15 @@ pub(super) fn validate_prepared_snapshot_links(
             return Err(PersistenceError::InvalidSnapshot);
         }
         let mut expected_transfer_claims = BTreeSet::new();
+        if !prepared.has_owned_candidate() {
+            if payment_executions
+                .keys()
+                .any(|claim| claim.task_id() == task_id)
+            {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            continue;
+        }
         for (index, operation) in prepared.operations.iter().enumerate() {
             let operation_index =
                 u64::try_from(index).map_err(|_| PersistenceError::InvalidSnapshot)?;
@@ -311,7 +385,7 @@ pub(super) fn validate_prepared_snapshot_links(
         }
     }
 
-    for ((_, scope), locked_digest) in validator_vote_locks {
+    for ((validator_id, scope), locked_digest) in validator_vote_locks {
         let ConsensusScope::PreparedTask(task_id) = scope else {
             continue;
         };
@@ -319,21 +393,51 @@ pub(super) fn validate_prepared_snapshot_links(
             .get(task_id)
             .ok_or(PersistenceError::InvalidSnapshot)?;
         let Some(prepared) = prepared_tasks.get(task_id) else {
-            if !binding.succeeded {
+            if let crate::state::TaskOutcome::Cancelled(statement) = &binding.outcome {
+                let validators = resolve_validator_set(
+                    active_validator_set,
+                    retained_validator_sets,
+                    statement.validator_set_version(),
+                )
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+                if *locked_digest != statement.subject_digest()
+                    || !validators.contains(*validator_id)
+                {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+            }
+            if !binding.outcome.is_terminal() {
                 return Err(PersistenceError::InvalidSnapshot);
             }
             continue;
         };
 
-        if prepared.phase == PreparedTaskPhase::Prepared || binding.succeeded {
+        if prepared.phase == PreparedTaskPhase::Prepared || binding.outcome.is_terminal() {
             return Err(PersistenceError::InvalidSnapshot);
         }
 
-        let expected_digest = prepared
-            .plan_digest()
-            .map_err(|_| PersistenceError::InvalidSnapshot)?;
-        if locked_digest != &expected_digest {
+        if prepared.phase == PreparedTaskPhase::Finalized
+            && prepared.plan_digest().ok().as_ref() != Some(locked_digest)
+        {
             return Err(PersistenceError::InvalidSnapshot);
+        }
+        if !prepared
+            .candidate(*locked_digest)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?
+            .is_some_and(|candidate| candidate.commit_authorized)
+        {
+            let validators = resolve_validator_set(
+                active_validator_set,
+                retained_validator_sets,
+                prepared.validator_set_version,
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+            let abort = crate::task_abort::statement(task_id, prepared.request_digest, validators);
+            if *locked_digest != abort.subject_digest()
+                || prepared.phase == PreparedTaskPhase::Finalized
+            {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
         }
     }
 

@@ -53,6 +53,7 @@ fn registry_with_retired_five(current: &ValidatorSet) -> ValidatorRegistry {
         current.clone(),
         Vec::new(),
         Vec::new(),
+        1,
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -105,6 +106,7 @@ fn transition_with_candidate(
         next,
         vec![admission],
         Vec::new(),
+        1,
     )
     .unwrap()
 }
@@ -123,6 +125,8 @@ fn voting_task_cannot_be_cancelled_and_phase_survives_restart() {
             count: 1,
         }],
     );
+
+    support::allocate_task(&store, &mut state, &task, 1, &set).unwrap();
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
@@ -197,6 +201,7 @@ fn restart_restores_the_exact_prepared_plan_and_repeats_the_same_vote() {
             .unwrap();
 
         let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+        support::allocate_task(&store, &mut state, &task, 2, &set).unwrap();
         prepared.prepare(&mut state, &task, 2, &set).unwrap();
         first_digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
         mark_finality_ready(
@@ -244,6 +249,8 @@ fn vote_lock_is_durable_before_vote_is_returned() {
             count: 1,
         }],
     );
+
+    support::allocate_task(&store, &mut state, &task, 1, &set).unwrap();
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
@@ -297,6 +304,8 @@ fn prepared_before_expiry_can_be_voted_after_expiry() {
     .unwrap()
     .verify(&authorizers)
     .unwrap();
+
+    support::allocate_task(&store, &mut state, &task, 4, &set).unwrap();
 
     prepared.prepare(&mut state, &task, 4, &set).unwrap();
     let digest = prepared.prepared_plan_digest(task.task_id()).unwrap();
@@ -459,6 +468,7 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
         }],
     );
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 1, &set_v7).unwrap();
     prepared.prepare(&mut state, &task, 1, &set_v7).unwrap();
     let statement = prepared
         .prepared_finality_statement(task.task_id())
@@ -483,8 +493,10 @@ fn public_checkpoint_vote_lock_is_scoped_by_validator_set_version() {
         set_v8.clone(),
         Vec::new(),
         Vec::new(),
+        persisted.state.next_currency_address(),
     )
     .unwrap();
+    let transition = store.prepare_validator_set_transition(transition).unwrap();
     let transition_statement = transition.finality_statement();
     let votes = [1_u64, 2, 3]
         .into_iter()
@@ -586,9 +598,7 @@ fn validator_transition_signer_uses_persisted_registry_history() {
     mark_finality_ready(
         &store,
         ValidatorId::new(1),
-        ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version: set.version(),
-        },
+        valid.scope(),
         valid.finality_statement().subject_digest(),
         &set,
     );
@@ -614,9 +624,7 @@ fn validator_set_transition_vote_lock_survives_restart_and_blocks_conflicting_ne
     mark_finality_ready(
         &store,
         validator_id,
-        ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version: set.version(),
-        },
+        first.scope(),
         first.finality_statement().subject_digest(),
         &set,
     );
@@ -686,6 +694,8 @@ fn wrong_consensus_key_does_not_create_a_vote_lock() {
             count: 1,
         }],
     );
+
+    support::allocate_task(&store, &mut state, &task, 1, &set).unwrap();
 
     prepared.prepare(&mut state, &task, 1, &set).unwrap();
 

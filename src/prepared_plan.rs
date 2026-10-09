@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
 use crate::payment::EstablishedTransfer;
+use crate::prepared::lifecycle::{LifecycleAddress, LifecycleClaimBook};
 use crate::state::{BusinessState, PrerequisiteState};
 use crate::{
     AccountAddress, CURRENT_PROTOCOL_VERSION, ClaimError, CurrencyAddress, CurrencyClaimBook,
@@ -14,6 +15,9 @@ const PREPARED_TASK_DOMAIN: &[u8] = b"SECOND_PREPARED_TASK_V1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PreparedOperation {
+    RegisterAccount {
+        account: AccountAddress,
+    },
     Issue {
         account: AccountAddress,
         addresses: Vec<CurrencyAddress>,
@@ -52,6 +56,9 @@ impl PreparedOperation {
         claim_id: OperationClaimId,
     ) -> Result<(), PreparationError> {
         match self {
+            Self::RegisterAccount { account } => {
+                state.register_account_in_business_state(working, *account)?;
+            }
             Self::Issue { account, addresses } => {
                 validate_preallocated_addresses(state, addresses)?;
                 state.apply_issue_preallocated(working, *account, addresses)?;
@@ -121,13 +128,13 @@ impl PreparedOperation {
         Ok(())
     }
 
-    fn restore_claim(
+    pub(crate) fn restore_claim(
         &self,
         claim_id: OperationClaimId,
         claims: &mut CurrencyClaimBook,
     ) -> Result<(), ClaimError> {
         match self {
-            Self::Issue { .. } => Ok(()),
+            Self::Issue { .. } | Self::RegisterAccount { .. } => Ok(()),
             Self::Transfer {
                 transfer,
                 currencies,
@@ -142,11 +149,14 @@ impl PreparedOperation {
         }
     }
 
-    fn lifecycle_payment_address(&self) -> Option<PaymentAddress> {
+    pub(crate) fn lifecycle_address(&self) -> Option<LifecycleAddress> {
         match self {
+            Self::RegisterAccount { account } => Some(LifecycleAddress::Account(*account)),
             Self::RegisterPaymentAddress { address, .. }
             | Self::RetirePaymentAddress { address }
-            | Self::FinalizePaymentAddressRetirement { address } => Some(*address),
+            | Self::FinalizePaymentAddressRetirement { address } => {
+                Some(LifecycleAddress::Payment(*address))
+            }
             Self::Issue { .. }
             | Self::Transfer { .. }
             | Self::Destroy { .. }
@@ -169,8 +179,17 @@ pub(crate) struct PreparedTask {
     pub(crate) source_task: LegalTask,
     pub(crate) validator_set_version: u64,
     pub(crate) phase: PreparedTaskPhase,
+    pub(crate) commit_authorized: bool,
+    pub(crate) conflict_abort: bool,
     pub(crate) finality_votes: Option<Vec<ValidatorVote>>,
     pub(crate) operations: Vec<PreparedOperation>,
+    pub(crate) variants: Vec<PreparedVariant>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedVariant {
+    pub(crate) operations: Vec<PreparedOperation>,
+    pub(crate) commit_authorized: bool,
 }
 
 impl PreparedTask {
@@ -187,8 +206,11 @@ impl PreparedTask {
             source_task,
             validator_set_version,
             phase: PreparedTaskPhase::Prepared,
+            commit_authorized: true,
+            conflict_abort: false,
             finality_votes: None,
             operations,
+            variants: Vec::new(),
         }
     }
 
@@ -207,8 +229,11 @@ impl PreparedTask {
             source_task,
             validator_set_version,
             phase,
+            commit_authorized: true,
+            conflict_abort: false,
             finality_votes,
             operations,
+            variants: Vec::new(),
         }
     }
 
@@ -250,6 +275,7 @@ impl PreparedTask {
                     addresses.extend(replacement_reserve.iter().copied());
                 }
                 PreparedOperation::RegisterPaymentAddress { .. }
+                | PreparedOperation::RegisterAccount { .. }
                 | PreparedOperation::RetirePaymentAddress { .. }
                 | PreparedOperation::FinalizePaymentAddressRetirement { .. } => {}
             }
@@ -272,16 +298,27 @@ impl PreparedTask {
     }
 
     pub(crate) fn plan_digest(&self) -> Result<[u8; 32], PreparationError> {
+        self.operations_digest(&self.operations)
+    }
+
+    pub(crate) fn operations_digest(
+        &self,
+        operations: &[PreparedOperation],
+    ) -> Result<[u8; 32], PreparationError> {
         let mut hasher = Sha256::new();
         hasher.update(PREPARED_TASK_DOMAIN);
         hasher.update(self.request_digest);
         hash_len(&mut hasher, self.task_id.len())?;
         hasher.update(self.task_id.as_bytes());
         hasher.update(self.validator_set_version.to_be_bytes());
-        hash_len(&mut hasher, self.operations.len())?;
+        hash_len(&mut hasher, operations.len())?;
 
-        for operation in &self.operations {
+        for operation in operations {
             match operation {
+                PreparedOperation::RegisterAccount { account } => {
+                    hasher.update([8]);
+                    hasher.update(account.bytes());
+                }
                 PreparedOperation::Issue { account, addresses } => {
                     hasher.update([1]);
                     hasher.update(account.bytes());
@@ -341,38 +378,14 @@ impl PreparedTask {
         &self,
         claims: &mut CurrencyClaimBook,
     ) -> Result<(), PreparationError> {
-        for (index, operation) in self.operations.iter().enumerate() {
-            let operation_index =
-                u64::try_from(index).map_err(|_| PreparationError::OperationIndexOverflow)?;
-            operation.restore_claim(
-                OperationClaimId::new(self.task_id.clone(), operation_index),
-                claims,
-            )?;
-        }
-        Ok(())
+        self.restore_candidate_claims(claims, false)
     }
 
-    pub(crate) fn restore_payment_address_claims(
+    pub(crate) fn restore_lifecycle_claims(
         &self,
-        claims: &mut BTreeMap<PaymentAddress, TaskId>,
+        claims: &mut LifecycleClaimBook,
     ) -> Result<(), PreparationError> {
-        for operation in &self.operations {
-            let Some(address) = operation.lifecycle_payment_address() else {
-                continue;
-            };
-
-            match claims.get(&address) {
-                Some(owner) if owner != &self.task_id => {
-                    return Err(PreparationError::PaymentAddressContention(address));
-                }
-                Some(_) => {}
-                None => {
-                    claims.insert(address, self.task_id.clone());
-                }
-            }
-        }
-
-        Ok(())
+        self.restore_candidate_lifecycle_claims(claims, false)
     }
 
     pub(crate) fn apply(
@@ -380,17 +393,73 @@ impl PreparedTask {
         state: &mut SecondState,
         working: &mut BusinessState,
     ) -> Result<(), PreparationError> {
+        self.apply_inner(state, working, false)
+    }
+
+    pub(crate) fn apply_certified(
+        &self,
+        state: &mut SecondState,
+        working: &mut BusinessState,
+    ) -> Result<(), PreparationError> {
+        self.apply_inner(
+            state,
+            working,
+            self.phase == PreparedTaskPhase::Finalized && !self.commit_authorized,
+        )
+    }
+
+    fn apply_inner(
+        &self,
+        state: &mut SecondState,
+        working: &mut BusinessState,
+        establish_missing: bool,
+    ) -> Result<(), PreparationError> {
         let mut prerequisite = state.prerequisite.clone();
+        let inherited_establishment = if establish_missing {
+            state
+                .protocol
+                .task_handoff
+                .as_ref()
+                .map(|handoff| {
+                    self.plan_digest()
+                        .map(|digest| handoff.plans.contains_key(&(self.task_id.clone(), digest)))
+                })
+                .transpose()?
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
         for (index, operation) in self.operations.iter().enumerate() {
             let operation_index =
                 u64::try_from(index).map_err(|_| PreparationError::OperationIndexOverflow)?;
-            operation.apply(
-                state,
-                working,
-                &mut prerequisite,
-                OperationClaimId::new(self.task_id.clone(), operation_index),
-            )?;
+            let claim_id = OperationClaimId::new(self.task_id.clone(), operation_index);
+            if establish_missing
+                && !prerequisite.payment_executions.contains_key(&claim_id)
+                && let PreparedOperation::Transfer { transfer, .. } = operation
+            {
+                if inherited_establishment {
+                    state.restore_certified_transfer_in_prerequisite(
+                        working,
+                        &mut prerequisite,
+                        claim_id.clone(),
+                        *transfer,
+                    )?;
+                } else {
+                    let actual = state.establish_transfer_in_prerequisite(
+                        working,
+                        &mut prerequisite,
+                        claim_id.clone(),
+                        transfer.source,
+                        transfer.destination,
+                        transfer.amount,
+                    )?;
+                    if actual != *transfer {
+                        return Err(PreparationError::InvalidPreparedPlan);
+                    }
+                }
+            }
+            operation.apply(state, working, &mut prerequisite, claim_id)?;
         }
 
         state.prerequisite = prerequisite;

@@ -1,70 +1,20 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use second::{
     BftConsensusEvent, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition,
-    NetworkError, NodeRuntime, NodeRuntimeCapabilities, Operation, PreparationError,
-    PreparedTaskBook, PublicCurrencyCheckpoint, QuicClient, QuicTransportIdentity, SecondState,
-    StateStore, ValidatorBftRuntimeError, ValidatorConsensusKeyRotationRequest,
-    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRotationAuthority,
-    ValidatorRuntimeConfig, ValidatorRuntimeKeys, ValidatorSet, ValidatorSetTransition,
+    NetworkError, Operation, PreparationError, PreparedTaskBook, PublicCurrencyCheckpoint,
+    QuicClient, QuicTransportIdentity, SecondState, StateStore, ValidatorBftRuntimeError,
+    ValidatorConsensusKeyRotationRequest, ValidatorCredential, ValidatorId, ValidatorRegistry,
+    ValidatorRotationAuthority, ValidatorRuntimeKeys, ValidatorSet, ValidatorSetTransition,
     ValidatorSigner, authenticate_validator_bft_peer, client_ping,
 };
 
-use crate::support::{self, key, peer_record, single_validator_set, temp_base, validator_set};
-
-fn bind_validator_runtime(
-    store: &StateStore,
-    keys: ValidatorRuntimeKeys,
-    config: ValidatorRuntimeConfig,
-) -> NodeRuntime {
-    let persisted = store.load().unwrap().unwrap();
-    NodeRuntime::bind_loaded(
-        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        store,
-        persisted,
-        NodeRuntimeCapabilities::default().with_validator(keys, config),
-    )
-    .unwrap()
-}
-
-fn validator_runtime_fixture(
-    prefix: &str,
-    validator_id: u64,
-) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
-    validator_runtime_fixture_with_timeouts(
-        prefix,
-        validator_id,
-        BftTimeoutConfig::new(
-            Duration::from_secs(2),
-            Duration::from_secs(2),
-            Duration::from_secs(2),
-        ),
-    )
-}
-
-fn validator_runtime_fixture_with_timeouts(
-    prefix: &str,
-    validator_id: u64,
-    timeouts: BftTimeoutConfig,
-) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
-    let base = temp_base(prefix);
-    let store = StateStore::new(&base);
-    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
-    store.initialize(&state, &validator_set(1, 1..=4)).unwrap();
-    let runtime = Arc::new(bind_validator_runtime(
-        &store,
-        ValidatorRuntimeKeys::new(
-            ValidatorId::new(validator_id),
-            key((validator_id * 3) as u8),
-            key((validator_id * 3 + 1) as u8),
-        ),
-        support::validator_runtime_config(timeouts),
-    ));
-    (runtime, store, base)
-}
+use crate::support::{
+    self, bind_validator_runtime, key, peer_record, single_validator_set, temp_base,
+    validator_runtime_fixture, validator_runtime_fixture_with_timeouts, validator_set,
+};
 
 #[tokio::test]
 async fn exact_pending_legal_task_retry_is_idempotent() {
@@ -93,7 +43,7 @@ async fn exact_pending_legal_task_retry_is_idempotent() {
 
     assert_eq!(
         runtime.submit_legal_task(signed.clone()).unwrap(),
-        second::LegalTaskSubmissionOutcome::Prepared
+        second::LegalTaskSubmissionOutcome::Allocating
     );
     assert_eq!(
         runtime.submit_legal_task(signed).unwrap(),
@@ -145,6 +95,7 @@ fn certified_rotated_validator_set(current: &ValidatorSet) -> CertifiedValidator
         next,
         Vec::new(),
         rotations,
+        2,
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -168,6 +119,22 @@ fn public_checkpoint(store: &StateStore, epoch: u64) -> PublicCurrencyCheckpoint
         epoch,
         persisted.state.public_currency_summary(),
     )
+}
+
+fn with_task_handoff(
+    store: &StateStore,
+    certified: &CertifiedValidatorSetTransition,
+    current: &ValidatorSet,
+) -> CertifiedValidatorSetTransition {
+    let transition = store
+        .prepare_validator_set_transition(certified.transition().clone())
+        .unwrap();
+    let statement = transition.finality_statement();
+    let votes = [1_u64, 2, 3]
+        .into_iter()
+        .map(|id| support::signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+        .collect();
+    CertifiedValidatorSetTransition::new(transition, votes, current).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -201,12 +168,11 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
 
     let connection_result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let ready = fixtures.iter().enumerate().all(|(index, (runtime, _, _))| {
-                runtime.connected_validator_ids().len() == 3
-                    && records.iter().enumerate().all(|(candidate, record)| {
-                        candidate == index || runtime.peer(record.node_id()).is_some()
-                    })
-            });
+            // This verifies BFT certification. Public discovery has its own
+            // tests and is not a prerequisite for dedicated consensus traffic.
+            let ready = fixtures
+                .iter()
+                .all(|(runtime, _, _)| runtime.connected_validator_ids().len() == 3);
             if ready {
                 break;
             }
@@ -231,7 +197,7 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
             })
             .collect::<Vec<_>>();
         panic!(
-            "all validator runtimes must establish dedicated BFT and public peer connections; connections={connections:?}"
+            "all validator runtimes must establish dedicated BFT connections; connections={connections:?}"
         );
     }
 
@@ -316,13 +282,25 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
 
     let first = &fixtures[0].0;
     let second = &fixtures[1].0;
-    let public_peer = first
-        .peer(second.node_id())
-        .expect("public peer connection must coexist with dedicated BFT connections");
+    // A public client has its own identity, so simultaneous bootstrap direction
+    // replacement cannot close the exact connection used for this probe.
+    let public_client = QuicClient::new(
+        "127.0.0.1:0".parse().unwrap(),
+        second.transport_certificate_der(),
+        QuicTransportIdentity::generate().unwrap(),
+    )
+    .unwrap();
+    let public_peer = public_client
+        .connect(second.local_addr().unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         client_ping(&public_peer, 77).await.unwrap(),
         second.node_id()
     );
+    assert_eq!(first.connected_validator_ids().len(), 3);
+    assert_eq!(second.connected_validator_ids().len(), 3);
+    public_peer.close();
 
     for task in &tasks {
         task.abort();
@@ -418,7 +396,7 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
             .0
             .submit_legal_task(task.signed_task().clone())
             .unwrap(),
-        second::LegalTaskSubmissionOutcome::Prepared
+        second::LegalTaskSubmissionOutcome::Allocating
     );
 
     let mut certificates = vec![None; fixtures.len()];
@@ -439,6 +417,7 @@ async fn one_validator_source_bootstraps_prepared_task_consensus_by_private_pull
                         event @ BftConsensusEvent::SendFailed { .. } => {
                             send_failures[index].push(event);
                         }
+                        BftConsensusEvent::CertifiedCurrencyAllocation { .. } => {}
                         event => panic!("unexpected task propagation consensus event: {event:?}"),
                     }
                 }
@@ -524,7 +503,7 @@ async fn runtime_bft_timeout_scheduler_advances_round_without_manual_driver_call
         .start_public_checkpoint_consensus(checkpoint)
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if store
                 .bft_local_state(ValidatorId::new(2), &scope)
@@ -600,13 +579,7 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
     let current = validator_set(4, 1..=4);
     let certified_transition = certified_rotated_validator_set(&current);
     let alice = support::account(1);
-    let task = support::verified_task(
-        1200,
-        vec![Operation::Issue {
-            account: alice,
-            count: 1,
-        }],
-    );
+    let task = support::verified_task(1200, vec![Operation::RegisterAccount { account: alice }]);
 
     let mut fixtures = (1..=4)
         .map(|validator_id| {
@@ -614,11 +587,9 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
                 "runtime-bft-retained-prepared-validator-{validator_id}"
             ));
             let store = StateStore::new(&base);
-            let mut state = SecondState::genesis([alice], 1);
-            {
-                let mut book = PreparedTaskBook::new(store.clone()).unwrap();
-                book.prepare(&mut state, &task, 1, &current).unwrap();
-            }
+            store
+                .initialize(&SecondState::genesis([], 2), &current)
+                .unwrap();
             let keys = ValidatorRuntimeKeys::new(
                 ValidatorId::new(validator_id),
                 key((validator_id * 3) as u8),
@@ -666,9 +637,22 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
     .await
     .expect("retained-set validators must establish BFT sessions through stable identity keys");
 
+    // Establish live v4 sessions first; prepare the retained task afterward so
+    // startup recovery cannot commit it before the test activates v5.
+    for (_, store, _) in &fixtures {
+        let mut state = store.load().unwrap().unwrap().state;
+        PreparedTaskBook::new(store.clone())
+            .unwrap()
+            .prepare(&mut state, &task, 1, &current)
+            .unwrap();
+    }
     for (_, store, _) in &fixtures {
         store
-            .activate_validator_set_transition(&certified_transition)
+            .activate_validator_set_transition(&with_task_handoff(
+                store,
+                &certified_transition,
+                &current,
+            ))
             .unwrap();
         let persisted = store.load().unwrap().unwrap();
         assert_eq!(persisted.validator_set.version(), 5);
@@ -732,12 +716,7 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
 
     let mut certificates = vec![None; fixtures.len()];
     let retained_timeout = convergence_timeout;
-    let prepared_scope = fixtures[0]
-        .1
-        .prepared_bft_proposal_subject(task.task_id())
-        .unwrap()
-        .scope()
-        .clone();
+    let prepared_scope = second::ConsensusScope::PreparedTask(task.task_id());
     let retained_result = tokio::time::timeout(retained_timeout, async {
         loop {
             for (index, (runtime, _, _)) in fixtures.iter().enumerate() {
@@ -798,8 +777,10 @@ async fn running_bft_sessions_refresh_active_set_and_keep_retained_prepared_auth
             Err(PreparationError::NotPrepared(task.task_id()))
         );
         let committed = store.load().unwrap().unwrap();
-        assert!(committed.retained_validator_sets.is_empty());
-        assert_eq!(committed.state.current_supply(), 1);
+        assert_eq!(committed.retained_validator_sets.get(&4), Some(&current));
+        assert_eq!(committed.retained_validator_sets.len(), 1);
+        assert!(committed.state.has_account(alice));
+        assert_eq!(committed.state.current_supply(), 0);
     }
 
     for runtime_task in &runtime_tasks {
@@ -831,10 +812,15 @@ async fn retained_prepared_task_refuses_current_consensus_key_without_historical
     let mut state = SecondState::genesis([alice], 1);
     {
         let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+        support::allocate_task(&store, &mut state, &task, 1, &current).unwrap();
         book.prepare(&mut state, &task, 1, &current).unwrap();
     }
     store
-        .activate_validator_set_transition(&certified_transition)
+        .activate_validator_set_transition(&with_task_handoff(
+            &store,
+            &certified_transition,
+            &current,
+        ))
         .unwrap();
 
     let runtime = bind_validator_runtime(

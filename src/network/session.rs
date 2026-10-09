@@ -1,52 +1,49 @@
 use crate::{
     CertifiedPublicCurrencyCheckpoint, CurrencyAddress, PublicCurrencyCheckpointProof,
-    PublicCurrencyDelta, PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorRegistry,
-    ValidatorSet, ValidatorSetTransitionProof,
+    PublicCurrencyDelta, PublicCurrencyState, PublicCurrencyView, SecondState, ValidatorSet,
+    ValidatorSetTransitionProof,
 };
 
 use super::quic::{QuicPeer, QuicRequestStream};
 
 const MAX_PUBLIC_SYNC_STATE_BYTES: usize = 64 * 1024 * 1024;
 
-pub(crate) struct RuntimeNetworkSnapshot {
-    pub(crate) state: SecondState,
-    pub(crate) validator_set: ValidatorSet,
-    pub(crate) validator_registry: ValidatorRegistry,
-}
+pub(crate) type RuntimeNetworkSnapshot = std::sync::Arc<crate::PersistedNodeState>;
 
 pub(crate) struct RuntimePublicSnapshot {
-    pub(crate) view: PublicCurrencyView,
+    pub(crate) view: Option<std::sync::Arc<PublicCurrencyView>>,
     pub(crate) checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub(crate) latest_delta: Option<PublicCurrencyDelta>,
 }
 
-type RuntimeNetworkSnapshotLoader<'a> =
-    &'a (dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync);
-type RuntimePublicSnapshotLoader<'a> =
-    &'a (dyn Fn() -> Result<RuntimePublicSnapshot, NetworkError> + Send + Sync);
-type ValidatorTransitionProofLoader<'a> =
-    &'a (dyn Fn(u64) -> Result<Option<ValidatorSetTransitionProof>, NetworkError> + Send + Sync);
+type RuntimeNetworkSnapshotLoader =
+    std::sync::Arc<dyn Fn() -> Result<RuntimeNetworkSnapshot, NetworkError> + Send + Sync>;
+type RuntimePublicSnapshotLoader =
+    std::sync::Arc<dyn Fn(bool) -> Result<RuntimePublicSnapshot, NetworkError> + Send + Sync>;
+type ValidatorTransitionProofLoader = std::sync::Arc<
+    dyn Fn(u64) -> Result<Option<ValidatorSetTransitionProof>, NetworkError> + Send + Sync,
+>;
 
-#[derive(Clone, Copy)]
-pub(crate) struct PublicNetworkServices<'a> {
-    peer_store: &'a PeerStore,
+#[derive(Clone)]
+pub(crate) struct PublicNetworkServices {
+    peer_store: PeerStore,
     local_node_id: NodeId,
-    local_peer_record: Option<&'a PeerRecord>,
-    state_recovery_provider: &'a StateRecoveryProviderHandle,
-    public_snapshot_loader: RuntimePublicSnapshotLoader<'a>,
-    transition_proof_loader: ValidatorTransitionProofLoader<'a>,
-    recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader<'a>>,
+    local_peer_record: Option<std::sync::Arc<PeerRecord>>,
+    state_recovery_provider: StateRecoveryProviderHandle,
+    public_snapshot_loader: RuntimePublicSnapshotLoader,
+    transition_proof_loader: ValidatorTransitionProofLoader,
+    recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader>,
 }
 
-impl<'a> PublicNetworkServices<'a> {
+impl PublicNetworkServices {
     pub(crate) const fn new(
-        peer_store: &'a PeerStore,
+        peer_store: PeerStore,
         local_node_id: NodeId,
-        local_peer_record: Option<&'a PeerRecord>,
-        state_recovery_provider: &'a StateRecoveryProviderHandle,
-        public_snapshot_loader: RuntimePublicSnapshotLoader<'a>,
-        transition_proof_loader: ValidatorTransitionProofLoader<'a>,
-        recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader<'a>>,
+        local_peer_record: Option<std::sync::Arc<PeerRecord>>,
+        state_recovery_provider: StateRecoveryProviderHandle,
+        public_snapshot_loader: RuntimePublicSnapshotLoader,
+        transition_proof_loader: ValidatorTransitionProofLoader,
+        recovery_snapshot_loader: Option<RuntimeNetworkSnapshotLoader>,
     ) -> Self {
         Self {
             peer_store,
@@ -339,14 +336,14 @@ pub async fn serve_public_currency_connection(
 
 pub(crate) async fn serve_public_network_connection(
     peer: &QuicPeer,
-    services: PublicNetworkServices<'_>,
+    services: PublicNetworkServices,
 ) -> Result<NodeId, NetworkError> {
     serve_public_connection(peer, None, Some(services), None).await
 }
 
 pub(crate) async fn serve_public_network_connection_from_request(
     peer: &QuicPeer,
-    services: PublicNetworkServices<'_>,
+    services: PublicNetworkServices,
     first_request: QuicRequestStream,
 ) -> Result<NodeId, NetworkError> {
     serve_public_connection(peer, None, Some(services), Some(first_request)).await
@@ -355,7 +352,7 @@ pub(crate) async fn serve_public_network_connection_from_request(
 async fn serve_public_connection(
     peer: &QuicPeer,
     static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
-    services: Option<PublicNetworkServices<'_>>,
+    services: Option<PublicNetworkServices>,
     mut first_request: Option<QuicRequestStream>,
 ) -> Result<NodeId, NetworkError> {
     loop {
@@ -369,62 +366,94 @@ async fn serve_public_connection(
             }
         };
 
-        let recovery_response = services.as_ref().and_then(|services| {
-            services.recovery_snapshot_loader.and_then(|loader| {
-                state_recovery_response(
-                    peer,
-                    request.message(),
-                    services.state_recovery_provider,
-                    || {
-                        loader().map(|snapshot| {
-                            (
-                                snapshot.state,
-                                snapshot.validator_set,
-                                snapshot.validator_registry,
-                            )
-                        })
-                    },
-                )
+        let response = if let Some(services) = &services
+            && !matches!(request.message(), NetworkMessage::Ping { .. })
+        {
+            let services = services.clone();
+            let message = request.message().clone();
+            let peer = peer.clone();
+            tokio::task::spawn_blocking(move || {
+                public_connection_response(&peer, &message, None, Some(&services))
             })
-        });
-        let response = match recovery_response {
-            Some(response) => response?,
-            None if matches!(
+            .await
+            .map_err(|error| {
+                NetworkError::Transport(format!("public response worker failed: {error}"))
+            })??
+        } else {
+            public_connection_response(
+                peer,
                 request.message(),
-                NetworkMessage::GetValidatorSetTransitionProof { .. }
-            ) =>
-            {
-                transition_proof_response(request.message(), services.as_ref())?
-            }
-            None if is_public_currency_request(request.message()) => {
-                public_currency_response(request.message(), static_public_state, services.as_ref())?
-            }
-            None => {
-                match request.message() {
-                    NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
-                    NetworkMessage::GetPeers { limit } => {
-                        validate_peer_limit(*limit)?;
-                        let services = services.as_ref().ok_or(NetworkError::UnexpectedMessage)?;
-                        let mut records = Vec::with_capacity(usize::from(*limit));
-                        if let Some(record) = services.local_peer_record {
-                            records.push(record.clone());
-                        }
-                        let remaining = limit.saturating_sub(records.len() as u16);
-                        if remaining > 0 {
-                            records.extend(services.peer_store.recent(
-                                remaining,
-                                &[services.local_node_id, peer.remote_node_id()],
-                            ));
-                        }
-                        NetworkMessage::Peers { records }
-                    }
-                    _ => return Err(NetworkError::UnexpectedMessage),
-                }
-            }
+                static_public_state,
+                services.as_ref(),
+            )?
         };
 
         request.respond(&response).await?;
     }
+}
+
+fn public_connection_response(
+    peer: &QuicPeer,
+    message: &NetworkMessage,
+    static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
+    services: Option<&PublicNetworkServices>,
+) -> Result<NetworkMessage, NetworkError> {
+    if matches!(message, NetworkMessage::AccountQuery { .. }) {
+        let snapshot = services
+            .and_then(|services| services.recovery_snapshot_loader.as_ref())
+            .map(|loader| loader())
+            .transpose()?;
+        return super::account_query::response(peer, message, snapshot.as_deref());
+    }
+    let recovery_response = services.and_then(|services| {
+        services
+            .recovery_snapshot_loader
+            .as_ref()
+            .and_then(|loader| {
+                state_recovery_response(
+                    peer,
+                    message,
+                    &services.state_recovery_provider,
+                    loader.as_ref(),
+                )
+            })
+    });
+    let response = match recovery_response {
+        Some(response) => response?,
+        None if matches!(
+            message,
+            NetworkMessage::GetValidatorSetTransitionProof { .. }
+        ) =>
+        {
+            transition_proof_response(message, services)?
+        }
+        None if is_public_currency_request(message) => {
+            public_currency_response(message, static_public_state, services)?
+        }
+        None => match message {
+            NetworkMessage::Ping { nonce } => NetworkMessage::Pong { nonce: *nonce },
+            NetworkMessage::GetPeers { limit } => {
+                validate_peer_limit(*limit)?;
+                let services = services.ok_or(NetworkError::UnexpectedMessage)?;
+                let mut records = Vec::with_capacity(usize::from(*limit));
+                if let Some(record) = services.local_peer_record.as_ref() {
+                    records.push((**record).clone());
+                }
+                let remaining = limit.saturating_sub(records.len() as u16);
+                if remaining > 0 {
+                    records.extend(
+                        services
+                            .peer_store
+                            .recent(remaining, &[services.local_node_id, peer.remote_node_id()]),
+                    );
+                }
+                NetworkMessage::Peers { records }
+            }
+            _ => return Err(NetworkError::UnexpectedMessage),
+        },
+    };
+
+    Ok(response)
 }
 
 fn is_public_currency_request(message: &NetworkMessage) -> bool {
@@ -440,13 +469,40 @@ fn is_public_currency_request(message: &NetworkMessage) -> bool {
 fn public_currency_response(
     message: &NetworkMessage,
     static_public_state: Option<(&PublicCurrencyView, Option<&PublicCurrencyCheckpointProof>)>,
-    services: Option<&PublicNetworkServices<'_>>,
+    services: Option<&PublicNetworkServices>,
 ) -> Result<NetworkMessage, NetworkError> {
     if let Some(services) = services {
-        let snapshot = load_runtime_public_snapshot(services)?;
+        let needs_view = matches!(
+            message,
+            NetworkMessage::GetPublicCurrencies { .. } | NetworkMessage::GetPublicCurrencySummary
+        );
+        let snapshot = load_runtime_public_snapshot(services, needs_view)?;
+        if let NetworkMessage::GetPublicCurrencyCheckpoint = message {
+            return Ok(snapshot
+                .checkpoint_proof
+                .map(|proof| NetworkMessage::PublicCurrencyCheckpointProof { proof })
+                .unwrap_or(NetworkMessage::NoPublicCurrencyCheckpoint));
+        }
+        if let NetworkMessage::GetPublicCurrencyDelta {
+            from_epoch,
+            from_state_digest,
+        } = message
+        {
+            return Ok(snapshot
+                .latest_delta
+                .filter(|delta| {
+                    delta.from_epoch() == *from_epoch
+                        && delta.from_state_digest() == *from_state_digest
+                })
+                .map(|delta| NetworkMessage::PublicCurrencyDelta { delta })
+                .unwrap_or(NetworkMessage::NoPublicCurrencyDelta));
+        }
         return public_currency_response_for_snapshot(
             message,
-            &snapshot.view,
+            snapshot
+                .view
+                .as_deref()
+                .ok_or(NetworkError::UnexpectedMessage)?,
             snapshot.checkpoint_proof.as_ref(),
             snapshot.latest_delta.as_ref(),
         );
@@ -489,31 +545,66 @@ fn public_currency_response_for_snapshot(
 
 fn transition_proof_response(
     message: &NetworkMessage,
-    services: Option<&PublicNetworkServices<'_>>,
+    services: Option<&PublicNetworkServices>,
 ) -> Result<NetworkMessage, NetworkError> {
     let services = services.ok_or(NetworkError::UnexpectedMessage)?;
+    transition_proof_response_from_loader(message, &services.transition_proof_loader)
+}
+
+fn transition_proof_response_from_loader(
+    message: &NetworkMessage,
+    loader: &ValidatorTransitionProofLoader,
+) -> Result<NetworkMessage, NetworkError> {
     let NetworkMessage::GetValidatorSetTransitionProof {
         current_validator_set_version,
     } = message
     else {
         return Err(NetworkError::UnexpectedMessage);
     };
-    Ok(
-        (services.transition_proof_loader)(*current_validator_set_version)?
-            .map(|proof| NetworkMessage::ValidatorSetTransitionProof { proof })
-            .unwrap_or(NetworkMessage::NoValidatorSetTransitionProof),
-    )
+    Ok(loader(*current_validator_set_version)?
+        .map(|proof| NetworkMessage::ValidatorSetTransitionProof { proof })
+        .unwrap_or(NetworkMessage::NoValidatorSetTransitionProof))
+}
+
+/// A short evidence session does not join peer discovery or replace an existing
+/// regular connection. Its owner holds the normal global connection permit.
+pub(crate) async fn serve_transition_proof_requests(
+    peer: &QuicPeer,
+    first_request: QuicRequestStream,
+    loader: ValidatorTransitionProofLoader,
+) -> Result<(), NetworkError> {
+    let mut request = first_request;
+    for _ in 0..64 {
+        let message = request.message().clone();
+        let loader = loader.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            transition_proof_response_from_loader(&message, &loader)
+        })
+        .await
+        .map_err(|error| {
+            NetworkError::Transport(format!("membership response worker failed: {error}"))
+        })??;
+        request.respond(&response).await?;
+        let Some(next) = peer.accept_request().await? else {
+            return Ok(());
+        };
+        request = next;
+    }
+    peer.close_with_reason(b"membership proof batch limit");
+    Ok(())
 }
 
 fn load_runtime_public_snapshot(
-    services: &PublicNetworkServices<'_>,
+    services: &PublicNetworkServices,
+    needs_view: bool,
 ) -> Result<RuntimePublicSnapshot, NetworkError> {
-    let snapshot = (services.public_snapshot_loader)()?;
-    if snapshot
-        .checkpoint_proof
-        .as_ref()
-        .is_some_and(|proof| proof.checkpoint().summary() != &snapshot.view.summary)
-    {
+    let snapshot = (services.public_snapshot_loader)(needs_view)?;
+    if snapshot.checkpoint_proof.as_ref().is_some_and(|proof| {
+        snapshot
+            .view
+            .as_ref()
+            .is_some_and(|view| proof.checkpoint().summary() != &view.summary)
+    }) {
         return Err(NetworkError::CheckpointDoesNotMatchServedState);
     }
     Ok(snapshot)

@@ -1,4 +1,5 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+pub(super) use crate::prepared::tests::temp_store;
+use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 
@@ -7,7 +8,7 @@ use crate::{
     AuthorizerSet, BftTimeoutConfig, CURRENT_PROTOCOL_VERSION, SecondState, ValidatorCredential,
 };
 
-fn key(seed: u8) -> SigningKey {
+pub(super) fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
@@ -21,21 +22,8 @@ fn credential(id: u64) -> ValidatorCredential {
     .unwrap()
 }
 
-fn validator_set(version: u64) -> ValidatorSet {
+pub(super) fn validator_set(version: u64) -> ValidatorSet {
     ValidatorSet::new(version, (1..=4).map(credential)).unwrap()
-}
-
-fn temp_store() -> (StateStore, std::path::PathBuf) {
-    let unique = format!(
-        "second-bft-rejected-cache-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock must be after unix epoch")
-            .as_nanos(),
-    );
-    let base = std::env::temp_dir().join(unique);
-    (StateStore::new(&base), base)
 }
 
 #[test]

@@ -10,6 +10,9 @@ const SIGNING_DOMAIN: &[u8] = b"Second/LegalTask/v1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operation {
+    RegisterAccount {
+        account: AccountAddress,
+    },
     Transfer {
         source: PaymentAddress,
         destination: PaymentAddress,
@@ -92,6 +95,7 @@ impl LegalTaskPayload {
                     validate_currency_set(leaked, TaskValidationError::EmptyLeakRepair)?;
                 }
                 Operation::Transfer { .. }
+                | Operation::RegisterAccount { .. }
                 | Operation::Issue { .. }
                 | Operation::RegisterPaymentAddress { .. }
                 | Operation::RetirePaymentAddress { .. }
@@ -124,6 +128,11 @@ impl LegalTaskPayload {
 
 fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), TaskEncodingError> {
     match operation {
+        Operation::RegisterAccount { account } => {
+            push_array_len(out, 2)?;
+            push_unsigned(out, 7);
+            push_text(out, &account.canonical_string())?;
+        }
         Operation::Transfer {
             source,
             destination,

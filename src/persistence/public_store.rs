@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,10 +17,14 @@ use crate::{
 };
 
 use super::codec::{Decoder, push_len};
-use super::slot::{lock_store_file, shared_path_lock};
+use super::slot::{lock_store_file, shared_path_lock, write_snapshot_file};
 use super::validator_codec::{
     decode_validator_registry, decode_validator_set, encode_validator_registry,
     encode_validator_set,
+};
+use super::{
+    commit::{self, CommitReference},
+    read_cache::{ReadCache, ReadToken},
 };
 
 const PUBLIC_SNAPSHOT_MAGIC: [u8; 4] = *b"SPUB";
@@ -44,6 +48,7 @@ pub struct PublicStateStore {
     data_path: PathBuf,
     lock_path: PathBuf,
     process_lock: Arc<Mutex<()>>,
+    read_cache: Arc<Mutex<Option<ReadCache<PersistedPublicNodeState>>>>,
 }
 
 impl PublicStateStore {
@@ -57,6 +62,7 @@ impl PublicStateStore {
             data_path,
             lock_path,
             process_lock,
+            read_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -65,12 +71,18 @@ impl PublicStateStore {
     }
 
     pub fn load(&self) -> Result<Option<PersistedPublicNodeState>, PersistenceError> {
+        Ok(self.load_shared()?.map(|snapshot| (*snapshot).clone()))
+    }
+
+    pub(crate) fn load_shared(
+        &self,
+    ) -> Result<Option<Arc<PersistedPublicNodeState>>, PersistenceError> {
         let _guard = self
             .process_lock
             .lock()
             .map_err(|_| PersistenceError::StoreLockPoisoned)?;
         let lock_file = lock_store_file(&self.lock_path)?;
-        let result = self.load_unlocked();
+        let result = self.load_shared_unlocked();
         let _ = File::unlock(&lock_file);
         result
     }
@@ -150,7 +162,11 @@ impl PublicStateStore {
             .lock()
             .map_err(|_| PersistenceError::StoreLockPoisoned)?;
         let lock_file = lock_store_file(&self.lock_path)?;
-        for path in [slot_path(&self.data_path, 1), slot_path(&self.data_path, 2)] {
+        for path in [
+            slot_path(&self.data_path, 1),
+            slot_path(&self.data_path, 2),
+            append_suffix(&self.data_path, ".commit"),
+        ] {
             match fs::remove_file(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -211,6 +227,35 @@ impl PublicStateStore {
     }
 
     fn load_unlocked(&self) -> Result<Option<PersistedPublicNodeState>, PersistenceError> {
+        Ok(self
+            .load_shared_unlocked()?
+            .map(|snapshot| (*snapshot).clone()))
+    }
+
+    fn load_shared_unlocked(
+        &self,
+    ) -> Result<Option<Arc<PersistedPublicNodeState>>, PersistenceError> {
+        let token = ReadToken::read(&self.data_path)?;
+        let mut cache = self
+            .read_cache
+            .lock()
+            .map_err(|_| PersistenceError::StoreLockPoisoned)?;
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.token == token) {
+            return Ok(Some(Arc::clone(&cached.snapshot)));
+        }
+        *cache = None;
+        let snapshot = self.read_slots_unlocked()?.map(Arc::new);
+        if let Some(snapshot) = &snapshot {
+            *cache = Some(ReadCache {
+                token,
+                snapshot: Arc::clone(snapshot),
+            });
+        }
+        Ok(snapshot)
+    }
+
+    fn read_slots_unlocked(&self) -> Result<Option<PersistedPublicNodeState>, PersistenceError> {
+        let committed = commit::read(&self.data_path)?;
         let mut found = Vec::new();
         let mut any_exists = false;
         for path in [slot_path(&self.data_path, 1), slot_path(&self.data_path, 2)] {
@@ -232,10 +277,18 @@ impl PublicStateStore {
                 found[0].0.generation,
             ));
         }
-        if let Some((state, _)) = found.into_iter().max_by_key(|item| item.0.generation) {
+        if let Some((state, _)) = found
+            .into_iter()
+            .filter(|(state, checksum)| {
+                committed.is_some_and(|reference| {
+                    reference.generation == state.generation && &reference.checksum == checksum
+                })
+            })
+            .max_by_key(|item| item.0.generation)
+        {
             return Ok(Some(state));
         }
-        if any_exists {
+        if any_exists || committed.is_some() {
             Err(PersistenceError::NoValidSnapshot)
         } else {
             Ok(None)
@@ -247,6 +300,15 @@ impl PublicStateStore {
         let primary = slot_path(&self.data_path, state.generation);
         let mirror = mirror_slot_path(&self.data_path, state.generation);
         write_snapshot_file(&primary, &bytes)?;
+        commit::publish(
+            &self.data_path,
+            CommitReference {
+                generation: state.generation,
+                checksum: bytes[bytes.len() - 32..]
+                    .try_into()
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?,
+            },
+        )?;
         let _ = write_snapshot_file(&mirror, &bytes);
         Ok(())
     }
@@ -419,23 +481,6 @@ fn read_slot(
     file.read_to_end(&mut bytes)
         .map_err(PersistenceError::from_io)?;
     decode_snapshot(&bytes).map(Some)
-}
-
-fn write_snapshot_file(path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(PersistenceError::from_io)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .map_err(PersistenceError::from_io)?;
-    file.write_all(bytes).map_err(PersistenceError::from_io)?;
-    file.sync_all().map_err(PersistenceError::from_io)
 }
 
 fn slot_path(path: &Path, generation: u64) -> PathBuf {

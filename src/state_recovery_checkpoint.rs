@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use crate::persistence::{decode_shared_recovery_state, encode_shared_recovery_state};
 use crate::{
@@ -17,6 +18,8 @@ pub struct StateRecoveryPayload {
     state: SecondState,
     validator_set: ValidatorSet,
     validator_registry: ValidatorRegistry,
+    retained_validator_sets: BTreeMap<u64, ValidatorSet>,
+    pub(crate) validator_transition_proofs: BTreeMap<u64, crate::ValidatorSetTransitionProof>,
 }
 
 impl StateRecoveryPayload {
@@ -24,23 +27,78 @@ impl StateRecoveryPayload {
         state: &SecondState,
         validator_set: &ValidatorSet,
         validator_registry: &ValidatorRegistry,
+        retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
     ) -> Result<Self, PersistenceError> {
         validator_registry
             .validate_current_set(validator_set)
             .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+        let mut terminal_sets = BTreeMap::new();
+        for binding in state.protocol.task_bindings.values() {
+            if let crate::state::TaskOutcome::Cancelled(statement) = &binding.outcome
+                && statement.validator_set_version() != validator_set.version()
+            {
+                let version = statement.validator_set_version();
+                let set = retained_validator_sets
+                    .get(&version)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                terminal_sets.entry(version).or_insert_with(|| set.clone());
+            }
+        }
+        let mut shared_state = state.clone();
+        for plan in state
+            .protocol
+            .task_handoff
+            .iter()
+            .flat_map(|handoff| handoff.plans.values())
+        {
+            if plan.validator_set_version != validator_set.version()
+                && !state
+                    .protocol
+                    .task_bindings
+                    .get(&plan.task_id)
+                    .is_some_and(|binding| binding.outcome.is_terminal())
+            {
+                let version = plan.validator_set_version;
+                let set = retained_validator_sets
+                    .get(&version)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+                terminal_sets.entry(version).or_insert_with(|| set.clone());
+            }
+        }
+        for binding in shared_state.protocol.task_bindings.values_mut() {
+            binding.allocation_certificate = None;
+        }
         Ok(Self {
-            state: state.clone(),
+            validator_transition_proofs: BTreeMap::new(),
+            retained_validator_sets: terminal_sets,
+            state: shared_state,
             validator_set: validator_set.clone(),
             validator_registry: validator_registry.clone(),
         })
     }
 
     pub fn from_persisted(snapshot: &PersistedNodeState) -> Result<Self, PersistenceError> {
-        Self::from_shared_parts(
+        let mut payload = Self::from_shared_parts(
             &snapshot.state,
             &snapshot.validator_set,
             &snapshot.validator_registry,
-        )
+            &snapshot.retained_validator_sets,
+        )?;
+        if let Some(handoff) = &snapshot.state.protocol.task_handoff {
+            let version = handoff
+                .certifier_set
+                .as_ref()
+                .ok_or(PersistenceError::InvalidSnapshot)?
+                .version();
+            let proof = snapshot
+                .validator_transition_proofs
+                .get(&version)
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+            payload
+                .validator_transition_proofs
+                .insert(version, proof.clone());
+        }
+        Ok(payload)
     }
 
     pub fn state(&self) -> &SecondState {
@@ -55,13 +113,51 @@ impl StateRecoveryPayload {
         &self.validator_registry
     }
 
+    pub(crate) fn retained_validator_sets(&self) -> &BTreeMap<u64, ValidatorSet> {
+        &self.retained_validator_sets
+    }
+
     pub fn encode_bytes(&self) -> Result<Vec<u8>, PersistenceError> {
-        encode_shared_recovery_state(&self.state, &self.validator_set, &self.validator_registry)
+        crate::persistence::recovery_payload_codec::encode(
+            &self.encode_canonical_state()?,
+            &self.validator_transition_proofs,
+        )
+    }
+
+    fn encode_canonical_state(&self) -> Result<Vec<u8>, PersistenceError> {
+        encode_shared_recovery_state(
+            &self.state,
+            &self.validator_set,
+            &self.validator_registry,
+            &self.retained_validator_sets,
+        )
     }
 
     pub fn decode_bytes(bytes: &[u8]) -> Result<Self, PersistenceError> {
-        let (state, validator_set, validator_registry) = decode_shared_recovery_state(bytes)?;
+        let (bytes, validator_transition_proofs) =
+            crate::persistence::recovery_payload_codec::decode(bytes)?;
+        let (state, validator_set, validator_registry, retained_validator_sets) =
+            decode_shared_recovery_state(bytes)?;
+        crate::persistence::task_handoff::validate_installed(
+            &state,
+            &validator_set,
+            &validator_transition_proofs,
+            None,
+        )?;
+        if validator_transition_proofs.keys().any(|version| {
+            state
+                .protocol
+                .task_handoff
+                .as_ref()
+                .and_then(|handoff| handoff.certifier_set.as_ref())
+                .map(|set| set.version())
+                != Some(*version)
+        }) {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
         Ok(Self {
+            validator_transition_proofs,
+            retained_validator_sets,
             state,
             validator_set,
             validator_registry,
@@ -104,7 +200,7 @@ impl StateRecoveryCheckpoint {
             });
         }
 
-        let encoded = payload.encode_bytes()?;
+        let encoded = payload.encode_canonical_state()?;
         let mut hasher = Sha256::new();
         hasher.update(SHARED_RECOVERY_STATE_DOMAIN);
         hasher.update(encoded);
@@ -185,6 +281,27 @@ impl StateRecoveryCheckpoint {
             self.validator_set_version,
             self.digest(),
         )
+    }
+
+    pub(crate) fn was_admitted(&self, snapshot: &PersistedNodeState) -> bool {
+        matches!(snapshot.pending_governance.get(&self.digest()),
+            Some(crate::persistence::PendingGovernance::Recovery(value)) if value == self)
+    }
+
+    pub(crate) fn matches_admitted_or_persisted(
+        &self,
+        snapshot: &PersistedNodeState,
+    ) -> Result<bool, PersistenceError> {
+        if self.was_admitted(snapshot) {
+            return Ok(true);
+        }
+        self.matches_persisted(snapshot)
+    }
+
+    pub(crate) fn encode_source(&self) -> Result<Vec<u8>, PersistenceError> {
+        StateRecoveryCheckpointProof::new(self.clone(), Vec::new())
+            .encode_bytes()
+            .map_err(|_| PersistenceError::InvalidSnapshot)
     }
 
     pub(crate) fn matches_persisted(

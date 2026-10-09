@@ -1,3 +1,4 @@
+mod account;
 mod bft;
 mod core;
 mod governance;
@@ -92,6 +93,9 @@ pub fn decode_network_message(frame: &[u8]) -> Result<NetworkMessage, NetworkErr
 
 fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkError> {
     match message {
+        NetworkMessage::AccountQuery { .. }
+        | NetworkMessage::AccountQueryResult { .. }
+        | NetworkMessage::AccountQueryDenied { .. } => account::encode(message),
         NetworkMessage::Hello { .. }
         | NetworkMessage::Ping { .. }
         | NetworkMessage::Pong { .. } => core::encode(message),
@@ -130,6 +134,8 @@ fn encode_message_payload(message: &NetworkMessage) -> Result<Vec<u8>, NetworkEr
         | NetworkMessage::LegalTaskStatusRejected { .. } => legal::encode(message),
         NetworkMessage::ValidatorTransitionSubmit { .. }
         | NetworkMessage::ValidatorTransitionAccepted { .. }
+        | NetworkMessage::PublicCheckpointSubmit { .. }
+        | NetworkMessage::PublicCheckpointAccepted { .. }
         | NetworkMessage::StateRecoveryCheckpointSubmit { .. }
         | NetworkMessage::StateRecoveryCheckpointAccepted { .. }
         | NetworkMessage::GovernanceRejected { .. } => governance::encode(message),
@@ -144,7 +150,8 @@ fn decode_message_payload(payload: &[u8]) -> Result<NetworkMessage, NetworkError
         13..=18 => recovery::decode(message_type, payload),
         19..=22 => bft::decode(message_type, payload),
         23..=27 | 39..=41 => legal::decode(message_type, payload),
-        28..=32 => governance::decode(message_type, payload),
+        28..=32 | 42..=43 => governance::decode(message_type, payload),
+        44..=46 => account::decode(message_type, payload),
         other => Err(NetworkError::UnknownMessageType(other)),
     }
 }

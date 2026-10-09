@@ -1,3 +1,4 @@
+use crate::runtime_consensus_target::ValidatorConsensusTarget;
 use tokio::time::Instant;
 
 use super::{
@@ -38,6 +39,7 @@ pub(super) fn ingest_finality_vote(
     statement: crate::FinalityStatement,
     vote: ValidatorVote,
     output: &mut BftConsensusOutput,
+    now: Instant,
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     let expected_statement = session.target.finality_statement(&session.validator_set);
     if scope != *session.subject.scope() || statement != expected_statement {
@@ -47,6 +49,10 @@ pub(super) fn ingest_finality_vote(
         .map_err(BftConsensusRuntimeError::Finality)?;
     let vote_id = vote.validator_id();
     session.finality_votes.insert(vote_id, vote);
+    if session.finality_votes.len() >= session.validator_set.quorum_threshold() {
+        session.bft_finality_ready = true;
+        schedule_finality_relay(session, now);
+    }
     certify_if_ready(session, output)
 }
 
@@ -55,6 +61,7 @@ pub(super) fn ingest_finality_certificate(
     scope: ConsensusScope,
     certificate: FinalityCertificate,
     output: &mut BftConsensusOutput,
+    now: Instant,
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     let expected_statement = session.target.finality_statement(&session.validator_set);
     if scope != *session.subject.scope() || certificate.statement() != expected_statement {
@@ -72,17 +79,17 @@ pub(super) fn ingest_finality_certificate(
             .finality_votes
             .insert(vote.validator_id(), vote.clone());
     }
+    session.bft_finality_ready = true;
+    schedule_finality_relay(session, now);
     let certified = session
         .target
         .certify(certificate.votes().to_vec(), &session.validator_set)?;
-    session
-        .target
-        .persist_certified(&session.store, &certificate)?;
-    apply_certified_side_effects(session, &certified, &certificate, output)?;
+    persist_certified_and_schedule_retry(session, &certificate, output)?;
+    apply_certified_side_effects(session, &certified, output)?;
     remember_recovery_provider(&certified, output);
 
     session.finality_certificate = Some(certificate.clone());
-    relay_finality_certificate(session, certificate, output);
+    relay_finality_certificate(session, certificate, output)?;
     session.certified_emitted = true;
     session.finished = true;
     session.deadline = None;
@@ -104,18 +111,38 @@ pub(super) fn certify_if_ready(
     let certificate = FinalityCertificate::new(statement, votes.clone(), &session.validator_set)
         .map_err(BftConsensusRuntimeError::Finality)?;
     let certified = session.target.certify(votes, &session.validator_set)?;
-    session
-        .target
-        .persist_certified(&session.store, &certificate)?;
-    apply_certified_side_effects(session, &certified, &certificate, output)?;
+    persist_certified_and_schedule_retry(session, &certificate, output)?;
+    apply_certified_side_effects(session, &certified, output)?;
     remember_recovery_provider(&certified, output);
 
     session.finality_certificate = Some(certificate.clone());
     session.certified_emitted = true;
-    relay_finality_certificate(session, certificate, output);
+    relay_finality_certificate(session, certificate, output)?;
     session.finished = true;
     session.deadline = None;
     Ok(Some(certified_event(certified)))
+}
+
+fn persist_certified_and_schedule_retry(
+    session: &BftConsensusSession,
+    certificate: &FinalityCertificate,
+    output: &mut BftConsensusOutput,
+) -> Result<(), BftConsensusRuntimeError> {
+    // Commit releases unused retained candidates as well as Abort releasing all
+    // claims. Collect affected contenders while their holder still exists.
+    let retries = if let ValidatorConsensusTarget::PreparedTask { task_id, .. } = &session.target {
+        session
+            .store
+            .contenders_for(task_id)
+            .map_err(BftConsensusRuntimeError::Persistence)?
+    } else {
+        Vec::new()
+    };
+    session
+        .target
+        .persist_certified(&session.store, certificate)?;
+    output.retry_prepared_tasks.extend(retries);
+    Ok(())
 }
 
 fn remember_recovery_provider(
@@ -130,17 +157,36 @@ fn remember_recovery_provider(
 fn apply_certified_side_effects(
     session: &BftConsensusSession,
     certified: &CertifiedConsensusTarget,
-    certificate: &FinalityCertificate,
     output: &mut BftConsensusOutput,
 ) -> Result<(), BftConsensusRuntimeError> {
     match certified {
+        CertifiedConsensusTarget::CurrencyAllocation { .. } => {
+            output.currency_allocation_committed = true;
+        }
         CertifiedConsensusTarget::PreparedTask { task_id, .. } => {
-            crate::PreparedTaskBook::commit_certified_from_store(
-                &session.store,
-                task_id.clone(),
-                certificate,
-            )
-            .map_err(BftConsensusRuntimeError::Preparation)?;
+            let snapshot = session
+                .store
+                .load_shared()
+                .map_err(BftConsensusRuntimeError::Persistence)?
+                .ok_or(BftConsensusRuntimeError::Persistence(
+                    crate::PersistenceError::MissingSnapshot,
+                ))?;
+            if snapshot.state.task_cancelled(task_id.clone()) {
+                output.business_state_changed = true;
+                output.completed_prepared_tasks.push(task_id.clone());
+            } else {
+                // Finality is already verified and durable; execute its whole
+                // component once and notify every task whose resources released.
+                let outcome = crate::PreparedTaskBook::commit_certified_component(
+                    &session.store,
+                    task_id,
+                    None,
+                )
+                .map_err(BftConsensusRuntimeError::Preparation)?;
+                output.business_state_changed |= !outcome.completed.is_empty();
+                output.completed_prepared_tasks.extend(outcome.completed);
+                output.retry_prepared_tasks.extend(outcome.retry);
+            }
         }
         CertifiedConsensusTarget::ValidatorSetTransition(certified) => {
             session
@@ -155,7 +201,7 @@ fn apply_certified_side_effects(
         CertifiedConsensusTarget::StateRecoveryCheckpoint(certified) => {
             session
                 .store
-                .advance_recovery_checkpoint_floor(certified)
+                .install_recovery_checkpoint_evidence(certified)
                 .map_err(BftConsensusRuntimeError::Persistence)?;
             session
                 .store
@@ -165,7 +211,12 @@ fn apply_certified_side_effects(
                 )
                 .map_err(BftConsensusRuntimeError::Persistence)?;
         }
-        CertifiedConsensusTarget::PublicCheckpoint(_) => {}
+        CertifiedConsensusTarget::PublicCheckpoint(checkpoint) => {
+            session
+                .store
+                .install_public_checkpoint_evidence(checkpoint)
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+        }
     }
     Ok(())
 }
@@ -173,7 +224,7 @@ fn apply_certified_side_effects(
 pub(super) fn rebroadcast_finality_votes(
     session: &BftConsensusSession,
     output: &mut BftConsensusOutput,
-) {
+) -> Result<(), BftConsensusRuntimeError> {
     if let Some(certificate) = &session.finality_qc {
         output
             .outbound
@@ -182,10 +233,7 @@ pub(super) fn rebroadcast_finality_votes(
     if let Some(certificate) = &session.finality_certificate {
         output
             .outbound
-            .push(BftNetworkMessage::FinalityCertificate {
-                scope: session.subject.scope().clone(),
-                certificate: certificate.clone(),
-            });
+            .push(finality_message(session, certificate)?);
     }
 
     if session.finality_certificate.is_none()
@@ -197,26 +245,44 @@ pub(super) fn rebroadcast_finality_votes(
             vote: vote.clone(),
         });
     }
+    Ok(())
 }
 
 pub(super) fn relay_finality_certificate(
     session: &mut BftConsensusSession,
     certificate: FinalityCertificate,
     output: &mut BftConsensusOutput,
-) {
+) -> Result<(), BftConsensusRuntimeError> {
     if !session.relayed_finality_certificate {
+        let message = finality_message(session, &certificate)?;
         session.relayed_finality_certificate = true;
-        output
-            .outbound
-            .push(BftNetworkMessage::FinalityCertificate {
-                scope: session.subject.scope().clone(),
-                certificate,
-            });
+        output.outbound.push(message);
     }
+    Ok(())
+}
+
+fn finality_message(
+    session: &BftConsensusSession,
+    certificate: &FinalityCertificate,
+) -> Result<BftNetworkMessage, BftConsensusRuntimeError> {
+    if let ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint) = &session.target {
+        return super::governance::recovery_proof_message(checkpoint, certificate);
+    }
+    Ok(BftNetworkMessage::FinalityCertificate {
+        scope: session.subject.scope().clone(),
+        certificate: certificate.clone(),
+    })
 }
 
 pub(super) fn certified_event(certified: CertifiedConsensusTarget) -> BftConsensusEvent {
     match certified {
+        CertifiedConsensusTarget::CurrencyAllocation {
+            allocation,
+            certificate,
+        } => BftConsensusEvent::CertifiedCurrencyAllocation {
+            allocation,
+            certificate,
+        },
         CertifiedConsensusTarget::PreparedTask {
             task_id,
             certificate,

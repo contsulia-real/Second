@@ -60,6 +60,7 @@ fn current_quorum_can_certify_complete_next_validator_set() {
         next,
         vec![admission(5)],
         Vec::new(),
+        1,
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -85,6 +86,7 @@ fn joining_validator_cannot_contribute_a_vote_to_its_admission_transition() {
         next,
         vec![admission(5)],
         Vec::new(),
+        1,
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -126,6 +128,7 @@ fn retained_validator_identity_key_cannot_be_rewritten() {
             next,
             Vec::new(),
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::IdentityKeyChanged(
             ValidatorId::new(1)
@@ -155,6 +158,7 @@ fn retained_validator_recovery_key_cannot_be_rewritten() {
             next,
             Vec::new(),
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::RecoveryKeyChanged(
             ValidatorId::new(1)
@@ -184,6 +188,7 @@ fn retained_validator_consensus_key_requires_rotation_request() {
             next,
             Vec::new(),
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::MissingConsensusKeyRotation(
             ValidatorId::new(1)
@@ -222,6 +227,7 @@ fn identity_authorized_consensus_key_rotation_is_accepted() {
         next,
         Vec::new(),
         vec![rotation],
+        1,
     )
     .unwrap();
 
@@ -267,6 +273,7 @@ fn consensus_key_rotation_is_bound_to_current_validator_set_version() {
             next,
             Vec::new(),
             vec![rotation],
+            1,
         ),
         Err(
             ValidatorTransitionError::ConsensusKeyRotationValidatorSetMismatch {
@@ -291,6 +298,7 @@ fn newly_added_validator_without_admission_proof_is_rejected() {
             next,
             Vec::new(),
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::MissingAdmission(
             ValidatorId::new(5)
@@ -311,6 +319,7 @@ fn admission_for_validator_not_added_to_next_set_is_rejected() {
             next,
             vec![admission(6)],
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::UnexpectedAdmission(
             ValidatorId::new(6)
@@ -332,6 +341,7 @@ fn duplicate_admission_proof_is_rejected() {
             next,
             vec![proof.clone(), proof],
             Vec::new(),
+            1,
         ),
         Err(ValidatorTransitionError::DuplicateAdmission(
             ValidatorId::new(5)
@@ -350,6 +360,7 @@ fn certified_transition_activates_immediate_next_validator_set() {
         next,
         vec![admission(5)],
         Vec::new(),
+        1,
     )
     .unwrap();
     let statement = transition.finality_statement();
@@ -376,6 +387,7 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
         next,
         vec![admission(5)],
         Vec::new(),
+        2,
     )
     .unwrap();
     let transition_statement = transition.finality_statement();
@@ -404,9 +416,23 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
     );
     {
         let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+        support::allocate_task(&store, &mut state, &task, 1, &current).unwrap();
         book.prepare(&mut state, &task, 1, &current).unwrap();
     }
 
+    let transition = store
+        .prepare_validator_set_transition(certified.transition().clone())
+        .unwrap();
+    let statement = transition.finality_statement();
+    let certified = CertifiedValidatorSetTransition::new(
+        transition,
+        [1_u64, 2, 3]
+            .into_iter()
+            .map(|id| signed_vote(&statement, ValidatorId::new(id), &key((id * 3 + 1) as u8)))
+            .collect(),
+        &current,
+    )
+    .unwrap();
     store.activate_validator_set_transition(&certified).unwrap();
 
     let activated_v5 = store.load().unwrap().unwrap();
@@ -422,8 +448,12 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
         next_v6,
         Vec::new(),
         Vec::new(),
+        2,
     )
     .unwrap();
+    let transition_v6 = store
+        .prepare_validator_set_transition(transition_v6)
+        .unwrap();
     let statement_v6 = transition_v6.finality_statement();
     let votes_v6 = [1_u64, 2, 3, 4]
         .into_iter()
@@ -496,7 +526,9 @@ fn prepared_task_can_finish_with_retained_validator_set_after_durable_activation
 
     let committed = store.load().unwrap().unwrap();
     assert_eq!(committed.validator_set.version(), 6);
-    assert!(committed.retained_validator_sets.is_empty());
+    // The bounded recovery receipt still needs the original committee.
+    assert_eq!(committed.retained_validator_sets.get(&4), Some(&current));
+    assert_eq!(committed.retained_validator_sets.len(), 1);
     assert_eq!(committed.state.current_supply(), 1);
 
     store.remove_files().unwrap();

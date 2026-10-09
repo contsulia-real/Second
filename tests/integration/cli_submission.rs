@@ -1,10 +1,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::cli_network_init::RunningNode;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use second::{PublicStateStore, SecondState, StateStore};
@@ -13,6 +14,53 @@ use crate::support::{
     self, account, key, single_validator_set, temp_base, write_issue_transaction_request,
     write_validator_sidecars,
 };
+
+#[test]
+fn failed_cli_fixture_releases_node_lock_and_preserves_snapshot() {
+    let base = temp_base("cli-submit-panic-cleanup");
+    let store = StateStore::new(&base);
+    let initial = SecondState::genesis([account(77)], 1);
+    let validators = single_validator_set(1, 1, 31, 32, 33);
+    store.initialize(&initial, &validators).unwrap();
+    let original = second::StateRecoveryPayload::from_persisted(&store.load().unwrap().unwrap())
+        .unwrap()
+        .encode_bytes()
+        .unwrap();
+    let (config, keyring) = write_validator_sidecars(
+        &base,
+        1,
+        31,
+        &[32],
+        33,
+        &[key(9).verifying_key().to_bytes()],
+    );
+    let failed = std::panic::catch_unwind(|| {
+        let (_node, _, _) = start_node(&base);
+        panic!("intentional CLI fixture failure");
+    });
+    assert!(failed.is_err());
+    let check = Command::new(env!("CARGO_BIN_EXE_second"))
+        .args(["node-check", "127.0.0.1:0", base.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "failed fixture leaked its running node: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let cold = StateStore::new(&base).load().unwrap().unwrap();
+    assert_eq!(
+        second::StateRecoveryPayload::from_persisted(&cold)
+            .unwrap()
+            .encode_bytes()
+            .unwrap(),
+        original
+    );
+    assert_eq!(cold.validator_set, validators);
+    support::cleanup_node_runtime(store, base);
+    fs::remove_file(config).unwrap();
+    fs::remove_file(keyring).unwrap();
+}
 
 #[test]
 fn validator_node_accepts_external_submission_commits_and_replays_idempotently() {
@@ -42,6 +90,36 @@ fn validator_node_accepts_external_submission_commits_and_replays_idempotently()
     let (mut node, address, certificate) = start_node(&base);
     let authorizer_public_key = STANDARD.encode(authorizer.verifying_key().to_bytes());
 
+    let alias = base
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(base.file_name().unwrap());
+    for args in [
+        vec!["node", "127.0.0.1:0", alias.to_str().unwrap()],
+        vec![
+            "public-init",
+            alias.to_str().unwrap(),
+            base.to_str().unwrap(),
+        ],
+        vec![
+            "recovery-install",
+            address.as_str(),
+            alias.to_str().unwrap(),
+            base.to_str().unwrap(),
+            certificate.as_str(),
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_second"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("node directory is already in use")
+        );
+    }
+
     let first = submit(
         &address,
         &request_path,
@@ -58,10 +136,10 @@ fn validator_node_accepts_external_submission_commits_and_replays_idempotently()
     let first_stdout = String::from_utf8(first.stdout).unwrap();
     assert_eq!(
         first_stdout.trim(),
-        format!("ACCEPTED task={submitted_task_id} state=prepared")
+        format!("ACCEPTED task={submitted_task_id} state=allocating")
     );
 
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let persisted = store.load().unwrap().unwrap();
         if persisted.state.current_supply() == 1 {
@@ -74,6 +152,59 @@ fn validator_node_accepts_external_submission_commits_and_replays_idempotently()
         );
         thread::sleep(Duration::from_millis(10));
     }
+
+    let checkpoint = Command::new(env!("CARGO_BIN_EXE_second"))
+        .args([
+            "public-checkpoint",
+            &address,
+            base.to_str().unwrap(),
+            &certificate,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        checkpoint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checkpoint.stderr)
+    );
+    assert!(
+        String::from_utf8(checkpoint.stdout)
+            .unwrap()
+            .contains("PUBLIC-CHECKPOINT-ACCEPTED validator_set=1 epoch=1")
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(proof) = store.load().unwrap().unwrap().public_checkpoint_proof {
+            proof
+                .verify_checkpoint(&store.load().unwrap().unwrap().validator_set)
+                .unwrap();
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CLI checkpoint did not persist a certified proof"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let certified = Command::new(env!("CARGO_BIN_EXE_second"))
+        .args([
+            "sync-public-certified",
+            &address,
+            base.to_str().unwrap(),
+            &certificate,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        certified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&certified.stderr)
+    );
+    assert!(
+        String::from_utf8(certified.stdout)
+            .unwrap()
+            .contains("supply=1")
+    );
 
     let public = Command::new(env!("CARGO_BIN_EXE_second"))
         .args(["sync-public", address.as_str(), certificate.as_str()])
@@ -155,7 +286,28 @@ fn validator_node_accepts_external_submission_commits_and_replays_idempotently()
         format!("TASK task={submitted_task_id} state=unknown")
     );
 
+    crate::cli_node_recovery::verify_checkpoint_install(
+        &address,
+        &certificate,
+        &base,
+        &keyring_path,
+    );
     stop_node(&mut node);
+    let (mut restarted, restart_address, restart_certificate) = start_node(&base);
+    assert_eq!(restart_certificate, certificate);
+    assert!(
+        String::from_utf8_lossy(
+            &task_status(
+                &restart_address,
+                &request_path,
+                &authorizer_public_key,
+                &restart_certificate
+            )
+            .stdout
+        )
+        .contains("state=succeeded")
+    );
+    stop_node(&mut restarted);
     support::cleanup_node_runtime(store, base);
     fs::remove_file(config_path).unwrap();
     fs::remove_file(keyring_path).unwrap();
@@ -260,15 +412,20 @@ fn public_backend_rejects_private_task_status_query() {
     fs::remove_file(request_path).unwrap();
 }
 
-fn start_node(base: &Path) -> (Child, String, String) {
-    let mut node = Command::new(env!("CARGO_BIN_EXE_second"))
+fn start_node(base: &Path) -> (RunningNode, String, String) {
+    let child = Command::new(env!("CARGO_BIN_EXE_second"))
         .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-
-    let stdout = node.stdout.take().unwrap();
+    let mut node = RunningNode {
+        child,
+        address: String::new(),
+        certificate: String::new(),
+        node_id: String::new(),
+    };
+    let stdout = node.child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
     let mut listening = String::new();
     reader.read_line(&mut listening).unwrap();
@@ -277,7 +434,12 @@ fn start_node(base: &Path) -> (Child, String, String) {
         fields.len() >= 6 && fields[0] == "LISTENING" && fields[2] == "NODE" && fields[4] == "CERT",
         "unexpected node startup line: {listening}"
     );
-    (node, fields[1].to_owned(), fields[5].to_owned())
+    node.address = fields[1].to_owned();
+    node.node_id = fields[3].to_owned();
+    node.certificate = fields[5].to_owned();
+    let address = node.address.clone();
+    let certificate = node.certificate.clone();
+    (node, address, certificate)
 }
 
 fn submit(
@@ -316,7 +478,7 @@ fn task_status(
         .unwrap()
 }
 
-fn stop_node(node: &mut Child) {
-    node.kill().expect("node exited before test shutdown");
-    node.wait().unwrap();
+fn stop_node(node: &mut RunningNode) {
+    node.child.kill().expect("node exited before test shutdown");
+    node.child.wait().unwrap();
 }

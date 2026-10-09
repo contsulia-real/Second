@@ -1,20 +1,46 @@
-use crate::legal_task_codec::{MAX_ENCODED_LEGAL_TASK_SIZE, decode_legal_task};
-use crate::runtime_bft::{
-    InboundBftMessage, PreparedTaskChunk, PreparedTaskChunkResult, ValidatorBftRuntimeError,
-};
+use crate::runtime_bft::{InboundBftMessage, PreparedTaskChunk, PreparedTaskChunkResult};
 use crate::{
     BftConsensusRuntimeError, BftNetworkMessage, ConsensusScope, NodeRuntime, NodeRuntimeError,
-    PersistenceError, PreparationError, PreparationOutcome, PreparedTaskBook, ValidatorId,
-    ValidatorSet,
+    PersistenceError, PreparationError, PreparedTaskBook, ValidatorId, ValidatorSet,
 };
+
+mod contention;
+mod handoff;
+mod source_admission;
 
 impl NodeRuntime {
     pub(crate) fn start_durable_prepared_consensus(&self) -> Result<(), NodeRuntimeError> {
         let store = self.full_store()?;
         PreparedTaskBook::recover_finalized_from_store(store)?;
 
+        let snapshot = store
+            .load_shared()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
+        let runtime = self
+            .validator_bft
+            .as_ref()
+            .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
+        runtime
+            .consensus()
+            .restore_completed_tasks(&snapshot, runtime.bft_timeouts().precommit)?;
+
         for task_id in store.load_prepared_tasks()?.into_keys() {
             self.start_prepared_task_consensus(task_id)?;
+        }
+        for (task_id, plan) in store.load_prepared_tasks()? {
+            if plan.phase == crate::prepared_plan::PreparedTaskPhase::Finalized {
+                continue;
+            }
+            if (!plan.commit_authorized
+                || plan.has_unavailable_transfer_address(&snapshot.state)
+                || plan
+                    .variants
+                    .iter()
+                    .any(|variant| !variant.commit_authorized))
+                && !plan.conflict_abort
+            {
+                self.retry_contender(&task_id)?;
+            }
         }
         Ok(())
     }
@@ -28,9 +54,88 @@ impl NodeRuntime {
             .as_ref()
             .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
         let mut consensus = Vec::with_capacity(inbound.len());
+        let snapshot = self
+            .full_store()?
+            .load_shared()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
+        let version = snapshot.validator_set.version();
+        let frontier = snapshot.state.next_currency_address();
+        runtime.retire_superseded_allocation_sync(version, frontier);
 
         for inbound_message in inbound {
+            if crate::runtime_bft::superseded_allocation_scope(
+                inbound_message.message.scope(),
+                version,
+                frontier,
+            ) {
+                match &inbound_message.message {
+                    BftNetworkMessage::PreparedTaskAvailable { .. }
+                    | BftNetworkMessage::PreparedTaskSourceChunk { .. }
+                    | BftNetworkMessage::PreparedTaskSourceUnavailable { .. } => continue,
+                    BftNetworkMessage::PreparedTaskRequest { .. } => {}
+                    _ => {
+                        // Keep proof validation and relay in consensus, but a
+                        // finalized frontier no longer needs a local body fetch.
+                        consensus.push(inbound_message);
+                        continue;
+                    }
+                }
+            }
             let sender = inbound_message.validator_id;
+            if let BftNetworkMessage::FinalityCertificate { scope, certificate } =
+                &inbound_message.message
+            {
+                match self.install_handoff_terminal(scope, certificate) {
+                    Ok(true) => {
+                        runtime.finish_prepared_task_sync(scope);
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        runtime
+                            .consensus()
+                            .record_rejection(Some(sender), scope.clone(), error);
+                        continue;
+                    }
+                }
+            }
+            if let Err(error) =
+                self.fetch_certified_prepared_source(sender, &inbound_message.message)
+            {
+                runtime.consensus().record_rejection(
+                    Some(sender),
+                    inbound_message.message.scope().clone(),
+                    error,
+                );
+                continue;
+            }
+            let commit_proof = match &inbound_message.message {
+                BftNetworkMessage::QuorumCertificate(certificate) => Some(certificate),
+                BftNetworkMessage::Proposal {
+                    proposal,
+                    unlock_certificate: Some(certificate),
+                } if proposal.scope() == certificate.statement().scope() => Some(certificate),
+                _ => None,
+            };
+            if let Some(certificate) = commit_proof
+                && let Err(error) = self.observe_prepared_commit_qc(sender, certificate)
+            {
+                runtime.consensus().record_rejection(
+                    Some(sender),
+                    certificate.statement().scope().clone(),
+                    error,
+                );
+                continue;
+            }
+            if let BftNetworkMessage::FinalityCertificate { scope, certificate } =
+                &inbound_message.message
+                && let Err(error) = self.promote_certified_contender(scope, certificate)
+            {
+                runtime
+                    .consensus()
+                    .record_rejection(Some(sender), scope.clone(), error);
+                continue;
+            }
             match inbound_message.message {
                 BftNetworkMessage::PreparedTaskRequest {
                     validator_set_version,
@@ -61,7 +166,7 @@ impl NodeRuntime {
                         offset,
                         bytes,
                     }) {
-                        PreparedTaskChunkResult::Pending => {}
+                        PreparedTaskChunkResult::Pending | PreparedTaskChunkResult::Ignored => {}
                         PreparedTaskChunkResult::Complete(source) => {
                             match self.install_fetched_prepared_task(
                                 validator_set_version,
@@ -69,14 +174,21 @@ impl NodeRuntime {
                                 expected_plan_digest,
                                 &source,
                             ) {
-                                Ok(()) => runtime.finish_prepared_task_fetch(&scope),
+                                Ok(()) => {
+                                    runtime.finish_prepared_task_fetch(&scope, expected_plan_digest)
+                                }
                                 Err(error) => {
                                     runtime.consensus().record_rejection(
                                         Some(sender),
                                         scope.clone(),
                                         error,
                                     );
-                                    runtime.reject_prepared_task_source(&scope, sender);
+                                    runtime.reject_prepared_task_source(
+                                        &scope,
+                                        sender,
+                                        validator_set_version,
+                                        expected_plan_digest,
+                                    );
                                 }
                             }
                         }
@@ -86,12 +198,26 @@ impl NodeRuntime {
                                 scope.clone(),
                                 BftConsensusRuntimeError::InvalidPreparedTaskSource,
                             );
-                            runtime.reject_prepared_task_source(&scope, sender);
+                            runtime.reject_prepared_task_source(
+                                &scope,
+                                sender,
+                                validator_set_version,
+                                expected_plan_digest,
+                            );
                         }
                     }
                 }
-                BftNetworkMessage::PreparedTaskSourceUnavailable { scope, .. } => {
-                    runtime.reject_prepared_task_source(&scope, sender);
+                BftNetworkMessage::PreparedTaskSourceUnavailable {
+                    scope,
+                    validator_set_version,
+                    expected_plan_digest,
+                } => {
+                    runtime.reject_prepared_task_source(
+                        &scope,
+                        sender,
+                        validator_set_version,
+                        expected_plan_digest,
+                    );
                 }
                 BftNetworkMessage::PreparedTaskAvailable {
                     validator_set_version,
@@ -99,15 +225,18 @@ impl NodeRuntime {
                     expected_plan_digest,
                     round,
                 } => {
-                    if self.is_expected_prepared_task_proposer(
-                        validator_set_version,
-                        round,
-                        runtime.validator_id(),
-                    )? && !self.local_prepared_subject_matches(
-                        &scope,
-                        validator_set_version,
-                        expected_plan_digest,
-                    )? {
+                    if (matches!(scope, ConsensusScope::CurrencyAllocation { .. })
+                        || self.is_expected_prepared_task_proposer(
+                            validator_set_version,
+                            round,
+                            runtime.validator_id(),
+                        )?)
+                        && !self.local_prepared_subject_matches(
+                            &scope,
+                            validator_set_version,
+                            expected_plan_digest,
+                        )?
+                    {
                         runtime.begin_prepared_task_fetch(
                             sender,
                             validator_set_version,
@@ -119,7 +248,11 @@ impl NodeRuntime {
                 }
                 message @ BftNetworkMessage::Proposal { .. } => {
                     if let BftNetworkMessage::Proposal { proposal, .. } = &message
-                        && matches!(proposal.scope(), ConsensusScope::PreparedTask(_))
+                        && matches!(
+                            proposal.scope(),
+                            ConsensusScope::PreparedTask(_)
+                                | ConsensusScope::CurrencyAllocation { .. }
+                        )
                     {
                         if self.local_prepared_subject_matches(
                             proposal.scope(),
@@ -147,10 +280,46 @@ impl NodeRuntime {
                         message,
                     });
                 }
-                message => consensus.push(InboundBftMessage {
-                    validator_id: sender,
-                    message,
-                }),
+                message => {
+                    if matches!(message.scope(), ConsensusScope::CurrencyAllocation { .. }) {
+                        let digest = match &message {
+                            BftNetworkMessage::Vote { statement, .. } => match statement.value() {
+                                crate::BftValue::Digest(digest) => Some(digest),
+                                _ => None,
+                            },
+                            BftNetworkMessage::FinalityVote { statement, .. } => {
+                                Some(statement.subject_digest())
+                            }
+                            BftNetworkMessage::QuorumCertificate(certificate) => {
+                                match certificate.statement().value() {
+                                    crate::BftValue::Digest(digest) => Some(digest),
+                                    _ => None,
+                                }
+                            }
+                            BftNetworkMessage::FinalityCertificate { certificate, .. } => {
+                                Some(certificate.statement().subject_digest())
+                            }
+                            _ => None,
+                        };
+                        if let Some(digest) = digest
+                            && !runtime
+                                .consensus()
+                                .has_allocation_candidate(message.scope(), digest)
+                        {
+                            runtime.begin_prepared_task_fetch(
+                                sender,
+                                message.validator_set_version(),
+                                message.scope().clone(),
+                                digest,
+                                message.consensus_round().unwrap_or(0),
+                            );
+                        }
+                    }
+                    consensus.push(InboundBftMessage {
+                        validator_id: sender,
+                        message,
+                    });
+                }
             }
         }
 
@@ -164,18 +333,55 @@ impl NodeRuntime {
         validator_set_version: u64,
         expected_plan_digest: [u8; 32],
     ) -> Result<bool, NodeRuntimeError> {
+        if matches!(scope, ConsensusScope::CurrencyAllocation { .. }) {
+            return Ok(self.validator_bft.as_ref().is_some_and(|runtime| {
+                runtime
+                    .consensus()
+                    .has_allocation_candidate(scope, expected_plan_digest)
+            }));
+        }
         let ConsensusScope::PreparedTask(task_id) = scope else {
             return Ok(false);
         };
-        match self
+        let snapshot = self
             .full_store()?
-            .prepared_bft_proposal_subject(task_id.clone())
+            .load()?
+            .ok_or(NodeRuntimeError::SnapshotMissing)?;
+        if let Some(binding) = snapshot.state.protocol.task_bindings.get(task_id)
+            && let crate::state::TaskOutcome::Cancelled(statement) = &binding.outcome
         {
-            Ok(subject) => Ok(subject.validator_set_version() == validator_set_version
-                && subject.digest() == expected_plan_digest),
-            Err(PersistenceError::StalePreparedTasks) => Ok(false),
-            Err(error) => Err(error.into()),
+            return Ok(statement.validator_set_version() == validator_set_version
+                && statement.subject_digest() == expected_plan_digest);
         }
+        let Some(prepared) = snapshot.prepared_tasks.get(task_id) else {
+            return Ok(false);
+        };
+        if prepared.validator_set_version != validator_set_version {
+            return Ok(false);
+        }
+        let commit_digest = prepared
+            .plan_digest()
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        if commit_digest == expected_plan_digest
+            || prepared.candidate(expected_plan_digest)?.is_some()
+        {
+            return Ok(true);
+        }
+        let validators = if snapshot.validator_set.version() == validator_set_version {
+            &snapshot.validator_set
+        } else {
+            snapshot
+                .retained_validator_sets
+                .get(&validator_set_version)
+                .ok_or(PersistenceError::InvalidSnapshot)?
+        };
+        // Abort has no frozen business source. Recognizing its exact local domain
+        // only suppresses a useless fetch; consensus still requires admission proof.
+        Ok(
+            crate::task_abort::statement(task_id, prepared.request_digest, validators)
+                .subject_digest()
+                == expected_plan_digest,
+        )
     }
 
     fn is_expected_prepared_task_proposer(
@@ -207,97 +413,13 @@ impl NodeRuntime {
                 .cloned())
         }
     }
-
-    fn install_fetched_prepared_task(
-        &self,
-        validator_set_version: u64,
-        scope: &ConsensusScope,
-        expected_plan_digest: [u8; 32],
-        source: &[u8],
-    ) -> Result<(), BftConsensusRuntimeError> {
-        if source.len() > MAX_ENCODED_LEGAL_TASK_SIZE {
-            return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
-        }
-        let task =
-            decode_legal_task(source).ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
-        let verified = task
-            .verify(
-                self.validator_bft
-                    .as_ref()
-                    .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?
-                    .authorizers(),
-            )
-            .map_err(BftConsensusRuntimeError::Authorization)?;
-        let ConsensusScope::PreparedTask(task_id) = scope else {
-            return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
-        };
-        if verified.task_id() != *task_id {
-            return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
-        }
-
-        let validator_set = self
-            .validator_set_by_version(validator_set_version)
-            .map_err(|error| match error {
-                NodeRuntimeError::Persistence(error) => {
-                    BftConsensusRuntimeError::Persistence(error)
-                }
-                _ => BftConsensusRuntimeError::InvalidPreparedTaskSource,
-            })?
-            .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
-
-        let store = self
-            .full_store()
-            .map_err(|_| BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
-        let persisted = store
-            .load()
-            .map_err(BftConsensusRuntimeError::Persistence)?
-            .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?;
-        let mut state = persisted.state;
-        let mut prepared =
-            PreparedTaskBook::new(store.clone()).map_err(BftConsensusRuntimeError::Preparation)?;
-
-        match prepared.prepare_expected_plan(
-            &mut state,
-            &verified,
-            self.validator_bft
-                .as_ref()
-                .ok_or(BftConsensusRuntimeError::InvalidPreparedTaskSource)?
-                .now(),
-            &validator_set,
-            expected_plan_digest,
-        ) {
-            Ok(PreparationOutcome::Prepared) => {}
-            Ok(PreparationOutcome::AlreadySucceeded) => {
-                return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
-            }
-            Err(PreparationError::AlreadyPrepared(_)) => {
-                let subject = store
-                    .prepared_bft_proposal_subject(task_id.clone())
-                    .map_err(BftConsensusRuntimeError::Persistence)?;
-                if subject.validator_set_version() != validator_set_version
-                    || subject.digest() != expected_plan_digest
-                {
-                    return Err(BftConsensusRuntimeError::InvalidPreparedTaskSource);
-                }
-            }
-            Err(error) => return Err(BftConsensusRuntimeError::Preparation(error)),
-        }
-
-        self.start_prepared_task_consensus(task_id.clone())
-            .map_err(|error| match error {
-                NodeRuntimeError::BftConsensus(error) => error,
-                NodeRuntimeError::Persistence(error) => {
-                    BftConsensusRuntimeError::Persistence(error)
-                }
-                NodeRuntimeError::ValidatorBft(error) => {
-                    BftConsensusRuntimeError::Signing(match error {
-                        ValidatorBftRuntimeError::ConsensusKeyMismatch(validator_id) => {
-                            crate::ValidatorSigningError::ConsensusSigningKeyMismatch(validator_id)
-                        }
-                        _ => return BftConsensusRuntimeError::InvalidPreparedTaskSource,
-                    })
-                }
-                _ => BftConsensusRuntimeError::InvalidPreparedTaskSource,
-            })
-    }
 }
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod proof_tests;
+
+#[cfg(test)]
+mod certified_admission_tests;

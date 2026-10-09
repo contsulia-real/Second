@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
+pub mod allocation_diagnostics;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -19,8 +22,9 @@ use second::{
     LegalTaskPayload, NodeRuntime, Operation, PaymentAddress, PeerRecord, PreparationError,
     PreparationOutcome, PreparedTaskBook, PublicStateStore, QuicClient, QuicServer,
     QuicTransportIdentity, SecondState, StateStore, TaskId, ValidatorAdmissionRequest,
-    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRuntimeConfig, ValidatorSet,
-    ValidatorSetTransition, ValidatorVote, VerifiedLegalTask, VerifiedValidatorAdmission,
+    ValidatorCredential, ValidatorId, ValidatorRegistry, ValidatorRuntimeConfig,
+    ValidatorRuntimeKeys, ValidatorSet, ValidatorSetTransition, ValidatorVote, VerifiedLegalTask,
+    VerifiedValidatorAdmission,
 };
 use serde_json::json;
 
@@ -60,6 +64,7 @@ pub fn write_validator_sidecars(
     let keyring_path = append_suffix(base, ".validator.keys.json");
 
     let config = json!({
+        "network_id_base64": STANDARD.encode([0_u8; 32]),
         "authorizer_public_keys_base64": authorizer_public_keys
             .iter()
             .map(|key| STANDARD.encode(key))
@@ -123,8 +128,81 @@ fn deterministic_address_bytes(value: u64) -> [u8; 32] {
     bytes
 }
 
+fn account_key(value: u64) -> SigningKey {
+    let mut seed = deterministic_address_bytes(value);
+    seed[0] = 0x53;
+    SigningKey::from_bytes(&seed)
+}
+
+fn account_registry() -> &'static Mutex<BTreeMap<AccountAddress, u64>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<AccountAddress, u64>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn payment_registry() -> &'static Mutex<BTreeMap<PaymentAddress, BTreeSet<u64>>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<PaymentAddress, BTreeSet<u64>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 pub fn account(value: u64) -> AccountAddress {
-    AccountAddress::from_bytes(deterministic_address_bytes(value))
+    let address = AccountAddress::from_bytes(account_key(value).verifying_key().to_bytes());
+    account_registry().lock().unwrap().insert(address, value);
+    address
+}
+
+/// Test-only real account signatures. No validator bypass or fake identities.
+pub fn sign_task(
+    payload: LegalTaskPayload,
+    authorizer: &SigningKey,
+) -> Result<LegalTask, second::TaskEncodingError> {
+    sign_task_in_network(payload, authorizer, [0; 32])
+}
+
+pub fn sign_task_in_network(
+    payload: LegalTaskPayload,
+    authorizer: &SigningKey,
+    network_id: [u8; 32],
+) -> Result<LegalTask, second::TaskEncodingError> {
+    let known = account_registry().lock().unwrap().clone();
+    let mut owners = BTreeSet::new();
+    let mut payments = payment_registry().lock().unwrap();
+    for operation in payload.operations() {
+        match operation {
+            Operation::RegisterAccount { account } => {
+                owners.insert(*account);
+            }
+            Operation::RegisterPaymentAddress { address, account } => {
+                owners.insert(*account);
+                if let Some(seed) = known.get(account) {
+                    payments.entry(*address).or_default().insert(*seed);
+                }
+            }
+            Operation::Transfer { source, .. }
+            | Operation::RetirePaymentAddress { address: source }
+            | Operation::FinalizePaymentAddressRetirement { address: source } => {
+                if let Some(seed) = known.get(&AccountAddress::from_bytes(source.bytes())) {
+                    owners.insert(account(*seed));
+                }
+                if let Some(seeds) = payments.get(source) {
+                    for seed in seeds {
+                        owners.insert(account(*seed));
+                    }
+                }
+            }
+            Operation::LeakRepair { .. } => {
+                owners.insert(account(1));
+            }
+            Operation::Issue { .. } | Operation::Destroy { .. } => {}
+        }
+    }
+    drop(payments);
+    let mut task = LegalTask::sign_in_network(payload, authorizer, network_id)?;
+    for owner in owners {
+        if let Some(seed) = known.get(&owner) {
+            task.add_account_signature(&account_key(*seed))?;
+        }
+    }
+    Ok(task)
 }
 
 pub fn payment(value: u64) -> PaymentAddress {
@@ -142,30 +220,58 @@ pub fn write_issue_transaction_request(
     authorizer: &SigningKey,
     count: u64,
 ) -> TaskId {
-    let task_id = task_id(task_number);
-    let task = LegalTask::sign(
-        LegalTaskPayload::new(
-            task_id.clone(),
-            CURRENT_PROTOCOL_VERSION,
-            None,
-            vec![Operation::Issue {
-                account: recipient,
-                count,
-            }],
-        ),
+    write_transaction_request(
+        path,
+        task_number,
         authorizer,
+        vec![Operation::Issue {
+            account: recipient,
+            count,
+        }],
+        json!([{ "type": "issue", "recipient": recipient.to_string(), "amount": count }]),
+    )
+}
+
+pub fn write_transaction_request(
+    path: &Path,
+    task_number: u128,
+    authorizer: &SigningKey,
+    operations: Vec<Operation>,
+    json_operations: serde_json::Value,
+) -> TaskId {
+    write_transaction_request_in_network(
+        path,
+        task_number,
+        authorizer,
+        operations,
+        json_operations,
+        [0; 32],
+    )
+}
+
+pub fn write_transaction_request_in_network(
+    path: &Path,
+    task_number: u128,
+    authorizer: &SigningKey,
+    operations: Vec<Operation>,
+    json_operations: serde_json::Value,
+    network_id: [u8; 32],
+) -> TaskId {
+    let task_id = task_id(task_number);
+    let task = sign_task_in_network(
+        LegalTaskPayload::new(task_id.clone(), CURRENT_PROTOCOL_VERSION, None, operations),
+        authorizer,
+        network_id,
     )
     .unwrap();
     let request = json!({
         "request_id": task_id.as_str(),
         "version": CURRENT_PROTOCOL_VERSION,
         "expires_at": null,
-        "operations": [{
-            "type": "issue",
-            "recipient": recipient.to_string(),
-            "amount": count
-        }],
-        "signature": task.signature_base64url()
+        "network_id_base64": STANDARD.encode(network_id),
+        "operations": json_operations,
+        "signature": task.signature_base64url(),
+        "account_signatures": task.account_signatures().iter().map(|entry| json!({"account":entry.account.to_string(), "signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entry.signature)})).collect::<Vec<_>>()
     });
     fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
     task_id
@@ -189,7 +295,7 @@ pub fn verified_task_with_expiry(
         operations,
     );
 
-    LegalTask::sign(payload, &signing)
+    sign_task(payload, &signing)
         .unwrap()
         .verify(&authorizers)
         .unwrap()
@@ -257,6 +363,7 @@ pub fn certified_validator_membership_transition(
     next_ids: impl IntoIterator<Item = u64>,
     admitted_ids: impl IntoIterator<Item = u64>,
     signer_ids: impl IntoIterator<Item = u64>,
+    currency_frontier: u64,
 ) -> CertifiedValidatorSetTransition {
     let registry = ValidatorRegistry::from_validator_set(current).unwrap();
     let next =
@@ -272,6 +379,7 @@ pub fn certified_validator_membership_transition(
         next,
         admissions,
         Vec::new(),
+        currency_frontier,
     )
     .unwrap();
     certify_validator_transition(current, transition, signer_ids)
@@ -283,6 +391,7 @@ pub fn certified_add_validator_transition(
     existing_ids: impl IntoIterator<Item = u64>,
     new_validator_id: u64,
     signer_ids: impl IntoIterator<Item = u64>,
+    currency_frontier: u64,
 ) -> CertifiedValidatorSetTransition {
     let mut next_ids = existing_ids.into_iter().collect::<Vec<_>>();
     next_ids.push(new_validator_id);
@@ -292,6 +401,7 @@ pub fn certified_add_validator_transition(
         next_ids,
         [new_validator_id],
         signer_ids,
+        currency_frontier,
     )
 }
 
@@ -430,6 +540,7 @@ impl FinalityHarness {
         task: &VerifiedLegalTask,
         now: u64,
     ) -> Result<PreparationOutcome, PreparationError> {
+        allocate_task(&self.store, state, task, now, &self.validators)?;
         self.book.prepare(state, task, now, &self.validators)
     }
 
@@ -468,6 +579,57 @@ impl FinalityHarness {
     pub fn prepared_count(&self) -> usize {
         self.book.prepared_count()
     }
+}
+
+pub fn allocate_task(
+    store: &StateStore,
+    state: &mut SecondState,
+    task: &VerifiedLegalTask,
+    now: u64,
+    validators: &ValidatorSet,
+) -> Result<(), PreparationError> {
+    if task.is_expired(now)
+        || !task.operations().iter().any(|operation| {
+            matches!(operation, Operation::Issue { count, .. } if *count > 0)
+                || matches!(operation, Operation::LeakRepair { leaked } if !leaked.is_empty())
+        })
+    {
+        return Ok(());
+    }
+    if store.load().unwrap().is_none() {
+        store.initialize(state, validators).unwrap();
+    }
+    let allocation =
+        second::CurrencyAllocation::new(task, validators.version(), state.next_currency_address())
+            .map_err(PreparationError::Execution)?;
+    // All fixture keys use repeated-byte seeds. Resolve the actual credential instead
+    // of assuming that every test uses the same validator key layout.
+    let signers = validators
+        .credentials()
+        .take(validators.quorum_threshold())
+        .map(|credential| {
+            let signing = (0..=255)
+                .map(key)
+                .find(|signing| {
+                    signing.verifying_key().to_bytes() == credential.consensus_public_key()
+                })
+                .unwrap();
+            (credential.id(), signing)
+        });
+    let certificate = certificate_from_keys(allocation.finality_statement(), validators, signers);
+    match store.install_currency_allocation(&allocation, &certificate) {
+        Ok(()) => *state = store.load().unwrap().unwrap().state,
+        Err(second::PersistenceError::StaleState) => {}
+        Err(second::PersistenceError::SnapshotTooLarge) => {
+            return Err(PreparationError::Execution(
+                ExecutionError::CurrencyAllocationFailed {
+                    requested: allocation.count(),
+                },
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 impl Drop for FinalityHarness {
@@ -574,6 +736,7 @@ pub fn cleanup_node_runtime(store: StateStore, base: PathBuf) {
     remove_transport_identity(&base);
     remove_optional_file(peer_store_path(&base), "peer store");
     remove_optional_file(bootstrap_config_path(&base), "bootstrap config");
+    remove_optional_file(append_suffix(&base, ".runtime.lock"), "runtime lock");
 }
 
 pub fn cleanup_public_node_runtime(store: PublicStateStore, base: PathBuf) {
@@ -581,6 +744,7 @@ pub fn cleanup_public_node_runtime(store: PublicStateStore, base: PathBuf) {
     remove_transport_identity(&base);
     remove_optional_file(peer_store_path(&base), "peer store");
     remove_optional_file(bootstrap_config_path(&base), "bootstrap config");
+    remove_optional_file(append_suffix(&base, ".runtime.lock"), "runtime lock");
 }
 
 pub fn temp_base(prefix: &str) -> PathBuf {
@@ -635,8 +799,60 @@ fn remove_optional_file(path: PathBuf, description: &str) {
     }
 }
 
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = OsString::from(path.as_os_str());
     value.push(suffix);
     PathBuf::from(value)
 }
+
+pub fn bind_validator_runtime(
+    store: &StateStore,
+    keys: second::ValidatorRuntimeKeys,
+    config: ValidatorRuntimeConfig,
+) -> NodeRuntime {
+    let persisted = store.load().unwrap().unwrap();
+    NodeRuntime::bind_loaded(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        store,
+        persisted,
+        second::NodeRuntimeCapabilities::default().with_validator(keys, config),
+    )
+    .unwrap()
+}
+
+pub fn validator_runtime_fixture(
+    prefix: &str,
+    validator_id: u64,
+) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
+    validator_runtime_fixture_with_timeouts(
+        prefix,
+        validator_id,
+        BftTimeoutConfig::new(
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        ),
+    )
+}
+
+pub fn validator_runtime_fixture_with_timeouts(
+    prefix: &str,
+    validator_id: u64,
+    timeouts: BftTimeoutConfig,
+) -> (Arc<NodeRuntime>, StateStore, PathBuf) {
+    let base = temp_base(prefix);
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(2).unwrap();
+    store.initialize(&state, &validator_set(1, 1..=4)).unwrap();
+    let runtime = Arc::new(bind_validator_runtime(
+        &store,
+        ValidatorRuntimeKeys::new(
+            ValidatorId::new(validator_id),
+            key((validator_id * 3) as u8),
+            key((validator_id * 3 + 1) as u8),
+        ),
+        validator_runtime_config(timeouts),
+    ));
+    (runtime, store, base)
+}
+pub mod ports;

@@ -1,6 +1,6 @@
 use crate::{
-    AccountAddress, CurrencyAddress, LegalTask, LegalTaskPayload, Operation, PaymentAddress,
-    TaskEncodingError, TaskId,
+    AccountAddress, AccountSignature, CurrencyAddress, LegalTask, LegalTaskPayload, Operation,
+    PaymentAddress, TaskEncodingError, TaskId,
 };
 
 pub(crate) const MAX_ENCODED_LEGAL_TASK_SIZE: usize = 2 * 1024 * 1024;
@@ -24,8 +24,14 @@ pub(crate) fn encode_legal_task(task: &LegalTask) -> Result<Vec<u8>, TaskEncodin
         encode_operation(&mut out, operation)?;
     }
 
+    out.extend_from_slice(&task.network_id());
     out.extend_from_slice(&task.authorizer_public_key());
     out.extend_from_slice(&task.signature_bytes());
+    push_len(&mut out, task.account_signatures().len())?;
+    for entry in task.account_signatures() {
+        out.extend_from_slice(&entry.account.bytes());
+        out.extend_from_slice(&entry.signature);
+    }
     Ok(out)
 }
 
@@ -49,23 +55,47 @@ pub(crate) fn decode_legal_task(bytes: &[u8]) -> Option<LegalTask> {
         operations.push(decode_operation(&mut cursor)?);
     }
 
+    let network_id = cursor.array_32()?;
     let authorizer_public_key = cursor.array_32()?;
     let signature = cursor.array_64()?;
+    let count = cursor.len()?;
+    if count > crate::authorization::MAX_ACCOUNT_SIGNATURES || count > cursor.remaining() / 96 {
+        return None;
+    }
+    let mut account_signatures = Vec::with_capacity(count);
+    let mut previous = None;
+    for _ in 0..count {
+        let account = AccountAddress::from_bytes(cursor.array_32()?);
+        if previous.is_some_and(|last| last >= account) {
+            return None;
+        }
+        account_signatures.push(AccountSignature {
+            account,
+            signature: cursor.array_64()?,
+        });
+        previous = Some(account);
+    }
     if !cursor.finished() {
         return None;
     }
 
     let payload = LegalTaskPayload::new(task_id, protocol_version, expires_at, operations);
     payload.validate().ok()?;
-    Some(LegalTask::from_parts(
+    Some(LegalTask::from_signed_parts(
         payload,
+        network_id,
         authorizer_public_key,
         signature,
+        account_signatures,
     ))
 }
 
 fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), TaskEncodingError> {
     match operation {
+        Operation::RegisterAccount { account } => {
+            out.push(8);
+            out.extend_from_slice(&account.bytes());
+        }
         Operation::Transfer {
             source,
             destination,
@@ -108,6 +138,9 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
 
 fn decode_operation(cursor: &mut Cursor<'_>) -> Option<Operation> {
     match cursor.u8()? {
+        8 => Some(Operation::RegisterAccount {
+            account: AccountAddress::from_bytes(cursor.array_32()?),
+        }),
         1 => Some(Operation::Transfer {
             source: PaymentAddress::from_bytes(cursor.array_32()?),
             destination: PaymentAddress::from_bytes(cursor.array_32()?),

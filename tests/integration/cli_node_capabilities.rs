@@ -26,6 +26,19 @@ fn node_enables_validator_capability_when_sidecars_are_complete() {
     );
 
     let executable = env!("CARGO_BIN_EXE_second");
+    let before_check = store.load().unwrap().unwrap().generation;
+    let check = Command::new(executable)
+        .args(["node-check", "127.0.0.1:0", base.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let checked = String::from_utf8(check.stdout).unwrap();
+    let check_certificate = checked.split_whitespace().nth(6).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().generation, before_check);
     let mut node = Command::new(executable)
         .args(["node", "127.0.0.1:0", base.to_str().unwrap()])
         .stdout(Stdio::piped())
@@ -49,6 +62,15 @@ fn node_enables_validator_capability_when_sidecars_are_complete() {
     assert_eq!(fields[4], "CERT");
     assert_eq!(fields[6], "VALIDATOR");
     assert_eq!(fields[7], "1");
+    assert_eq!(fields[5], check_certificate);
+    let busy_check = Command::new(executable)
+        .args(["node-check", "127.0.0.1:0", base.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !busy_check.status.success(),
+        "preflight must refuse an active node base"
+    );
 
     let ping = Command::new(executable)
         .args(["ping", fields[1], "77", fields[5]])

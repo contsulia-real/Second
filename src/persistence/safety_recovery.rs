@@ -2,7 +2,7 @@ use crate::validator_transition::transition_digest;
 use crate::{
     CURRENT_PROTOCOL_VERSION, CertifiedValidatorSetTransition, FinalityCertificate,
     FinalityStatement, PersistenceError, ValidatorConsensusKeyRotationRequest, ValidatorId,
-    ValidatorSet, ValidatorVote,
+    ValidatorSet,
 };
 
 use super::codec::{Decoder, push_len};
@@ -11,12 +11,34 @@ use super::validator_codec::{decode_validator_set, encode_validator_set};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingValidatorSafetyRecovery {
     pub(crate) validator_id: ValidatorId,
+    pub(crate) currency_frontier: u64,
     pub(crate) previous_validator_set: ValidatorSet,
     pub(crate) rotation: ValidatorConsensusKeyRotationRequest,
     pub(crate) transition_certificate: FinalityCertificate,
+    pub(crate) handoff_digest: Option<[u8; 32]>,
 }
 
 impl PendingValidatorSafetyRecovery {
+    pub(crate) fn validate_current(
+        &self,
+        current: &ValidatorSet,
+        proofs: &std::collections::BTreeMap<u64, crate::ValidatorSetTransitionProof>,
+    ) -> Result<(), PersistenceError> {
+        let proof = proofs
+            .get(&self.previous_validator_set.version())
+            .ok_or(PersistenceError::InvalidValidatorSafetyRecovery)?;
+        let rotated = proof.source().next_validator_set();
+        self.validate(rotated)?;
+        if proof.votes() != self.transition_certificate.votes()
+            || proof.source().currency_frontier() != self.currency_frontier
+            || current.version() < rotated.version()
+            || current.credential(self.validator_id) != rotated.credential(self.validator_id)
+        {
+            return Err(PersistenceError::InvalidValidatorSafetyRecovery);
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_certified_transition(
         validator_id: ValidatorId,
         previous_validator_set: &ValidatorSet,
@@ -45,9 +67,11 @@ impl PendingValidatorSafetyRecovery {
 
         let pending = Self {
             validator_id,
+            currency_frontier: certified_transition.transition().currency_frontier(),
             previous_validator_set: previous_validator_set.clone(),
             rotation,
             transition_certificate: certified_transition.certificate().clone(),
+            handoff_digest: certified_transition.transition().handoff_digest,
         };
         pending.validate(certified_transition.next_validator_set())?;
         Ok(Some(pending))
@@ -115,6 +139,8 @@ impl PendingValidatorSafetyRecovery {
                 CURRENT_PROTOCOL_VERSION,
                 self.previous_validator_set.version(),
                 current_validator_set,
+                self.currency_frontier,
+                self.handoff_digest,
             ),
         );
         if self.transition_certificate.statement() != expected_statement {
@@ -135,18 +161,18 @@ pub(super) fn encode_optional_pending_safety_recovery(
 
     out.push(1);
     out.extend_from_slice(&pending.validator_id.value().to_be_bytes());
+    out.extend_from_slice(&pending.currency_frontier.to_be_bytes());
+    out.push(u8::from(pending.handoff_digest.is_some()));
+    if let Some(digest) = pending.handoff_digest {
+        out.extend_from_slice(&digest);
+    }
     encode_validator_set(out, &pending.previous_validator_set)?;
     out.extend_from_slice(&pending.rotation.encode_bytes());
 
-    let statement = pending.transition_certificate.statement();
-    out.extend_from_slice(&statement.protocol_version().to_be_bytes());
-    out.extend_from_slice(&statement.validator_set_version().to_be_bytes());
-    out.extend_from_slice(&statement.subject_digest());
-    push_len(out, pending.transition_certificate.votes().len())?;
-    for vote in pending.transition_certificate.votes() {
-        out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
-        out.extend_from_slice(&vote.signature_bytes());
-    }
+    let certificate = crate::finality_codec::encode_certificate(&pending.transition_certificate)
+        .ok_or(PersistenceError::SnapshotTooLarge)?;
+    push_len(out, certificate.len())?;
+    out.extend_from_slice(&certificate);
     Ok(())
 }
 
@@ -157,37 +183,34 @@ pub(super) fn decode_optional_pending_safety_recovery(
         0 => Ok(None),
         1 => {
             let validator_id = ValidatorId::new(decoder.read_u64()?);
+            let currency_frontier = decoder.read_u64()?;
+            let handoff_digest = match decoder.read_u8()? {
+                0 => None,
+                1 => Some(decoder.read_array_32()?),
+                _ => return Err(PersistenceError::InvalidSnapshot),
+            };
             let previous_validator_set = decode_validator_set(decoder)?;
             let rotation =
                 ValidatorConsensusKeyRotationRequest::decode_bytes(decoder.read_exact(117)?)
                     .ok_or(PersistenceError::InvalidSnapshot)?;
 
-            let statement = FinalityStatement::new(
-                decoder.read_u32()?,
-                decoder.read_u64()?,
-                decoder.read_array_32()?,
-            );
-            let vote_count = decoder.read_len()?;
-            const ENCODED_VOTE_SIZE: usize = 8 + 64;
-            if vote_count == 0
-                || vote_count > previous_validator_set.len()
-                || vote_count > decoder.remaining() / ENCODED_VOTE_SIZE
+            let certificate_len = decoder.read_len()?;
+            let transition_certificate =
+                crate::finality_codec::decode_certificate(decoder.read_exact(certificate_len)?)
+                    .ok_or(PersistenceError::InvalidSnapshot)?;
+            if transition_certificate.votes().is_empty()
+                || transition_certificate.votes().len() > previous_validator_set.len()
             {
                 return Err(PersistenceError::InvalidSnapshot);
-            }
-            let mut votes = Vec::with_capacity(vote_count);
-            for _ in 0..vote_count {
-                votes.push(ValidatorVote::from_untrusted_parts(
-                    ValidatorId::new(decoder.read_u64()?),
-                    decoder.read_array_64()?,
-                ));
             }
 
             Ok(Some(PendingValidatorSafetyRecovery {
                 validator_id,
+                currency_frontier,
                 previous_validator_set,
                 rotation,
-                transition_certificate: FinalityCertificate::from_untrusted_parts(statement, votes),
+                transition_certificate,
+                handoff_digest,
             }))
         }
         _ => Err(PersistenceError::InvalidSnapshot),

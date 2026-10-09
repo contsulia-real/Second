@@ -57,6 +57,7 @@ fn prevote_qc_enables_precommit_and_lock_survives_restart() {
     assert_eq!(persisted.round(), 0);
     assert_eq!(persisted.locked_round(), Some(0));
     assert_eq!(persisted.locked_digest(), Some(digest));
+    assert_eq!(persisted.valid_prevote_qc(), Some(&prevote_qc));
 
     let precommit_qc = bft_qc(
         scope.clone(),
@@ -73,6 +74,18 @@ fn prevote_qc_enables_precommit_and_lock_survives_restart() {
         restarted
             .bft_finality_ready(ValidatorId::new(1), &scope, digest)
             .unwrap()
+    );
+
+    let generation = restarted.load().unwrap().unwrap().generation;
+    assert_eq!(
+        restarted
+            .accept_bft_precommit_qc(ValidatorId::new(1), &precommit_qc, &validators)
+            .unwrap(),
+        generation
+    );
+    assert_eq!(
+        StateStore::new(&base).load().unwrap().unwrap().generation,
+        generation
     );
 
     restarted.remove_files().unwrap();

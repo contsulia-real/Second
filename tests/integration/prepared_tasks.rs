@@ -3,7 +3,7 @@ use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, BftValue, CURRENT_PROTOCOL_VERSION, ClaimError, ConsensusScope, CurrencyAddress,
-    ExecutionError, ExecutionOutcome, FinalityCertificate, LegalTask, LegalTaskPayload, Operation,
+    ExecutionError, ExecutionOutcome, FinalityCertificate, LegalTaskPayload, Operation,
     PersistenceError, PreparationError, PreparationOutcome, PreparedTaskBook, SecondState,
     StateStore, TaskId, ValidatorId, ValidatorSet, ValidatorSigner,
 };
@@ -45,7 +45,7 @@ fn expiring_task(
     )
     .unwrap();
 
-    LegalTask::sign(
+    support::sign_task(
         LegalTaskPayload::new(
             support::task_id(task_id),
             CURRENT_PROTOCOL_VERSION,
@@ -285,6 +285,8 @@ fn valid_finality_apply_failure_keeps_prepared_plan_recoverable() {
     );
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
 
+    support::allocate_task(&store, &mut state, &task, 2, &validator_set).unwrap();
+
     prepared
         .prepare(&mut state, &task, 2, &validator_set)
         .unwrap();
@@ -341,7 +343,7 @@ fn same_task_cannot_be_prepared_twice_at_the_same_time() {
 }
 
 #[test]
-fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
+fn retry_after_cancel_preserves_the_certified_address_range() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let mut prepared = FinalityHarness::new("case");
@@ -358,15 +360,15 @@ fn retry_after_cancel_uses_fresh_addresses_and_does_not_reuse_burned_range() {
     assert_eq!(state.next_currency_address(), 2);
 
     prepared.prepare(&mut state, &task, 2).unwrap();
-    assert_eq!(state.next_currency_address(), 3);
+    assert_eq!(state.next_currency_address(), 2);
     prepared.commit(&mut state, task.task_id()).unwrap();
 
-    assert!(!state.currency_exists(CurrencyAddress::new(1)));
-    assert!(state.currency_exists(CurrencyAddress::new(2)));
+    assert!(state.currency_exists(CurrencyAddress::new(1)));
+    assert!(!state.currency_exists(CurrencyAddress::new(2)));
 }
 
 #[test]
-fn stale_book_cannot_publish_finality_statement_for_reprepared_plan() {
+fn reprepare_preserves_finality_statement_for_the_same_certified_allocation() {
     let alice = support::account(1);
     let store = StateStore::new(temp_base("stale-finality-statement"));
     let set = validators();
@@ -380,24 +382,24 @@ fn stale_book_cannot_publish_finality_statement_for_reprepared_plan() {
     );
 
     let mut current = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 1, &set).unwrap();
     current.prepare(&mut state, &task, 1, &set).unwrap();
     let stale = PreparedTaskBook::new(store.clone()).unwrap();
 
     current.cancel(task.task_id()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 2, &set).unwrap();
     current.prepare(&mut state, &task, 2, &set).unwrap();
 
     assert_eq!(
         stale.prepared_finality_statement(task.task_id()),
-        Err(PreparationError::Persistence(
-            PersistenceError::StalePreparedTasks
-        ))
+        current.prepared_finality_statement(task.task_id())
     );
 
     store.remove_files().unwrap();
 }
 
 #[test]
-fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses() {
+fn certificate_remains_bound_to_the_same_plan_after_cancel_and_reprepare() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1);
     let mut prepared = FinalityHarness::new("stale-certificate");
@@ -417,30 +419,17 @@ fn stale_finality_certificate_cannot_commit_a_reprepared_task_with_new_addresses
     prepared.prepare(&mut state, &task, 2).unwrap();
 
     let new_digest = prepared.book.prepared_plan_digest(task.task_id()).unwrap();
-    assert_ne!(old_digest, new_digest);
-
+    assert_eq!(old_digest, new_digest);
     assert_eq!(
         prepared
             .book
-            .commit(&mut state, task.task_id(), &old_certificate),
-        Err(PreparationError::FinalitySubjectMismatch {
-            expected: new_digest,
-            actual: old_digest,
-        })
-    );
-    assert!(prepared.book.is_prepared(task.task_id()));
-
-    let current_certificate = certify(&prepared.book, task.task_id(), &prepared.validators);
-    assert_eq!(
-        prepared
-            .book
-            .commit(&mut state, task.task_id(), &current_certificate)
+            .commit(&mut state, task.task_id(), &old_certificate)
             .unwrap(),
         ExecutionOutcome::Succeeded
     );
 
-    assert!(!state.currency_exists(CurrencyAddress::new(1)));
-    assert!(state.currency_exists(CurrencyAddress::new(2)));
+    assert!(state.currency_exists(CurrencyAddress::new(1)));
+    assert!(!state.currency_exists(CurrencyAddress::new(2)));
 }
 
 #[test]
@@ -524,7 +513,7 @@ fn failed_prepare_burns_addresses_allocated_by_earlier_operations() {
     );
 
     assert_eq!(state.current_supply(), 0);
-    assert_eq!(state.next_currency_address(), 3);
+    assert_eq!(state.next_currency_address(), 4);
     assert_eq!(prepared.prepared_count(), 0);
 }
 
@@ -545,6 +534,8 @@ fn crash_after_prepare_restores_the_exact_plan_without_reallocating_addresses() 
     {
         let mut state = SecondState::genesis([alice], 1);
         let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+
+        support::allocate_task(&store, &mut state, &task, 1, &validator_set).unwrap();
 
         prepared
             .prepare(&mut state, &task, 1, &validator_set)
@@ -596,6 +587,7 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
 
     let mut state = SecondState::genesis([alice], 1);
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 1, &validator_set).unwrap();
     prepared
         .prepare(&mut state, &task, 1, &validator_set)
         .unwrap();
@@ -680,6 +672,7 @@ fn stale_book_cannot_cancel_task_after_another_book_begins_voting() {
         }],
     );
     let mut original = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 1, &set).unwrap();
     original.prepare(&mut state, &task, 1, &set).unwrap();
 
     let mut stale = PreparedTaskBook::new(store.clone()).unwrap();
@@ -731,6 +724,7 @@ fn stale_preparer_cannot_overwrite_newer_finalized_state() {
             count: 1,
         }],
     );
+    support::allocate_task(&store, &mut first_state, &first_task, 1, &set).unwrap();
     first
         .prepare(&mut first_state, &first_task, 1, &set)
         .unwrap();
@@ -787,6 +781,7 @@ fn payment_address_lifecycle_claim_survives_restart_and_releases_on_cancel() {
     let mut state = SecondState::genesis([alice], 1);
     {
         let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+        support::allocate_task(&store, &mut state, &first, 1, &validator_set).unwrap();
         prepared
             .prepare(&mut state, &first, 1, &validator_set)
             .unwrap();

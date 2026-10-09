@@ -23,6 +23,7 @@ fn rotated_set(current: &ValidatorSet, new_consensus_key: [u8; 32]) -> Validator
 }
 
 fn certified_transition(
+    store: &StateStore,
     current: &ValidatorSet,
     registry: &second::ValidatorRegistry,
     next: &ValidatorSet,
@@ -46,8 +47,10 @@ fn certified_transition(
         next.clone(),
         vec![],
         vec![rotation],
+        2,
     )
     .unwrap();
+    let transition = store.prepare_validator_set_transition(transition).unwrap();
     let statement = transition.finality_statement();
     let votes = voters
         .into_iter()
@@ -83,10 +86,20 @@ fn recovered_validator_reenters_only_after_independent_key_rotation_quorum_and_s
     let new_consensus_key = key(90);
     let validators_v5 = rotated_set(&validators_v4, new_consensus_key.verifying_key().to_bytes());
 
-    let self_voted_transition =
-        certified_transition(&validators_v4, &registry_v4, &validators_v5, [1, 2, 3]);
-    let independent_transition =
-        certified_transition(&validators_v4, &registry_v4, &validators_v5, [2, 3, 4]);
+    let self_voted_transition = certified_transition(
+        &source_store,
+        &validators_v4,
+        &registry_v4,
+        &validators_v5,
+        [1, 2, 3],
+    );
+    let independent_transition = certified_transition(
+        &source_store,
+        &validators_v4,
+        &registry_v4,
+        &validators_v5,
+        [2, 3, 4],
+    );
 
     source_store
         .activate_validator_set_transition(&independent_transition)

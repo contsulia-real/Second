@@ -20,6 +20,51 @@ fn certified_checkpoint(store: &StateStore, serial: u64) -> CertifiedStateRecove
     CertifiedStateRecoveryCheckpoint::new(checkpoint, votes, &validators).unwrap()
 }
 
+#[test]
+fn recovery_round_trips_many_established_payments_with_short_task_ids() {
+    let validators = validator_set(1, [1]);
+    let alice = support::account(1);
+    let bob = support::account(2);
+    let mut state = SecondState::genesis([alice, bob], 1);
+    support::register_payment_addresses(&mut state, [alice, bob]);
+    let base = support::temp_base("recovery-short-payment-ids");
+    let store = StateStore::new(&base);
+    store.initialize(&state, &validators).unwrap();
+    let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+    for id in 0..100 {
+        let task = support::sign_task(
+            second::LegalTaskPayload::new(
+                second::TaskId::parse(&id.to_string()).unwrap(),
+                second::CURRENT_PROTOCOL_VERSION,
+                None,
+                vec![Operation::Transfer {
+                    source: support::payment_address(alice),
+                    destination: support::payment_address(bob),
+                    amount: 1,
+                }],
+            ),
+            &key(9),
+        )
+        .unwrap()
+        .verify(&support::authorizers())
+        .unwrap();
+        assert!(matches!(
+            book.prepare(&mut state, &task, 1, &validators),
+            Err(second::PreparationError::Claim(
+                second::ClaimError::InsufficientBalance { .. }
+            ))
+        ));
+    }
+    let cold = StateStore::new(&base).load().unwrap().unwrap();
+    assert_eq!(cold.state.payment_execution_count(), 100);
+    let payload = second::StateRecoveryPayload::from_persisted(&cold).unwrap();
+    let encoded = payload.encode_bytes().unwrap();
+    let decoded = second::StateRecoveryPayload::decode_bytes(&encoded).unwrap();
+    assert_eq!(decoded.state().payment_execution_count(), 100);
+    assert_eq!(decoded.encode_bytes().unwrap(), encoded);
+    store.remove_files().unwrap();
+}
+
 #[tokio::test]
 async fn privileged_recovery_chunks_large_private_state_and_installs_only_shared_state() {
     let validators = validator_set(7, 1..=4);
@@ -245,8 +290,18 @@ async fn runtime_recovery_publish_uses_durable_membership_after_online_transitio
         NodeRuntime::load_and_bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), &store).unwrap(),
     );
 
-    let certified_transition =
-        support::certified_add_validator_transition(&initial, 8, 1..=4, 5, 1..=3);
+    let certified_transition = support::certified_add_validator_transition(
+        &initial,
+        8,
+        1..=4,
+        5,
+        1..=3,
+        state.next_currency_address(),
+    );
+    let transition = store
+        .prepare_validator_set_transition(certified_transition.transition().clone())
+        .unwrap();
+    let certified_transition = support::certify_validator_transition(&initial, transition, 1..=3);
     store
         .activate_validator_set_transition(&certified_transition)
         .unwrap();
@@ -324,6 +379,7 @@ async fn runtime_recovery_provider_expires_when_shared_state_or_membership_chang
 
     let task = verified_task(92, vec![Operation::Issue { account, count: 2 }]);
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 2, &initial).unwrap();
     prepared.prepare(&mut state, &task, 2, &initial).unwrap();
     let statement = prepared
         .prepared_finality_statement(task.task_id())
@@ -354,8 +410,18 @@ async fn runtime_recovery_provider_expires_when_shared_state_or_membership_chang
         *refreshed.checkpoint()
     );
 
-    let certified_transition =
-        support::certified_validator_membership_transition(&initial, 8, [1, 2, 3, 5], [5], 1..=3);
+    let certified_transition = support::certified_validator_membership_transition(
+        &initial,
+        8,
+        [1, 2, 3, 5],
+        [5],
+        1..=3,
+        state.next_currency_address(),
+    );
+    let transition = store
+        .prepare_validator_set_transition(certified_transition.transition().clone())
+        .unwrap();
+    let certified_transition = support::certify_validator_transition(&initial, transition, 1..=3);
     store
         .activate_validator_set_transition(&certified_transition)
         .unwrap();

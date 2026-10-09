@@ -19,14 +19,27 @@ impl NodeRuntime {
     ) -> Result<(), NodeRuntimeError> {
         let persisted = self
             .full_store()?
-            .load()?
+            .load_shared()?
             .ok_or(NodeRuntimeError::SnapshotMissing)?;
-        let provider = Arc::new(StateRecoveryProvider::new(
-            &persisted.state,
-            &persisted.validator_set,
-            &persisted.validator_registry,
-            checkpoint,
-        )?);
+        if !persisted
+            .recovery_checkpoint_proof
+            .as_ref()
+            .is_some_and(|proof| proof.checkpoint() == checkpoint.checkpoint())
+        {
+            return Err(crate::PersistenceError::RecoveryCheckpointDoesNotMatchState.into());
+        }
+        if self
+            .state_recovery_provider_handle()
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|provider| {
+                provider.checkpoint_digest() == checkpoint.checkpoint().digest()
+            })
+        {
+            return Ok(());
+        }
+        let provider = Arc::new(StateRecoveryProvider::new(&persisted, checkpoint)?);
         *self
             .state_recovery_provider_handle()
             .write()

@@ -7,11 +7,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::VerifyingKey;
 use second::{
-    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, MAX_PEER_RECORDS, NodeId, PeerRecord,
-    QuicTransportIdentity, SecondState, StateStore, ValidatorId, ValidatorSet,
+    AccountAddress, AuthorizerSet, CURRENT_PROTOCOL_VERSION, MAX_DEPLOYED_VALIDATORS, NodeId,
+    PeerRecord, QuicTransportIdentity, SecondState, StateStore, ValidatorId, ValidatorSet,
     transport_identity_path,
 };
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::local_file::{append_suffix, decode_standard_base64_32, read_bounded};
 use crate::validator_config::{self, BftTimeoutFile};
@@ -97,6 +98,8 @@ pub(crate) fn init_network(
     )
     .map_err(|error| format!("invalid genesis ValidatorSet: {error:?}"))?;
 
+    let mut network_id = [0_u8; 32];
+    getrandom::fill(&mut network_id).map_err(|error| format!("network id generation: {error}"))?;
     ensure_new_output(output_dir)?;
     let staging = append_suffix(output_dir, ".new");
     if staging.try_exists().map_err(|error| {
@@ -134,7 +137,7 @@ pub(crate) fn init_network(
         &prepared,
         &state,
         &validator_set,
-        &authorizer_keys,
+        (&authorizer_keys, network_id),
         config.bft_timeouts_ms,
     );
     let initialized = match build_result {
@@ -163,10 +166,10 @@ fn prepare_validators(
     if validators.is_empty() {
         return Err("network init config must contain at least one validator".to_owned());
     }
-    let maximum_validators = usize::from(MAX_PEER_RECORDS) + 1;
+    let maximum_validators = MAX_DEPLOYED_VALIDATORS;
     if validators.len() > maximum_validators {
         return Err(format!(
-            "init-network currently supports at most {maximum_validators} genesis validators because every validator must bootstrap all other exact-set validators; this is a deployment/runtime discovery limit, not a ValidatorSet protocol limit"
+            "init-network currently supports at most {maximum_validators} genesis validators within the runtime connection budget; this is a deployment/runtime limit, not a ValidatorSet protocol limit"
         ));
     }
 
@@ -245,9 +248,10 @@ fn build_staging_network(
     validators: &[PreparedValidator],
     state: &SecondState,
     validator_set: &ValidatorSet,
-    authorizer_keys: &[[u8; 32]],
+    network_authority: (&[[u8; 32]], [u8; 32]),
     bft_timeouts_ms: BftTimeoutFile,
 ) -> Result<Vec<InitializedNode>, String> {
+    let (authorizer_keys, network_id) = network_authority;
     let mut records = Vec::with_capacity(validators.len());
     let mut staged_bases = Vec::with_capacity(validators.len());
 
@@ -272,7 +276,7 @@ fn build_staging_network(
             &validator_keyring::keyring_path(&snapshot_base),
             &validator.keyring,
         )?;
-        validator_config::write(&snapshot_base, authorizer_keys, bft_timeouts_ms)?;
+        validator_config::write(&snapshot_base, authorizer_keys, network_id, bft_timeouts_ms)?;
 
         let identity =
             QuicTransportIdentity::load_or_generate(transport_identity_path(&snapshot_base))
@@ -301,6 +305,19 @@ fn build_staging_network(
         let bootstrap = bootstrap_records_for(index, &records);
         crate::bootstrap_config::write(snapshot_base, &bootstrap)?;
     }
+
+    let wallet_config = json!({
+        "name": "second",
+        "network_id_base64": STANDARD.encode(network_id),
+        "endpoints": records.iter().map(|record| json!({"address": record.address().to_string(), "certificate_base64": STANDARD.encode(record.certificate_der())})).collect::<Vec<_>>(),
+        "authorizer_public_keys_base64": authorizer_keys.iter().map(|key| STANDARD.encode(key)).collect::<Vec<_>>(),
+        "authorizer_key_file": null
+    });
+    crate::local_file::write_new(
+        &staging.join("wallet-network.json"),
+        &serde_json::to_vec_pretty(&wallet_config).map_err(|error| error.to_string())?,
+        "wallet network config",
+    )?;
 
     Ok(validators
         .iter()

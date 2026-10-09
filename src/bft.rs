@@ -8,13 +8,14 @@ const BFT_DOMAIN: &[u8] = b"SECOND_BFT_V1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ConsensusScope {
+    CurrencyAllocation {
+        validator_set_version: u64,
+        start: u64,
+    },
     PreparedTask(TaskId),
     PublicCheckpoint {
         validator_set_version: u64,
         epoch: u64,
-    },
-    ValidatorSetTransition {
-        current_validator_set_version: u64,
     },
     StateRecoveryCheckpoint {
         validator_set_version: u64,
@@ -33,10 +34,11 @@ impl ConsensusScope {
             | Self::StateRecoveryCheckpoint {
                 validator_set_version,
                 ..
+            }
+            | Self::CurrencyAllocation {
+                validator_set_version,
+                ..
             } => *validator_set_version == version,
-            Self::ValidatorSetTransition {
-                current_validator_set_version,
-            } => *current_validator_set_version == version,
         }
     }
 
@@ -50,15 +52,24 @@ impl ConsensusScope {
             | Self::StateRecoveryCheckpoint {
                 validator_set_version,
                 ..
+            }
+            | Self::CurrencyAllocation {
+                validator_set_version,
+                ..
             } => Some(*validator_set_version),
-            Self::ValidatorSetTransition {
-                current_validator_set_version,
-            } => Some(*current_validator_set_version),
         }
     }
 
     pub(crate) fn encode_canonical(&self, out: &mut Vec<u8>) {
         match self {
+            Self::CurrencyAllocation {
+                validator_set_version,
+                start,
+            } => {
+                out.push(5);
+                out.extend_from_slice(&validator_set_version.to_be_bytes());
+                out.extend_from_slice(&start.to_be_bytes());
+            }
             Self::PreparedTask(task_id) => {
                 out.push(1);
                 out.push(task_id.len() as u8);
@@ -71,12 +82,6 @@ impl ConsensusScope {
                 out.push(2);
                 out.extend_from_slice(&validator_set_version.to_be_bytes());
                 out.extend_from_slice(&epoch.to_be_bytes());
-            }
-            Self::ValidatorSetTransition {
-                current_validator_set_version,
-            } => {
-                out.push(3);
-                out.extend_from_slice(&current_validator_set_version.to_be_bytes());
             }
             Self::StateRecoveryCheckpoint {
                 validator_set_version,
@@ -349,6 +354,7 @@ pub struct BftLocalState {
     round: u64,
     locked_round: Option<u64>,
     locked_digest: Option<[u8; 32]>,
+    valid_prevote_qc: Option<BftQuorumCertificate>,
     prevote: Option<BftValue>,
     precommit: Option<BftValue>,
     finality_ready_round: Option<u64>,
@@ -362,6 +368,7 @@ impl BftLocalState {
             round: 0,
             locked_round: None,
             locked_digest: None,
+            valid_prevote_qc: None,
             prevote: None,
             precommit: None,
             finality_ready_round: None,
@@ -375,6 +382,7 @@ impl BftLocalState {
         round: u64,
         locked_round: Option<u64>,
         locked_digest: Option<[u8; 32]>,
+        valid_prevote_qc: Option<BftQuorumCertificate>,
         prevote: Option<BftValue>,
         precommit: Option<BftValue>,
         finality_ready_round: Option<u64>,
@@ -385,6 +393,7 @@ impl BftLocalState {
             round,
             locked_round,
             locked_digest,
+            valid_prevote_qc,
             prevote,
             precommit,
             finality_ready_round,
@@ -406,6 +415,27 @@ impl BftLocalState {
 
     pub const fn locked_digest(&self) -> Option<[u8; 32]> {
         self.locked_digest
+    }
+
+    pub fn valid_prevote_qc(&self) -> Option<&BftQuorumCertificate> {
+        self.valid_prevote_qc.as_ref()
+    }
+
+    pub(crate) fn remember_prevote_qc(&mut self, certificate: &BftQuorumCertificate) -> bool {
+        if certificate.statement().phase() != BftPhase::Prevote
+            || !matches!(certificate.statement().value(), BftValue::Digest(_))
+        {
+            return false;
+        }
+        if self
+            .valid_prevote_qc
+            .as_ref()
+            .is_some_and(|previous| previous.statement().round() >= certificate.statement().round())
+        {
+            return false;
+        }
+        self.valid_prevote_qc = Some(certificate.clone());
+        true
     }
 
     pub(crate) const fn prevote(&self) -> Option<BftValue> {

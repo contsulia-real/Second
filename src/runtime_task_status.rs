@@ -21,11 +21,14 @@ impl LegalTaskStatusContext {
     ) -> Result<LegalTaskStatus, NodeRuntimeError> {
         let persisted = self
             .store
-            .load()?
+            .load_shared()?
             .ok_or(NodeRuntimeError::SnapshotMissing)?;
 
         if persisted.state.bound_request_digest(task_id.clone()) != Some(request_digest) {
             return Ok(LegalTaskStatus::Unknown);
+        }
+        if persisted.state.task_cancelled(task_id.clone()) {
+            return Ok(LegalTaskStatus::Cancelled);
         }
         if persisted.state.task_succeeded(task_id.clone()) == Some(true) {
             return Ok(LegalTaskStatus::Succeeded);
@@ -36,6 +39,9 @@ impl LegalTaskStatusContext {
         };
         if prepared.request_digest != request_digest {
             return Ok(LegalTaskStatus::Unknown);
+        }
+        if !prepared.commit_authorized && prepared.phase == PreparedTaskPhase::Prepared {
+            return Ok(LegalTaskStatus::Bound);
         }
 
         Ok(match prepared.phase {
@@ -55,6 +61,7 @@ impl NodeRuntime {
 pub(crate) async fn serve_legal_task_status_from_request(
     context: LegalTaskStatusContext,
     first_request: QuicRequestStream,
+    connection_permit: crate::runtime::ActiveConnectionPermit,
 ) -> Result<(), NetworkError> {
     let (task_id, request_digest) = match first_request.message() {
         NetworkMessage::LegalTaskStatusQuery {
@@ -64,9 +71,14 @@ pub(crate) async fn serve_legal_task_status_from_request(
         _ => return Err(NetworkError::UnexpectedMessage),
     };
 
-    let response = match context.status(task_id.clone(), request_digest) {
-        Ok(status) => NetworkMessage::LegalTaskStatusResult { task_id, status },
-        Err(_) => legal_task_status_rejected(LegalTaskStatusRejection::Rejected),
-    };
+    let (response, first_request, _permit) = tokio::task::spawn_blocking(move || {
+        let response = match context.status(task_id.clone(), request_digest) {
+            Ok(status) => NetworkMessage::LegalTaskStatusResult { task_id, status },
+            Err(_) => legal_task_status_rejected(LegalTaskStatusRejection::Rejected),
+        };
+        (response, first_request, connection_permit)
+    })
+    .await
+    .map_err(|error| NetworkError::Transport(format!("task status worker failed: {error}")))?;
     first_request.respond(&response).await
 }

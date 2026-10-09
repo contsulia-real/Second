@@ -154,6 +154,7 @@ fn certified_recovery_can_supersede_uncertified_local_vote_same_serial() {
         }],
     );
     let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 0, &validators).unwrap();
     book.prepare(&mut state, &task, 0, &validators).unwrap();
     let statement = book.prepared_finality_statement(task.task_id()).unwrap();
     let certificate = certificate_from_keys(
@@ -211,6 +212,7 @@ fn recovery_checkpoint_vote_lock_blocks_same_serial_after_committed_state_change
         }],
     );
     let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 0, &validators).unwrap();
     book.prepare(&mut state, &task, 0, &validators).unwrap();
     let statement = book.prepared_finality_statement(task.task_id()).unwrap();
     let certificate = certificate_from_keys(
@@ -329,6 +331,7 @@ fn accepted_recovery_checkpoint_locks_same_serial_digest_without_local_vote() {
         }],
     );
     let mut book = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 0, &validators).unwrap();
     book.prepare(&mut state, &task, 0, &validators).unwrap();
     let statement = book.prepared_finality_statement(task.task_id()).unwrap();
     let certificate = certificate_from_keys(
@@ -389,8 +392,10 @@ fn recovery_checkpoint_floor_is_scoped_by_validator_set_version() {
         validators_v8.clone(),
         vec![],
         vec![],
+        store.load().unwrap().unwrap().state.next_currency_address(),
     )
     .unwrap();
+    let transition = store.prepare_validator_set_transition(transition).unwrap();
     let statement = transition.finality_statement();
     let votes = [1_u64, 2, 3]
         .into_iter()

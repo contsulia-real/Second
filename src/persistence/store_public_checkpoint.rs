@@ -10,6 +10,66 @@ use crate::{
 };
 
 impl StateStore {
+    pub fn next_public_currency_checkpoint(
+        &self,
+    ) -> Result<crate::PublicCurrencyCheckpoint, PersistenceError> {
+        let snapshot = self
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        if let Some(proof) = &snapshot.public_checkpoint_proof
+            && proof.checkpoint().epoch() >= snapshot.checkpoint_floor_epoch
+        {
+            return Ok(proof.checkpoint().clone());
+        }
+        let version = snapshot.validator_set.version();
+        let summary = snapshot.state.public_currency_summary();
+        let mut epoch = snapshot.checkpoint_floor_epoch;
+        let mut digest = None;
+        for ((_, scope), state) in &snapshot.bft_local_states {
+            if let crate::ConsensusScope::PublicCheckpoint {
+                validator_set_version,
+                epoch: observed,
+            } = scope
+                && *validator_set_version == version
+                && *observed >= epoch
+            {
+                epoch = *observed;
+                digest = state.locked_digest().or_else(|| match state.prevote() {
+                    Some(crate::BftValue::Digest(value)) => Some(value),
+                    _ => None,
+                });
+            }
+        }
+        for ((_, scope), locked) in &snapshot.validator_vote_locks {
+            if let crate::ConsensusScope::PublicCheckpoint {
+                validator_set_version,
+                epoch: observed,
+            } = scope
+                && *validator_set_version == version
+                && *observed >= epoch
+            {
+                epoch = *observed;
+                digest = Some(*locked);
+            }
+        }
+        let candidate = crate::PublicCurrencyCheckpoint::new(
+            crate::CURRENT_PROTOCOL_VERSION,
+            epoch,
+            summary.clone(),
+        );
+        if epoch > snapshot.checkpoint_floor_epoch && digest == Some(candidate.digest()) {
+            return Ok(candidate);
+        }
+        let epoch = epoch
+            .checked_add(1)
+            .ok_or(PersistenceError::GenerationOverflow)?;
+        Ok(crate::PublicCurrencyCheckpoint::new(
+            crate::CURRENT_PROTOCOL_VERSION,
+            epoch,
+            summary,
+        ))
+    }
+
     pub fn attach_checkpoint_proof(
         &self,
         public_checkpoint_proof: Option<&PublicCurrencyCheckpointProof>,
@@ -22,6 +82,8 @@ impl StateStore {
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -62,12 +124,24 @@ impl StateStore {
         )?;
         let proof = certified_checkpoint.to_unverified_proof();
         let checkpoint_floor_epoch = checkpoint_floor_for_write(Some(&latest), Some(&proof))?;
+        if latest
+            .public_checkpoint_proof
+            .as_ref()
+            .is_some_and(|proof| {
+                proof.checkpoint() == certified_checkpoint.checkpoint()
+                    && proof.validator_set_version() == latest.validator_set.version()
+            })
+        {
+            return Ok(latest.generation);
+        }
         let latest_public_delta = public_delta_for_checkpoint(&latest, &proof)?;
         let pending_public_changes = BTreeSet::new();
 
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -92,6 +166,22 @@ impl StateStore {
         )
     }
 
+    pub(crate) fn install_public_checkpoint_evidence(
+        &self,
+        checkpoint: &CertifiedPublicCurrencyCheckpoint,
+    ) -> Result<(), PersistenceError> {
+        match self.attach_certified_checkpoint(checkpoint) {
+            Ok(_) | Err(PersistenceError::StaleCheckpointEpoch { .. }) => Ok(()),
+            Err(PersistenceError::CheckpointDoesNotMatchState) => {
+                match self.advance_checkpoint_floor(checkpoint) {
+                    Ok(_) | Err(PersistenceError::StaleCheckpointEpoch { .. }) => Ok(()),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn advance_checkpoint_floor(
         &self,
         checkpoint: &CertifiedPublicCurrencyCheckpoint,
@@ -109,13 +199,23 @@ impl StateStore {
         let proof = checkpoint.to_unverified_proof();
         let checkpoint_floor_epoch = checkpoint_floor_for_write(Some(&latest), Some(&proof))?;
 
+        if checkpoint_floor_epoch == latest.checkpoint_floor_epoch {
+            return Ok(latest.generation);
+        }
+        let attached = latest
+            .public_checkpoint_proof
+            .as_ref()
+            .filter(|proof| proof.checkpoint().epoch() >= checkpoint_floor_epoch);
+
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
-                public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
+                public_checkpoint_proof: attached,
                 public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
                 latest_public_delta: latest.latest_public_delta.as_ref(),
                 pending_public_changes: latest.pending_public_changes.as_ref(),

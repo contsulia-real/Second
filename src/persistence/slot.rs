@@ -9,6 +9,7 @@ use crate::PersistenceError;
 
 use super::PersistedNodeState;
 use super::codec::{CHECKSUM_SIZE, MAX_SNAPSHOT_FILE_SIZE, decode_snapshot};
+use super::commit::{self, CommitReference};
 
 type PathLockMap = BTreeMap<PathBuf, Weak<Mutex<()>>>;
 
@@ -31,17 +32,28 @@ pub(super) fn shared_path_lock(path: &Path) -> Arc<Mutex<()>> {
 }
 
 pub(super) fn lock_store_file(base_path: &Path) -> Result<File, PersistenceError> {
-    ensure_parent_dir(base_path)?;
-
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(base_path)
-        .map_err(PersistenceError::from_io)?;
+    let file = open_store_file(base_path, OpenOptions::new().read(true).write(true))?;
     File::lock(&file).map_err(PersistenceError::from_io)?;
     Ok(file)
+}
+
+pub(super) fn open_store_file(
+    path: &Path,
+    options: &OpenOptions,
+) -> Result<File, PersistenceError> {
+    // Only missing files need a directory/create transaction.
+    match options.open(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ensure_parent_dir(path)?;
+            options
+                .clone()
+                .create(true)
+                .open(path)
+                .map_err(PersistenceError::from_io)
+        }
+        Err(error) => Err(PersistenceError::from_io(error)),
+    }
 }
 
 pub(super) fn slot_path(base_path: &Path, generation: u64) -> PathBuf {
@@ -56,6 +68,7 @@ pub(super) fn remove_slots(base_path: &Path) -> Result<(), PersistenceError> {
     for path in [
         append_suffix(base_path, ".a"),
         append_suffix(base_path, ".b"),
+        append_suffix(base_path, ".commit"),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -74,6 +87,7 @@ struct ValidSlot {
 pub(super) fn load_latest(
     base_path: &Path,
 ) -> Result<Option<PersistedNodeState>, PersistenceError> {
+    let committed = commit::read(base_path)?;
     let mut any_file_exists = false;
     let mut first_io_error = None;
     let mut valid = Vec::new();
@@ -108,6 +122,12 @@ pub(super) fn load_latest(
 
     if let Some(latest) = valid
         .into_iter()
+        .filter(|slot| {
+            committed.is_some_and(|reference| {
+                reference.generation == slot.snapshot.generation
+                    && reference.checksum == slot.checksum
+            })
+        })
         .max_by_key(|slot| slot.snapshot.generation)
     {
         return Ok(Some(latest.snapshot));
@@ -117,7 +137,7 @@ pub(super) fn load_latest(
         return Err(PersistenceError::Io(kind));
     }
 
-    if any_file_exists {
+    if any_file_exists || committed.is_some() {
         Err(PersistenceError::NoValidSnapshot)
     } else {
         Ok(None)
@@ -129,23 +149,26 @@ pub(super) fn write_slots(
     generation: u64,
     bytes: &[u8],
 ) -> Result<(), PersistenceError> {
-    ensure_parent_dir(base_path)?;
+    // Acquiring the store lock already established its parent directory.
 
     write_snapshot_file(&slot_path(base_path, generation), bytes)?;
-
-    // The fsynced primary slot is the commit point. The mirror is recovery redundancy:
-    // failing to refresh it must not report a durable generation as uncommitted.
+    commit::publish(
+        base_path,
+        CommitReference {
+            generation,
+            checksum: bytes[bytes.len() - CHECKSUM_SIZE..]
+                .try_into()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?,
+        },
+    )?;
+    // Only the published commit reference is authoritative. A stale mirror cannot
+    // roll back an acknowledged vote; it must match this generation and checksum.
     let _ = write_snapshot_file(&mirror_slot_path(base_path, generation), bytes);
     Ok(())
 }
 
-fn write_snapshot_file(path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .map_err(PersistenceError::from_io)?;
+pub(super) fn write_snapshot_file(path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
+    let mut file = open_store_file(path, OpenOptions::new().truncate(true).write(true))?;
     file.write_all(bytes).map_err(PersistenceError::from_io)?;
     file.sync_all().map_err(PersistenceError::from_io)?;
     Ok(())
@@ -169,7 +192,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), PersistenceError> {
     Ok(())
 }
 
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value: OsString = path.as_os_str().to_owned();
     value.push(suffix);
     PathBuf::from(value)

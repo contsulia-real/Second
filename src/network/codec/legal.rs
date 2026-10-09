@@ -126,6 +126,7 @@ const fn encode_legal_task_status(status: LegalTaskStatus) -> u8 {
         LegalTaskStatus::Voting => 4,
         LegalTaskStatus::Finalized => 5,
         LegalTaskStatus::Succeeded => 6,
+        LegalTaskStatus::Cancelled => 7,
     }
 }
 
@@ -137,6 +138,7 @@ fn decode_legal_task_status(value: u8) -> Result<LegalTaskStatus, NetworkError> 
         4 => Ok(LegalTaskStatus::Voting),
         5 => Ok(LegalTaskStatus::Finalized),
         6 => Ok(LegalTaskStatus::Succeeded),
+        7 => Ok(LegalTaskStatus::Cancelled),
         _ => Err(NetworkError::InvalidLegalTaskStatus),
     }
 }
@@ -229,6 +231,7 @@ fn decode_submission_rejected(payload: &[u8]) -> Result<NetworkMessage, NetworkE
 const fn encode_submission_outcome(outcome: LegalTaskSubmissionOutcome) -> u8 {
     match outcome {
         LegalTaskSubmissionOutcome::Prepared => 1,
+        LegalTaskSubmissionOutcome::Allocating => 4,
         LegalTaskSubmissionOutcome::AlreadyPending => 2,
         LegalTaskSubmissionOutcome::AlreadySucceeded => 3,
     }
@@ -237,6 +240,7 @@ const fn encode_submission_outcome(outcome: LegalTaskSubmissionOutcome) -> u8 {
 fn decode_submission_outcome(value: u8) -> Result<LegalTaskSubmissionOutcome, NetworkError> {
     match value {
         1 => Ok(LegalTaskSubmissionOutcome::Prepared),
+        4 => Ok(LegalTaskSubmissionOutcome::Allocating),
         2 => Ok(LegalTaskSubmissionOutcome::AlreadyPending),
         3 => Ok(LegalTaskSubmissionOutcome::AlreadySucceeded),
         _ => Err(NetworkError::InvalidLegalTaskSubmission),

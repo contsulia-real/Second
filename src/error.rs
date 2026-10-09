@@ -31,18 +31,26 @@ pub enum AuthorizationError {
     DuplicateAuthorizer,
     UnsupportedProtocolVersion { expected: u32, actual: u32 },
     UntrustedAuthorizer,
+    WrongNetwork,
     InvalidPublicKey,
     InvalidSignature,
+    TooManyAccountSignatures,
+    NonCanonicalAccountSignatures,
+    MissingAccountSignature(AccountAddress),
     InvalidPayload(TaskValidationError),
     Encoding(TaskEncodingError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
+    CurrencyAllocationRequired,
     TaskIdAlreadyBound,
+    TaskCancelled,
     TaskExpired,
     OperationIndexOverflow,
     AccountNotFound(AccountAddress),
+    AccountAlreadyExists(AccountAddress),
+    MissingAccountSignature(AccountAddress),
     PaymentAddressAlreadyExists(PaymentAddress),
     PaymentAddressUnavailable(PaymentAddress),
     InvalidPaymentAddressTransition(PaymentAddress),
@@ -92,6 +100,13 @@ pub enum PersistenceError {
     StoreLockPoisoned,
     StaleState,
     StalePreparedTasks,
+    TaskAdmissionClosed {
+        validator_set_version: u64,
+    },
+    TransitionCollectionIncomplete {
+        validator_set_version: u64,
+        currency_frontier: u64,
+    },
     ValidatorRegistryMismatch,
     ValidatorTransition(ValidatorTransitionError),
     GenerationOverflow,

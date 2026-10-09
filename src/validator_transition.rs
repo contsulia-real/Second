@@ -10,15 +10,32 @@ use crate::{
 
 const TRANSITION_DOMAIN: &[u8] = b"SECOND_VALIDATOR_SET_TRANSITION_V1\0";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ValidatorSetTransition {
     protocol_version: u32,
+    currency_frontier: u64,
     current_validator_set_version: u64,
     next_validator_set: ValidatorSet,
     admissions: Vec<VerifiedValidatorAdmission>,
     consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
     digest: [u8; 32],
+    pub(crate) handoff_digest: Option<[u8; 32]>,
+    pub(crate) handoff: Option<std::sync::Arc<crate::persistence::TaskHandoff>>,
 }
+
+impl PartialEq for ValidatorSetTransition {
+    fn eq(&self, other: &Self) -> bool {
+        self.protocol_version == other.protocol_version
+            && self.currency_frontier == other.currency_frontier
+            && self.current_validator_set_version == other.current_validator_set_version
+            && self.next_validator_set == other.next_validator_set
+            && self.admissions == other.admissions
+            && self.consensus_key_rotations == other.consensus_key_rotations
+            && self.digest == other.digest
+            && self.handoff_digest == other.handoff_digest
+    }
+}
+impl Eq for ValidatorSetTransition {}
 
 impl ValidatorSetTransition {
     pub fn new(
@@ -28,6 +45,7 @@ impl ValidatorSetTransition {
         next_validator_set: ValidatorSet,
         admissions: Vec<VerifiedValidatorAdmission>,
         consensus_key_rotations: Vec<ValidatorConsensusKeyRotationRequest>,
+        currency_frontier: u64,
     ) -> Result<Self, ValidatorTransitionError> {
         if protocol_version != CURRENT_PROTOCOL_VERSION {
             return Err(ValidatorTransitionError::UnsupportedProtocolVersion {
@@ -63,16 +81,63 @@ impl ValidatorSetTransition {
             protocol_version,
             current_validator_set_version,
             &next_validator_set,
+            currency_frontier,
+            None,
         );
 
         Ok(Self {
             protocol_version,
+            currency_frontier,
             current_validator_set_version,
             next_validator_set,
             admissions,
             consensus_key_rotations,
             digest,
+            handoff_digest: None,
+            handoff: None,
         })
+    }
+
+    pub const fn currency_frontier(&self) -> u64 {
+        self.currency_frontier
+    }
+    pub(crate) fn with_handoff_digest(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.handoff_digest = digest;
+        self.digest = transition_digest(
+            self.protocol_version,
+            self.current_validator_set_version,
+            &self.next_validator_set,
+            self.currency_frontier,
+            digest,
+        );
+        self
+    }
+
+    pub(crate) fn with_handoff(
+        self,
+        handoff: crate::persistence::TaskHandoff,
+    ) -> Result<Self, crate::PersistenceError> {
+        self.with_handoff_arc(std::sync::Arc::new(handoff))
+    }
+
+    pub(crate) fn with_handoff_arc(
+        mut self,
+        handoff: std::sync::Arc<crate::persistence::TaskHandoff>,
+    ) -> Result<Self, crate::PersistenceError> {
+        let digest = if !handoff.requires_commitment() {
+            None
+        } else {
+            Some(handoff.digest()?)
+        };
+        self = self.with_handoff_digest(digest);
+        self.handoff = Some(handoff);
+        Ok(self)
+    }
+    pub fn scope(&self) -> crate::ConsensusScope {
+        crate::ConsensusScope::CurrencyAllocation {
+            validator_set_version: self.current_validator_set_version,
+            start: self.currency_frontier,
+        }
     }
 
     pub const fn protocol_version(&self) -> u32 {
@@ -150,6 +215,18 @@ impl CertifiedValidatorSetTransition {
 
     pub fn certificate(&self) -> &FinalityCertificate {
         &self.certificate
+    }
+
+    pub(crate) fn with_handoff(
+        mut self,
+        handoff: crate::persistence::TaskHandoff,
+    ) -> Result<Self, crate::PersistenceError> {
+        let transition = self.transition.clone().with_handoff(handoff)?;
+        if transition.finality_statement() != self.certificate.statement() {
+            return Err(crate::PersistenceError::InvalidSnapshot);
+        }
+        self.transition = transition;
+        Ok(self)
     }
 
     pub fn activate(
@@ -284,11 +361,18 @@ pub(crate) fn transition_digest(
     protocol_version: u32,
     current_validator_set_version: u64,
     next_validator_set: &ValidatorSet,
+    currency_frontier: u64,
+    handoff_digest: Option<[u8; 32]>,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(TRANSITION_DOMAIN);
+    hasher.update(currency_frontier.to_be_bytes());
     hasher.update(protocol_version.to_be_bytes());
     hasher.update(current_validator_set_version.to_be_bytes());
+    hasher.update([u8::from(handoff_digest.is_some())]);
+    if let Some(digest) = handoff_digest {
+        hasher.update(digest);
+    }
     hasher.update(next_validator_set.version().to_be_bytes());
     hasher.update((next_validator_set.len() as u64).to_be_bytes());
 

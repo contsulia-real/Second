@@ -138,14 +138,23 @@ async fn simultaneous_dial_converges_on_one_bidirectional_connection() {
         "both nodes must initiate requests over the one retained connection"
     );
 
+    let (low_runtime, low_worker, high_runtime, high_worker) = if first.node_id() < second.node_id()
+    {
+        (first, first_task, second, second_task)
+    } else {
+        (second, second_task, first, first_task)
+    };
+    low_worker.abort();
+    let _ = low_worker.await;
+    drop(low_runtime);
+    assert!(
+        client_ping(&high_active_peer, 12).await.is_err(),
+        "dropping the node must close its shared endpoint despite live outbound handles"
+    );
     low_peer.close();
-
-    first_task.abort();
-    second_task.abort();
-    let _ = first_task.await;
-    let _ = second_task.await;
-    drop(first);
-    drop(second);
+    high_worker.abort();
+    let _ = high_worker.await;
+    drop(high_runtime);
 
     support::cleanup_node_runtime(first_store, first_base);
     support::cleanup_node_runtime(second_store, second_base);

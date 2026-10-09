@@ -1,9 +1,38 @@
 use crate::support;
 
 use second::{
-    CurrencyAddress, SecondState, client_ping, client_public_currency_page,
-    serve_public_currency_connection,
+    CurrencyAddress, NetworkError, NetworkMessage, SecondState, client_ping,
+    client_public_currency_page, serve_public_currency_connection,
 };
+
+#[tokio::test]
+async fn delivered_request_without_response_reports_the_response_deadline() {
+    let (server, certificate) = support::quic_server();
+    let address = server.local_addr().unwrap();
+    let (delivered, delivery) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let peer = server.accept().await.unwrap();
+        let request = peer.accept_request().await.unwrap().unwrap();
+        assert_eq!(request.message(), &NetworkMessage::Ping { nonce: 77 });
+        delivered.send(()).unwrap();
+        let _ = released.await;
+        drop(request);
+    });
+    let client = support::quic_client(&certificate);
+    let peer = client.connect(address).await.unwrap();
+    let result = peer.exchange(&NetworkMessage::Ping { nonce: 77 }).await;
+    delivery.await.unwrap();
+    assert!(
+        matches!(result, Err(NetworkError::Transport(ref error))
+        if error == "protocol request timed out while awaiting response"),
+        "{result:?}"
+    );
+    release.send(()).unwrap();
+    server_task.await.unwrap();
+    peer.close();
+    client.wait_idle().await;
+}
 
 #[tokio::test]
 async fn one_quic_connection_supports_multiple_independent_request_streams() {

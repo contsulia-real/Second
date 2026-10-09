@@ -63,6 +63,12 @@ impl PublicCurrencyCheckpoint {
         hasher.finalize().into()
     }
 
+    pub(crate) fn encode_source(&self, validator_set_version: u64) -> Vec<u8> {
+        PublicCurrencyCheckpointProof::new(self.clone(), validator_set_version, Vec::new())
+            .encode_bytes()
+            .expect("fixed checkpoint source")
+    }
+
     pub fn finality_statement(&self, validator_set_version: u64) -> FinalityStatement {
         FinalityStatement::new(self.protocol_version, validator_set_version, self.digest())
     }

@@ -8,7 +8,8 @@ use second::{PersistedNodeState, ValidatorCredential, ValidatorId, ValidatorRunt
 use serde::{Deserialize, Serialize};
 
 use crate::local_file::{
-    append_suffix, decode_standard_base64_32, read_bounded, write_new_private,
+    append_suffix, decode_standard_base64_32, random_signing_key, read_bounded,
+    validate_private_file_permissions, write_new_private,
 };
 
 const MAX_VALIDATOR_KEYRING_SIZE: usize = 64 * 1024;
@@ -254,13 +255,6 @@ pub(crate) fn keyring_path(snapshot_base: &Path) -> PathBuf {
     append_suffix(snapshot_base, ".validator.keys.json")
 }
 
-pub(crate) fn random_signing_key() -> Result<SigningKey, String> {
-    let mut seed = [0_u8; 32];
-    getrandom::fill(&mut seed)
-        .map_err(|error| format!("failed to obtain OS randomness for validator key: {error}"))?;
-    Ok(SigningKey::from_bytes(&seed))
-}
-
 fn decode_signing_key(path: &Path, field: &str, value: &str) -> Result<SigningKey, String> {
     let bytes = decode_standard_base64_32(value).map_err(|error| {
         format!(
@@ -269,29 +263,4 @@ fn decode_signing_key(path: &Path, field: &str, value: &str) -> Result<SigningKe
         )
     })?;
     Ok(SigningKey::from_bytes(&bytes))
-}
-
-#[cfg(unix)]
-fn validate_private_file_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = std::fs::metadata(path).map_err(|error| {
-        format!(
-            "failed to inspect validator keyring {} permissions: {error}",
-            path.display()
-        )
-    })?;
-    let mode = metadata.permissions().mode();
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "validator keyring {} must not be readable or writable by group/other; expected permissions 0600 or stricter",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn validate_private_file_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
 }

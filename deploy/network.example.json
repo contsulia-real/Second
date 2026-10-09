@@ -1,0 +1,14 @@
+{
+  "validator_set_version": 1,
+  "first_currency_address": 1,
+  "reserve_count": 0,
+  "accounts": [],
+  "authorizer_public_keys_base64": ["REPLACE_WITH_TRUSTED_AUTHORIZER_PUBLIC_KEY"],
+  "bft_timeouts_ms": {"proposal": 1000, "prevote": 1000, "precommit": 1000},
+  "validators": [
+    {"validator_id": 1, "listen_address": "127.0.0.1:7401", "keyring_file": "validator-1.keys.json"},
+    {"validator_id": 2, "listen_address": "127.0.0.1:7402", "keyring_file": "validator-2.keys.json"},
+    {"validator_id": 3, "listen_address": "127.0.0.1:7403", "keyring_file": "validator-3.keys.json"},
+    {"validator_id": 4, "listen_address": "127.0.0.1:7404", "keyring_file": "validator-4.keys.json"}
+  ]
+}

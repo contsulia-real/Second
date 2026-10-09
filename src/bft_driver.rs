@@ -248,6 +248,15 @@ impl BftDriver {
         certificate: &BftQuorumCertificate,
     ) -> Result<BftDriverAction, BftDriverError> {
         certificate.verify(&self.validator_set)?;
+        self.accept_verified_quorum_certificate(certificate)
+    }
+
+    /// Internal callers must verify against this driver's exact ValidatorSet
+    /// before candidate selection or any use of the certificate.
+    pub(crate) fn accept_verified_quorum_certificate(
+        &mut self,
+        certificate: &BftQuorumCertificate,
+    ) -> Result<BftDriverAction, BftDriverError> {
         let statement = certificate.statement();
         if statement.scope() != &self.scope {
             return Err(BftDriverError::ScopeMismatch);
@@ -283,6 +292,16 @@ impl BftDriver {
             current = statement.round();
         }
         if statement.round() != current {
+            if statement.round() < current
+                && statement.phase() == BftPhase::Prevote
+                && matches!(statement.value(), BftValue::Digest(_))
+            {
+                self.store.remember_verified_bft_prevote_qc(
+                    self.signer.validator_id(),
+                    certificate,
+                    &self.validator_set,
+                )?;
+            }
             return Err(BftDriverError::RoundMismatch {
                 current,
                 actual: statement.round(),
@@ -295,6 +314,13 @@ impl BftDriver {
                     .store
                     .bft_local_state(self.signer.validator_id(), &self.scope)?;
                 if local_state.is_some_and(|state| state.precommit().is_some()) {
+                    if matches!(value, BftValue::Digest(_)) {
+                        self.store.remember_verified_bft_prevote_qc(
+                            self.signer.validator_id(),
+                            certificate,
+                            &self.validator_set,
+                        )?;
+                    }
                     return Ok(BftDriverAction::Noop);
                 }
                 let prevote_certificate =

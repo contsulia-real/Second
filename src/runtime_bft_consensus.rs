@@ -5,7 +5,13 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
+mod allocation;
+mod candidates;
+mod completion;
 mod finality;
+mod governance;
+mod public_checkpoint;
+mod runner;
 
 use finality::{
     begin_business_finality, ingest_finality_certificate, ingest_finality_vote,
@@ -104,24 +110,61 @@ impl ValidatorConsensusRuntime {
             .record_rejection(validator_id, scope, error);
     }
 
+    pub(crate) fn record_connection_failure(
+        &self,
+        node_id: crate::NodeId,
+        address: std::net::SocketAddr,
+        elapsed: Duration,
+        error: crate::ValidatorBftRuntimeError,
+    ) {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_event(BftConsensusEvent::ConnectionFailed {
+                node_id,
+                address,
+                elapsed,
+                error,
+            });
+    }
+
     pub(crate) fn wake(&self) {
         self.activity.notify_one();
     }
 
-    pub(crate) async fn wait_for_activity_or_deadline(&self) {
-        let deadline = self
-            .coordinator
+    fn next_deadline(&self) -> Option<Instant> {
+        self.coordinator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .next_deadline();
+            .next_deadline()
+    }
+
+    pub(crate) async fn wait_for_activity_or_deadline(
+        &self,
+        deadline: Option<Instant>,
+        sync_retry: Option<Instant>,
+    ) -> bool {
+        if sync_retry.is_some_and(|retry| retry <= Instant::now()) {
+            return true;
+        }
+        let deadline = match (deadline, sync_retry) {
+            (Some(consensus), Some(sync)) => Some(consensus.min(sync)),
+            (deadline, None) | (None, deadline) => deadline,
+        };
         match deadline {
             Some(deadline) => {
                 tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => {}
-                    _ = self.activity.notified() => {}
+                    biased;
+                    _ = tokio::time::sleep_until(deadline) => {
+                        sync_retry.is_some_and(|retry| retry <= Instant::now())
+                    }
+                    _ = self.activity.notified() => false,
                 }
             }
-            None => self.activity.notified().await,
+            None => {
+                self.activity.notified().await;
+                false
+            }
         }
     }
 }
@@ -131,9 +174,93 @@ pub(crate) fn start_prepared_task_consensus_for(
     runtime: &ValidatorBftRuntime,
     task_id: TaskId,
 ) -> Result<(), NodeRuntimeError> {
-    let target = ValidatorConsensusTarget::prepared_task(store, task_id)
-        .map_err(BftConsensusRuntimeError::from)?;
-    start_validator_consensus_target_for(store, runtime, target)
+    let snapshot = store.load_shared()?;
+    if snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.prepared_tasks.get(&task_id).is_some_and(|plan| {
+            snapshot
+                .retained_validator_sets
+                .get(&plan.validator_set_version)
+                .is_some_and(|origin| !origin.contains(runtime.validator_id()))
+                && snapshot
+                    .state
+                    .protocol
+                    .task_handoff
+                    .as_ref()
+                    .and_then(|handoff| handoff.task_context(&task_id))
+                    .is_some_and(|inherited| {
+                        inherited.validator_set_version == plan.validator_set_version
+                            && inherited.request_digest == plan.request_digest
+                            && inherited.source_task == plan.source_task
+                    })
+        })
+    }) {
+        // New members can apply inherited terminal proofs, but cannot create
+        // an old-committee voting session even if the body is locally prepared.
+        return Ok(());
+    }
+    if snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.prepared_tasks.get(&task_id).is_some_and(|plan| {
+            if plan.phase == crate::prepared_plan::PreparedTaskPhase::Finalized {
+                return true;
+            }
+            if plan.conflict_abort {
+                return false;
+            }
+            if !plan.commit_authorized {
+                return true;
+            }
+            snapshot
+                .bft_local_states
+                .get(&(
+                    runtime.validator_id(),
+                    ConsensusScope::PreparedTask(task_id.clone()),
+                ))
+                .and_then(|local| local.valid_prevote_qc())
+                .and_then(|qc| qc.statement().value().digest())
+                .is_some_and(|digest| {
+                    plan.candidate(digest)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|candidate| !candidate.commit_authorized)
+                })
+        })
+    }) {
+        return Ok(());
+    }
+    let additional_candidates = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.prepared_tasks.get(&task_id))
+        .filter(|plan| !plan.variants.is_empty())
+        .map(|plan| plan.owned_candidate_digests())
+        .transpose()
+        .map_err(|_| crate::PersistenceError::InvalidSnapshot)?
+        .unwrap_or_default();
+    let target =
+        ValidatorConsensusTarget::prepared_task(store, runtime.validator_id(), task_id.clone())
+            .map_err(BftConsensusRuntimeError::from)?;
+    let ValidatorConsensusTarget::PreparedTask {
+        plan_digest: initial_digest,
+        ..
+    } = &target
+    else {
+        unreachable!();
+    };
+    let initial_digest = *initial_digest;
+    start_validator_consensus_target_for(store, runtime, target)?;
+    for plan_digest in additional_candidates {
+        if plan_digest == initial_digest {
+            continue;
+        }
+        start_validator_consensus_target_for(
+            store,
+            runtime,
+            ValidatorConsensusTarget::PreparedTask {
+                task_id: task_id.clone(),
+                plan_digest,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn start_validator_consensus_target_for(
@@ -141,6 +268,14 @@ pub(crate) fn start_validator_consensus_target_for(
     runtime: &ValidatorBftRuntime,
     target: ValidatorConsensusTarget,
 ) -> Result<(), NodeRuntimeError> {
+    let target = match target {
+        ValidatorConsensusTarget::ValidatorSetTransition(transition) => {
+            ValidatorConsensusTarget::ValidatorSetTransition(
+                store.prepare_validator_set_transition(transition)?,
+            )
+        }
+        value => value,
+    };
     runtime.refresh_authority()?;
     let active_validator_set = runtime.validator_set();
     let validator_set = target
@@ -151,6 +286,11 @@ pub(crate) fn start_validator_consensus_target_for(
         .then(|| target.proposal_subject(store))
         .transpose()
         .map_err(BftConsensusRuntimeError::from)?;
+    let allocation_subject = matches!(target, ValidatorConsensusTarget::CurrencyAllocation(_))
+        .then(|| target.proposal_subject(store))
+        .transpose()
+        .map_err(BftConsensusRuntimeError::from)?;
+    store.admit_governance(&target)?;
     runtime.consensus().register(
         signer,
         store.clone(),
@@ -158,8 +298,25 @@ pub(crate) fn start_validator_consensus_target_for(
         target,
         runtime.bft_timeouts(),
     )?;
-    if let Some(subject) = prepared_subject {
+    if let Some(subject) = prepared_subject
+        && let ConsensusScope::PreparedTask(task_id) = subject.scope()
+        && store.load_shared()?.is_some_and(|snapshot| {
+            snapshot.prepared_tasks.get(task_id).is_some_and(|plan| {
+                plan.candidate(subject.digest()).is_ok_and(|candidate| {
+                    candidate.is_some_and(|candidate| candidate.commit_authorized)
+                })
+            })
+        })
+    {
         runtime.announce_prepared_task(&validator_set, subject.scope().clone(), subject.digest());
+    }
+    if let Some(subject) = allocation_subject {
+        runtime.broadcast(&BftNetworkMessage::PreparedTaskAvailable {
+            validator_set_version: validator_set.version(),
+            scope: subject.scope().clone(),
+            expected_plan_digest: subject.digest(),
+            round: 0,
+        });
     }
     Ok(())
 }
@@ -186,9 +343,13 @@ impl NodeRuntime {
         &self,
         transition: ValidatorSetTransition,
     ) -> Result<(), NodeRuntimeError> {
-        self.start_validator_consensus_target(ValidatorConsensusTarget::ValidatorSetTransition(
-            transition,
-        ))
+        let context = self
+            .governance_context()
+            .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
+        let transition = self
+            .full_store()?
+            .prepare_validator_set_transition(transition)?;
+        context.begin_transition(&transition).map(|_| ())
     }
 
     pub fn start_state_recovery_checkpoint_consensus(
@@ -219,12 +380,14 @@ impl NodeRuntime {
         Ok(runtime.consensus().drain_events())
     }
 
-    fn recover_validator_safety_if_ready(
+    pub(crate) fn recover_validator_safety_if_ready(
         &self,
         runtime: &ValidatorBftRuntime,
     ) -> Result<(), NodeRuntimeError> {
         let store = self.full_store()?;
-        let snapshot = store.load()?.ok_or(PersistenceError::MissingSnapshot)?;
+        let snapshot = store
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
         if snapshot.validator_safety_ready
             || snapshot.pending_validator_safety_recovery.is_none()
             || snapshot.recovery_checkpoint_proof.is_none()
@@ -238,46 +401,6 @@ impl NodeRuntime {
             signer.consensus_public_key(),
         )?;
         Ok(())
-    }
-
-    pub(crate) async fn run_validator_bft_consensus(&self) -> Result<(), NodeRuntimeError> {
-        let Some(runtime) = self.validator_bft.as_ref() else {
-            return std::future::pending::<Result<(), NodeRuntimeError>>().await;
-        };
-        self.recover_validator_safety_if_ready(runtime)?;
-        self.start_durable_prepared_consensus()?;
-
-        loop {
-            let inbound = self.process_governance_bft_sources(runtime.drain_inbound());
-            let inbound = self.process_prepared_task_sync(inbound)?;
-            let output = runtime
-                .consensus()
-                .drive(inbound, tokio::time::Instant::now());
-            for message in output.outbound {
-                let scope = message.scope().clone();
-                let failures = runtime.broadcast(&message);
-                if !failures.is_empty() {
-                    runtime.consensus().record_send_failures(scope, failures);
-                }
-            }
-            if output.validator_set_changed {
-                runtime.refresh_authority()?;
-            }
-            if let Some(checkpoint) = output.certified_recovery_checkpoint {
-                self.publish_state_recovery_provider(&checkpoint)?;
-            }
-
-            if runtime.has_pending_prepared_task_sync() {
-                tokio::select! {
-                    _ = runtime.consensus().wait_for_activity_or_deadline() => {}
-                    _ = tokio::time::sleep(runtime.bft_timeouts().proposal) => {
-                        runtime.retry_prepared_task_sync(true);
-                    }
-                }
-            } else {
-                runtime.consensus().wait_for_activity_or_deadline().await;
-            }
-        }
     }
 }
 
@@ -317,6 +440,16 @@ impl From<ConsensusTargetError> for BftConsensusRuntimeError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BftConsensusEvent {
+    ConnectionFailed {
+        node_id: crate::NodeId,
+        address: std::net::SocketAddr,
+        elapsed: Duration,
+        error: crate::ValidatorBftRuntimeError,
+    },
+    CertifiedCurrencyAllocation {
+        allocation: crate::CurrencyAllocation,
+        certificate: FinalityCertificate,
+    },
     CertifiedPreparedTask {
         task_id: TaskId,
         certificate: FinalityCertificate,
@@ -353,6 +486,9 @@ pub(crate) struct BftConsensusCoordinator {
 }
 
 struct CompletedConsensusScope {
+    recovery_source: Option<BftNetworkMessage>,
+    allocation_source: Option<crate::LegalTask>,
+    transition_source: Option<Vec<u8>>,
     subject: BftProposalSubject,
     validator_set: ValidatorSet,
     certificate: FinalityCertificate,
@@ -366,6 +502,8 @@ struct BftConsensusSession {
     signer: ValidatorSigner,
     validator_set: ValidatorSet,
     target: ValidatorConsensusTarget,
+    candidates: BTreeMap<[u8; 32], ValidatorConsensusTarget>,
+    valid_prevote_qc: Option<BftQuorumCertificate>,
     subject: BftProposalSubject,
     finality_votes: BTreeMap<ValidatorId, ValidatorVote>,
     finality_qc: Option<BftQuorumCertificate>,
@@ -378,11 +516,17 @@ struct BftConsensusSession {
     relayed_certificates: BTreeSet<(u64, BftPhase, BftValue)>,
     pending_future: VecDeque<InboundBftMessage>,
     needs_start: bool,
+    // Work cursor only: restart repeats collection from the durable BFT round.
+    collection_started_at_round: Option<u64>,
     finished: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct BftConsensusOutput {
+    pub(crate) retry_prepared_tasks: BTreeSet<TaskId>,
+    pub(crate) completed_prepared_tasks: Vec<TaskId>,
+    pub(crate) currency_allocation_committed: bool,
+    pub(crate) business_state_changed: bool,
     pub(crate) outbound: Vec<BftNetworkMessage>,
     pub(crate) certified_recovery_checkpoint: Option<CertifiedStateRecoveryCheckpoint>,
     pub(crate) validator_set_changed: bool,
@@ -418,7 +562,15 @@ impl BftConsensusCoordinator {
         target: ValidatorConsensusTarget,
         timeouts: BftTimeoutConfig,
     ) -> Result<(), BftConsensusRuntimeError> {
-        let subject = target.proposal_subject(&store)?;
+        // A collected body registers only the existing membership scope's Nil
+        // round. The public proposal/signing APIs still reject unsealed roots.
+        let collection =
+            governance::collection_subject(&store, &validator_set, &target, signer.validator_id())?;
+        let collection_round = collection.as_ref().map(|(_, round)| *round);
+        let subject = match collection {
+            Some((subject, _)) => subject,
+            None => target.proposal_subject(&store)?,
+        };
         let scope = subject.scope().clone();
         if let Some(existing) = self
             .recent_completed
@@ -430,11 +582,38 @@ impl BftConsensusCoordinator {
             }
             return Err(BftConsensusRuntimeError::SubjectConflict(scope));
         }
-        if let Some(existing) = self.sessions.get(&scope) {
-            if existing.subject == subject && existing.target == target {
-                return Ok(());
+        if let Some(existing) = self.sessions.get_mut(&scope) {
+            let starts_membership = collection_round.is_none()
+                && existing.collection_started_at_round.is_some()
+                && matches!(target, ValidatorConsensusTarget::ValidatorSetTransition(_))
+                && !existing.candidates.contains_key(&subject.digest())
+                && existing.driver.phase()? == BftDriverPhase::Proposal;
+            if existing.subject != subject || existing.target != target {
+                if !matches!(
+                    subject.scope(),
+                    ConsensusScope::CurrencyAllocation { .. }
+                        | ConsensusScope::StateRecoveryCheckpoint { .. }
+                        | ConsensusScope::PreparedTask(_)
+                ) {
+                    return Err(BftConsensusRuntimeError::SubjectConflict(scope));
+                }
+                if !existing.candidates.contains_key(&subject.digest())
+                    && existing.candidates.len() >= MAX_PENDING_MESSAGES_PER_SCOPE
+                {
+                    return Err(BftConsensusRuntimeError::PendingFutureMessagesFull(scope));
+                }
+                existing.driver.register_subject(&subject)?;
+                existing.candidates.insert(subject.digest(), target);
             }
-            return Err(BftConsensusRuntimeError::SubjectConflict(scope));
+            // A failed start has no deadline. A newly validated registration
+            // may resume it; active sessions keep their original timeout and
+            // finished sessions are never restarted here.
+            existing.needs_start |=
+                !existing.finished && (existing.deadline.is_none() || starts_membership);
+            if existing.collection_started_at_round.is_none() {
+                existing.collection_started_at_round = collection_round;
+            }
+            return Ok(());
         }
 
         let mut driver = BftDriver::new(
@@ -444,14 +623,20 @@ impl BftConsensusCoordinator {
             scope.clone(),
         )?;
         driver.register_subject(&subject)?;
+        let valid_prevote_qc = store
+            .bft_local_state(signer.validator_id(), &scope)
+            .map_err(BftConsensusRuntimeError::Persistence)?
+            .and_then(|state| state.valid_prevote_qc().cloned());
         self.sessions.insert(
-            scope,
+            scope.clone(),
             BftConsensusSession {
                 driver,
                 store,
                 signer,
                 validator_set,
                 target,
+                candidates: BTreeMap::new(),
+                valid_prevote_qc,
                 subject,
                 finality_votes: BTreeMap::new(),
                 finality_qc: None,
@@ -464,10 +649,48 @@ impl BftConsensusCoordinator {
                 relayed_certificates: BTreeSet::new(),
                 pending_future: VecDeque::new(),
                 needs_start: true,
+                collection_started_at_round: collection_round,
                 finished: false,
             },
         );
+        if let Some(session) = self.sessions.get_mut(&scope)
+            && matches!(
+                session.subject.scope(),
+                ConsensusScope::CurrencyAllocation { .. }
+                    | ConsensusScope::StateRecoveryCheckpoint { .. }
+                    | ConsensusScope::PreparedTask(_)
+            )
+        {
+            session
+                .candidates
+                .insert(session.subject.digest(), session.target.clone());
+        }
+        if let Some(session) = self.sessions.get_mut(&scope)
+            && let ConsensusScope::PreparedTask(task_id) = &scope
+        {
+            let commit = session
+                .store
+                .prepared_bft_proposal_subject(task_id.clone())
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+            session.driver.register_subject(&commit)?;
+            session.candidates.insert(
+                commit.digest(),
+                ValidatorConsensusTarget::PreparedTask {
+                    task_id: task_id.clone(),
+                    plan_digest: commit.digest(),
+                },
+            );
+        }
         Ok(())
+    }
+
+    // Events are diagnostics; task outcomes and certificates remain durable authority.
+    fn record_event(&mut self, event: BftConsensusEvent) {
+        const MAX_RECENT_EVENTS: usize = 256;
+        if self.events.len() == MAX_RECENT_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
     }
 
     pub(crate) fn drain_events(&mut self) -> Vec<BftConsensusEvent> {
@@ -482,8 +705,7 @@ impl BftConsensusCoordinator {
         if failures.is_empty() {
             return;
         }
-        self.events
-            .push_back(BftConsensusEvent::SendFailed { scope, failures });
+        self.record_event(BftConsensusEvent::SendFailed { scope, failures });
     }
 
     pub(crate) fn record_rejection(
@@ -492,7 +714,7 @@ impl BftConsensusCoordinator {
         scope: ConsensusScope,
         error: BftConsensusRuntimeError,
     ) {
-        self.events.push_back(BftConsensusEvent::Rejected {
+        self.record_event(BftConsensusEvent::Rejected {
             validator_id,
             scope,
             error,
@@ -530,7 +752,7 @@ impl BftConsensusCoordinator {
                 &mut output,
             );
             if let Err(error) = result {
-                self.events.push_back(BftConsensusEvent::Rejected {
+                self.record_event(BftConsensusEvent::Rejected {
                     validator_id: None,
                     scope,
                     error,
@@ -555,14 +777,21 @@ impl BftConsensusCoordinator {
                 &scope,
                 |session, output| {
                     if session.bft_finality_ready || session.finality_certificate.is_some() {
-                        rebroadcast_finality_votes(session, output);
-                        if session.certified_emitted {
-                            session.finished = true;
-                            session.deadline = None;
-                        } else {
-                            schedule_finality_relay(session, now);
+                        // Retry interrupted signing/commit before relaying; an expired
+                        // deadline must not spin if persistence rejects this attempt.
+                        schedule_finality_relay(session, now);
+                        let mut event = finality::certify_if_ready(session, output)?;
+                        if !session.certified_emitted
+                            && !session
+                                .finality_votes
+                                .contains_key(&session.signer.validator_id())
+                        {
+                            event = begin_business_finality(session, output, now)?;
                         }
-                        return Ok(None);
+                        if event.is_none() {
+                            rebroadcast_finality_votes(session, output)?;
+                        }
+                        return Ok(event);
                     }
 
                     let action = session.driver.on_timeout()?;
@@ -575,7 +804,7 @@ impl BftConsensusCoordinator {
                 &mut output,
             );
             if let Err(error) = result {
-                self.events.push_back(BftConsensusEvent::Rejected {
+                self.record_event(BftConsensusEvent::Rejected {
                     validator_id: None,
                     scope,
                     error,
@@ -604,6 +833,26 @@ impl BftConsensusCoordinator {
                 continue;
             };
             self.remember_completed(CompletedConsensusScope {
+                recovery_source: match &session.target {
+                    ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint) => {
+                        governance::recovery_proof_message(checkpoint, &certificate).ok()
+                    }
+                    _ => None,
+                },
+                transition_source: match &session.target {
+                    ValidatorConsensusTarget::ValidatorSetTransition(transition) => {
+                        ValidatorSetTransitionSource::from_transition(transition)
+                            .encode_bytes()
+                            .ok()
+                    }
+                    _ => None,
+                },
+                allocation_source: match session.target {
+                    ValidatorConsensusTarget::CurrencyAllocation(allocation) => {
+                        Some(allocation.task)
+                    }
+                    _ => None,
+                },
                 subject: session.subject,
                 validator_set: session.validator_set,
                 certificate,
@@ -647,10 +896,12 @@ impl BftConsensusCoordinator {
             {
                 output
                     .outbound
-                    .push(BftNetworkMessage::FinalityCertificate {
-                        scope,
-                        certificate: completed.certificate.clone(),
-                    });
+                    .push(completed.recovery_source.clone().unwrap_or_else(|| {
+                        BftNetworkMessage::FinalityCertificate {
+                            scope,
+                            certificate: completed.certificate.clone(),
+                        }
+                    }));
                 completed.next_relay_at = add_duration(now, completed.relay_interval);
             }
             return;
@@ -664,9 +915,39 @@ impl BftConsensusCoordinator {
         let result = self.with_session(
             &scope,
             move |session, output| {
+                candidates::admit_certified_abort(session, &inbound_message.message)?;
+                if candidates::waiting_for_candidate(session, &inbound_message.message) {
+                    if !session.pending_future.contains(&inbound_message) {
+                        if session.pending_future.len() >= MAX_PENDING_MESSAGES_PER_SCOPE {
+                            return Err(BftConsensusRuntimeError::PendingFutureMessagesFull(
+                                future_scope,
+                            ));
+                        }
+                        session.pending_future.push_back(inbound_message);
+                    }
+                    return Ok(None);
+                }
                 if let Some(actual) = inbound_message.message.consensus_round() {
                     let current = session.driver.current_round()?;
                     if actual < current && !inbound_message.message.is_digest_precommit_evidence() {
+                        if let BftNetworkMessage::QuorumCertificate(certificate) =
+                            &inbound_message.message
+                            && certificate.statement().phase() == BftPhase::Prevote
+                            && matches!(certificate.statement().value(), BftValue::Digest(_))
+                        {
+                            certificate
+                                .verify(&session.validator_set)
+                                .map_err(BftDriverError::from)?;
+                            session
+                                .store
+                                .remember_verified_bft_prevote_qc(
+                                    session.driver.validator_id(),
+                                    certificate,
+                                    &session.validator_set,
+                                )
+                                .map_err(BftConsensusRuntimeError::Persistence)?;
+                            candidates::remember_prevote_qc(session, certificate);
+                        }
                         return Ok(None);
                     }
                     if actual > current
@@ -692,7 +973,7 @@ impl BftConsensusCoordinator {
             output,
         );
         if let Err(error) = result {
-            self.events.push_back(BftConsensusEvent::Rejected {
+            self.record_event(BftConsensusEvent::Rejected {
                 validator_id: Some(validator_id),
                 scope,
                 error,
@@ -716,7 +997,7 @@ impl BftConsensusCoordinator {
                 let current = match session.driver.current_round() {
                     Ok(current) => current,
                     Err(error) => {
-                        self.events.push_back(BftConsensusEvent::Rejected {
+                        self.record_event(BftConsensusEvent::Rejected {
                             validator_id: None,
                             scope,
                             error: error.into(),
@@ -731,6 +1012,7 @@ impl BftConsensusCoordinator {
                         .message
                         .consensus_round()
                         .is_none_or(|round| round <= current)
+                        && !candidates::waiting_for_candidate(session, &message.message)
                     {
                         ready.push(message);
                     } else {
@@ -774,7 +1056,7 @@ impl BftConsensusCoordinator {
         if !self.pending_unregistered.contains_key(&scope)
             && self.pending_unregistered.len() >= MAX_PENDING_UNREGISTERED_SCOPES
         {
-            self.events.push_back(BftConsensusEvent::UnregisteredScope {
+            self.record_event(BftConsensusEvent::UnregisteredScope {
                 validator_id: message.validator_id,
                 scope,
             });
@@ -783,7 +1065,7 @@ impl BftConsensusCoordinator {
 
         let pending = self.pending_unregistered.entry(scope.clone()).or_default();
         if pending.len() >= MAX_PENDING_MESSAGES_PER_SCOPE {
-            self.events.push_back(BftConsensusEvent::UnregisteredScope {
+            self.record_event(BftConsensusEvent::UnregisteredScope {
                 validator_id: message.validator_id,
                 scope,
             });
@@ -811,7 +1093,7 @@ impl BftConsensusCoordinator {
             return Ok(());
         }
         if let Some(event) = operation(session, output)? {
-            self.events.push_back(event);
+            self.record_event(event);
         }
         Ok(())
     }
@@ -822,9 +1104,117 @@ fn start_round(
     output: &mut BftConsensusOutput,
     now: Instant,
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
+    let durable = session
+        .store
+        .load_shared()
+        .map_err(BftConsensusRuntimeError::Persistence)?
+        .ok_or(BftConsensusRuntimeError::Persistence(
+            PersistenceError::MissingSnapshot,
+        ))?;
+    let scope = session.subject.scope();
+    if durable
+        .validator_vote_locks
+        .get(&(session.signer.validator_id(), scope.clone()))
+        == Some(&session.subject.digest())
+        || durable
+            .bft_local_states
+            .get(&(session.signer.validator_id(), scope.clone()))
+            .is_some_and(|state| state.finality_ready_digest() == Some(session.subject.digest()))
+    {
+        return begin_business_finality(session, output, now);
+    }
+    if matches!(
+        session.subject.scope(),
+        ConsensusScope::CurrencyAllocation { .. }
+            | ConsensusScope::StateRecoveryCheckpoint { .. }
+            | ConsensusScope::PreparedTask(_)
+    ) {
+        let local = session
+            .store
+            .bft_local_state(session.driver.validator_id(), session.subject.scope())
+            .map_err(BftConsensusRuntimeError::Persistence)?;
+        let digest = session
+            .valid_prevote_qc
+            .as_ref()
+            .filter(|certificate| {
+                local
+                    .as_ref()
+                    .and_then(|state| state.locked_round())
+                    .is_none_or(|round| certificate.statement().round() >= round)
+            })
+            .and_then(|certificate| match certificate.statement().value() {
+                BftValue::Digest(digest) => Some(digest),
+                _ => None,
+            })
+            .or_else(|| local.and_then(|state| state.locked_digest()));
+        if let Some(digest) = digest {
+            candidates::select_candidate(session, digest)?;
+        } else if let ConsensusScope::PreparedTask(task_id) = session.subject.scope()
+            && durable
+                .prepared_tasks
+                .get(task_id)
+                .is_some_and(|plan| plan.conflict_abort)
+        {
+            let abort = session
+                .store
+                .prepared_abort_statement(task_id)
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+            if session.candidates.contains_key(&abort.subject_digest()) {
+                candidates::select_candidate(session, abort.subject_digest())?;
+            }
+        } else if let ConsensusScope::PreparedTask(task_id) = session.subject.scope()
+            && let Some(plan) = durable
+                .prepared_tasks
+                .get(task_id)
+                .filter(|plan| plan.commit_authorized)
+        {
+            let digest = plan.plan_digest().map_err(|_| {
+                BftConsensusRuntimeError::Persistence(PersistenceError::InvalidSnapshot)
+            })?;
+            if session.candidates.contains_key(&digest) {
+                candidates::select_candidate(session, digest)?;
+            }
+        } else if matches!(
+            session.subject.scope(),
+            ConsensusScope::StateRecoveryCheckpoint { .. }
+        ) {
+            let checkpoint = session
+                .store
+                .next_state_recovery_checkpoint()
+                .map_err(BftConsensusRuntimeError::Persistence)?;
+            if session.candidates.contains_key(&checkpoint.digest()) {
+                candidates::select_candidate(session, checkpoint.digest())?;
+            }
+        } else if matches!(
+            session.target,
+            ValidatorConsensusTarget::ValidatorSetTransition(_)
+        ) {
+            candidates::select_membership_union(session, &durable)?;
+        }
+    }
     session.driver.register_subject(&session.subject)?;
+    if !governance::membership_ready(session, &durable)? {
+        refresh_deadline(session, now)?;
+        return Ok(None);
+    }
+    // Restart resumes the durable phase. Re-proposing after a persisted Nil
+    // prevote would try to sign a conflicting value and leave no deadline.
+    if session.driver.phase()? != BftDriverPhase::Proposal {
+        refresh_deadline(session, now)?;
+        return Ok(None);
+    }
     if session.driver.proposer()? == session.driver.validator_id() {
         match &session.target {
+            ValidatorConsensusTarget::CurrencyAllocation(_) => {
+                output
+                    .outbound
+                    .push(BftNetworkMessage::PreparedTaskAvailable {
+                        validator_set_version: session.validator_set.version(),
+                        scope: session.subject.scope().clone(),
+                        expected_plan_digest: session.subject.digest(),
+                        round: session.driver.current_round()?,
+                    });
+            }
             ValidatorConsensusTarget::ValidatorSetTransition(transition) => {
                 let source = ValidatorSetTransitionSource::from_transition(transition)
                     .encode_bytes()
@@ -832,6 +1222,7 @@ fn start_round(
                 output
                     .outbound
                     .push(BftNetworkMessage::ValidatorSetTransitionSource {
+                        collecting: false,
                         validator_set_version: session.validator_set.version(),
                         scope: session.subject.scope().clone(),
                         bytes: source,
@@ -843,20 +1234,63 @@ fn start_round(
                     .push(BftNetworkMessage::StateRecoveryCheckpointSource {
                         validator_set_version: session.validator_set.version(),
                         scope: session.subject.scope().clone(),
-                        bytes: checkpoint.encode_bytes(),
+                        bytes: checkpoint
+                            .encode_source()
+                            .map_err(BftConsensusRuntimeError::Persistence)?,
                     });
             }
-            ValidatorConsensusTarget::PreparedTask { .. }
-            | ValidatorConsensusTarget::PublicCheckpoint(_) => {}
+            ValidatorConsensusTarget::PublicCheckpoint(checkpoint) => {
+                let snapshot = session
+                    .store
+                    .load_shared()
+                    .map_err(BftConsensusRuntimeError::Persistence)?
+                    .ok_or(BftConsensusRuntimeError::Persistence(
+                        PersistenceError::MissingSnapshot,
+                    ))?;
+                if let Some(proof) = snapshot.public_checkpoint_baseline.as_ref()
+                    && proof.validator_set_version() == session.validator_set.version()
+                {
+                    output
+                        .outbound
+                        .push(BftNetworkMessage::PublicCheckpointSource {
+                            validator_set_version: session.validator_set.version(),
+                            scope: ConsensusScope::PublicCheckpoint {
+                                validator_set_version: session.validator_set.version(),
+                                epoch: proof.checkpoint().epoch(),
+                            },
+                            bytes: proof
+                                .encode_bytes()
+                                .map_err(|_| BftConsensusRuntimeError::InvalidGovernanceSource)?,
+                        });
+                }
+                output
+                    .outbound
+                    .push(BftNetworkMessage::PublicCheckpointSource {
+                        validator_set_version: session.validator_set.version(),
+                        scope: session.subject.scope().clone(),
+                        bytes: checkpoint.encode_source(session.validator_set.version()),
+                    });
+            }
+            ValidatorConsensusTarget::PreparedTask { .. } => {}
         }
         let proposal = session.driver.create_proposal(&session.subject)?;
+        let unlock_certificate = session
+            .valid_prevote_qc
+            .as_ref()
+            .filter(|certificate| {
+                certificate.statement().round() < proposal.round()
+                    && certificate.statement().value() == BftValue::Digest(session.subject.digest())
+            })
+            .cloned();
         output.outbound.push(BftNetworkMessage::Proposal {
             proposal: proposal.clone(),
-            unlock_certificate: None,
+            unlock_certificate: unlock_certificate.clone(),
         });
-        let action = session
-            .driver
-            .accept_proposal(&proposal, &session.subject, None)?;
+        let action = session.driver.accept_proposal(
+            &proposal,
+            &session.subject,
+            unlock_certificate.as_ref(),
+        )?;
         if let Some(event) = process_action(session, action, output, now)? {
             return Ok(Some(event));
         }
@@ -873,14 +1307,18 @@ fn handle_inbound(
 ) -> Result<Option<BftConsensusEvent>, BftConsensusRuntimeError> {
     let message = match message {
         BftNetworkMessage::FinalityCertificate { scope, certificate } => {
-            return ingest_finality_certificate(session, scope, certificate, output);
+            certificate
+                .verify(&session.validator_set)
+                .map_err(BftConsensusRuntimeError::Finality)?;
+            candidates::select_candidate(session, certificate.statement().subject_digest())?;
+            return ingest_finality_certificate(session, scope, certificate, output, now);
         }
         BftNetworkMessage::FinalityVote {
             scope,
             statement,
             vote,
         } => {
-            return ingest_finality_vote(session, scope, statement, vote, output);
+            return ingest_finality_vote(session, scope, statement, vote, output, now);
         }
         message => message,
     };
@@ -898,20 +1336,62 @@ fn handle_inbound(
             if proposal.round() == current && session.driver.phase()? != BftDriverPhase::Proposal {
                 None
             } else {
-                Some(session.driver.accept_proposal(
+                let subject = match session.candidates.get(&proposal.subject_digest()) {
+                    Some(ValidatorConsensusTarget::PreparedTask {
+                        task_id,
+                        plan_digest,
+                    }) => BftProposalSubject::new(
+                        session.validator_set.version(),
+                        ConsensusScope::PreparedTask(task_id.clone()),
+                        *plan_digest,
+                    ),
+                    Some(ValidatorConsensusTarget::CurrencyAllocation(allocation)) => {
+                        allocation.subject()
+                    }
+                    Some(ValidatorConsensusTarget::ValidatorSetTransition(transition)) => {
+                        BftProposalSubject::new(
+                            transition.current_validator_set_version(),
+                            transition.scope(),
+                            transition.digest(),
+                        )
+                    }
+                    Some(ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint)) => {
+                        BftProposalSubject::new(
+                            checkpoint.validator_set_version(),
+                            ConsensusScope::StateRecoveryCheckpoint {
+                                validator_set_version: checkpoint.validator_set_version(),
+                                serial: checkpoint.serial(),
+                            },
+                            checkpoint.digest(),
+                        )
+                    }
+                    _ => session.subject.clone(),
+                };
+                let action = session.driver.accept_proposal(
                     &proposal,
-                    &session.subject,
+                    &subject,
                     unlock_certificate.as_ref(),
-                )?)
+                )?;
+                candidates::select_candidate(session, proposal.subject_digest())?;
+                Some(action)
             }
         }
         BftNetworkMessage::Vote { statement, vote } => {
             session.driver.ingest_vote(statement, vote)?
         }
         BftNetworkMessage::QuorumCertificate(certificate) => {
+            certificate
+                .verify(&session.validator_set)
+                .map_err(BftDriverError::from)?;
+            if let BftValue::Digest(digest) = certificate.statement().value() {
+                candidates::select_candidate(session, digest)?;
+            }
             session.driver.register_subject(&session.subject)?;
             remember_finality_qc(session, &certificate);
-            let action = session.driver.accept_quorum_certificate(&certificate)?;
+            candidates::remember_prevote_qc(session, &certificate);
+            let action = session
+                .driver
+                .accept_verified_quorum_certificate(&certificate)?;
             relay_certificate(session, &certificate, output);
             if let Some(event) = process_action(session, action, output, now)? {
                 return Ok(Some(event));
@@ -929,6 +1409,7 @@ fn handle_inbound(
             unreachable!("prepared-task sync control is consumed before BFT dispatch")
         }
         BftNetworkMessage::ValidatorSetTransitionSource { .. }
+        | BftNetworkMessage::PublicCheckpointSource { .. }
         | BftNetworkMessage::StateRecoveryCheckpointSource { .. } => {
             unreachable!("governance source control is consumed before BFT dispatch")
         }
@@ -963,9 +1444,16 @@ fn process_action(
             }
         }
         BftDriverAction::QuorumCertificate(certificate) => {
+            if let BftValue::Digest(digest) = certificate.statement().value() {
+                candidates::select_candidate(session, digest)?;
+            }
             remember_finality_qc(session, &certificate);
+            candidates::remember_prevote_qc(session, &certificate);
             relay_certificate(session, &certificate, output);
-            let next = session.driver.accept_quorum_certificate(&certificate)?;
+            // ingest_vote constructs this QC only from verified votes.
+            let next = session
+                .driver
+                .accept_verified_quorum_certificate(&certificate)?;
             if let Some(event) = process_action(session, next, output, now)? {
                 return Ok(Some(event));
             }
@@ -1017,15 +1505,37 @@ fn refresh_deadline(
     if session.bft_finality_ready {
         return Ok(());
     }
-    let delay = match session.driver.phase()? {
+    let base_delay = match session.driver.phase()? {
         BftDriverPhase::Proposal => session.timeouts.proposal,
         BftDriverPhase::Prevote => session.timeouts.prevote,
         BftDriverPhase::Precommit => session.timeouts.precommit,
     };
-    session.deadline = Some(add_duration(now, delay));
+    // Fixed budgets can keep timing out after network/processing latency grows.
+    // Each scope uses its durable round; there is no second timer state.
+    // Grow after a complete proposer rotation; larger committees need more
+    // time for the unavoidable quorum verification work.
+    let members = session.validator_set.len() as u64;
+    let cycle = (session.driver.current_round()? / members).saturating_add(1);
+    let quorum_work = session.validator_set.quorum_threshold().div_ceil(3) as u64;
+    let factor = u32::try_from(cycle.saturating_mul(quorum_work)).unwrap_or(u32::MAX);
+    let delay = base_delay.saturating_mul(factor);
+    // drive's timestamp can predate expensive verification/persistence work.
+    session.deadline = Some(add_duration(now.max(Instant::now()), delay));
     Ok(())
 }
 
 fn add_duration(now: Instant, duration: Duration) -> Instant {
-    now.checked_add(duration).unwrap_or(now)
+    let mut duration = duration;
+    loop {
+        if let Some(deadline) = now.checked_add(duration) {
+            return deadline;
+        }
+        // Overflow must not turn a distant deadline into an immediate wakeup.
+        duration /= 2;
+    }
 }
+
+#[cfg(test)]
+mod task_decision_tests;
+#[cfg(test)]
+mod tests;

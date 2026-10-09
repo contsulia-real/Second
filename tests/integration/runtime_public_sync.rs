@@ -185,8 +185,18 @@ async fn runtime_public_sync_uses_durable_validator_set_after_online_transition(
             .unwrap(),
     );
 
-    let certified_transition =
-        support::certified_add_validator_transition(&initial, 2, 1..=4, 5, 1..=3);
+    let certified_transition = support::certified_add_validator_transition(
+        &initial,
+        2,
+        1..=4,
+        5,
+        1..=3,
+        local_state.next_currency_address(),
+    );
+    let transition = local_store
+        .prepare_validator_set_transition(certified_transition.transition().clone())
+        .unwrap();
+    let certified_transition = support::certify_validator_transition(&initial, transition, 1..=3);
     local_store
         .activate_validator_set_transition(&certified_transition)
         .unwrap();
@@ -253,6 +263,7 @@ async fn runtime_public_connection_reads_current_durable_state_and_checkpoint_wi
 
     let task = verified_task(91, vec![Operation::Issue { account, count: 2 }]);
     let mut prepared = PreparedTaskBook::new(store.clone()).unwrap();
+    support::allocate_task(&store, &mut state, &task, 2, &validators).unwrap();
     prepared.prepare(&mut state, &task, 2, &validators).unwrap();
     let statement = prepared
         .prepared_finality_statement(task.task_id())
@@ -328,6 +339,7 @@ async fn public_only_runtime_incrementally_persists_certified_state_from_full_pe
 
     let task = verified_task(171, vec![Operation::Issue { account, count: 3 }]);
     let mut prepared = PreparedTaskBook::new(server_store.clone()).unwrap();
+    support::allocate_task(&server_store, &mut state, &task, 2, &validators).unwrap();
     prepared.prepare(&mut state, &task, 2, &validators).unwrap();
     let statement = prepared
         .prepared_finality_statement(task.task_id())
@@ -405,7 +417,18 @@ async fn public_only_runtime_advances_validator_trust_before_syncing_new_set_sta
         .initialize(initial.clone(), initial_persisted.validator_registry)
         .unwrap();
 
-    let transition = support::certified_add_validator_transition(&initial, 2, 1..=4, 5, 1..=3);
+    let transition = support::certified_add_validator_transition(
+        &initial,
+        2,
+        1..=4,
+        5,
+        1..=3,
+        state.next_currency_address(),
+    );
+    let candidate = server_store
+        .prepare_validator_set_transition(transition.transition().clone())
+        .unwrap();
+    let transition = support::certify_validator_transition(&initial, candidate, 1..=3);
     server_store
         .activate_validator_set_transition(&transition)
         .unwrap();

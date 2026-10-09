@@ -1,3 +1,4 @@
+use crate::finality_codec;
 use crate::{
     BftPhase, BftProposal, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
     FinalityCertificate, FinalityStatement, MAX_VALIDATOR_TRANSITION_SOURCE_SIZE, TaskId,
@@ -55,6 +56,12 @@ pub enum BftNetworkMessage {
         round: u64,
     },
     ValidatorSetTransitionSource {
+        collecting: bool,
+        validator_set_version: u64,
+        scope: ConsensusScope,
+        bytes: Vec<u8>,
+    },
+    PublicCheckpointSource {
         validator_set_version: u64,
         scope: ConsensusScope,
         bytes: Vec<u8>,
@@ -62,7 +69,7 @@ pub enum BftNetworkMessage {
     StateRecoveryCheckpointSource {
         validator_set_version: u64,
         scope: ConsensusScope,
-        bytes: [u8; 52],
+        bytes: Vec<u8>,
     },
 }
 
@@ -79,6 +86,7 @@ impl BftNetworkMessage {
             | Self::PreparedTaskSourceUnavailable { scope, .. }
             | Self::PreparedTaskAvailable { scope, .. }
             | Self::ValidatorSetTransitionSource { scope, .. }
+            | Self::PublicCheckpointSource { scope, .. }
             | Self::StateRecoveryCheckpointSource { scope, .. } => scope,
         }
     }
@@ -112,6 +120,10 @@ impl BftNetworkMessage {
                 validator_set_version,
                 ..
             }
+            | Self::PublicCheckpointSource {
+                validator_set_version,
+                ..
+            }
             | Self::StateRecoveryCheckpointSource {
                 validator_set_version,
                 ..
@@ -130,6 +142,7 @@ impl BftNetworkMessage {
             | Self::PreparedTaskSourceChunk { .. }
             | Self::PreparedTaskSourceUnavailable { .. }
             | Self::ValidatorSetTransitionSource { .. }
+            | Self::PublicCheckpointSource { .. }
             | Self::StateRecoveryCheckpointSource { .. } => None,
             Self::PreparedTaskAvailable { round, .. } => Some(*round),
         }
@@ -147,6 +160,7 @@ impl BftNetworkMessage {
             | Self::PreparedTaskSourceUnavailable { .. }
             | Self::PreparedTaskAvailable { .. }
             | Self::ValidatorSetTransitionSource { .. }
+            | Self::PublicCheckpointSource { .. }
             | Self::StateRecoveryCheckpointSource { .. } => return false,
         };
         statement.phase() == BftPhase::Precommit && matches!(statement.value(), BftValue::Digest(_))
@@ -186,13 +200,14 @@ pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>
         } => {
             out.push(4);
             encode_scope(scope, &mut out)?;
-            encode_finality_statement(statement, &mut out);
-            encode_finality_vote(vote, &mut out);
+            out.extend_from_slice(&finality_codec::encode_statement_and_vote(statement, vote));
         }
         BftNetworkMessage::FinalityCertificate { scope, certificate } => {
             out.push(5);
             encode_scope(scope, &mut out)?;
-            encode_finality_certificate(certificate, &mut out)?;
+            let encoded = finality_codec::encode_certificate(certificate)
+                .ok_or(NetworkError::InvalidBftMessage)?;
+            out.extend_from_slice(&encoded);
         }
         BftNetworkMessage::PreparedTaskRequest {
             validator_set_version,
@@ -262,17 +277,34 @@ pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>
             out.extend_from_slice(&round.to_be_bytes());
         }
         BftNetworkMessage::ValidatorSetTransitionSource {
+            collecting,
             validator_set_version,
             scope,
             bytes,
         } => {
-            if !matches!(scope, ConsensusScope::ValidatorSetTransition { .. })
+            if !matches!(scope, ConsensusScope::CurrencyAllocation { .. })
                 || bytes.is_empty()
                 || bytes.len() > MAX_VALIDATOR_TRANSITION_SOURCE_SIZE
             {
                 return Err(NetworkError::InvalidBftMessage);
             }
             out.push(10);
+            out.push(u8::from(*collecting));
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            encode_scope(scope, &mut out)?;
+            let len = u16::try_from(bytes.len()).map_err(|_| NetworkError::InvalidBftMessage)?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        BftNetworkMessage::PublicCheckpointSource {
+            validator_set_version,
+            scope,
+            bytes,
+        } => {
+            if !matches!(scope, ConsensusScope::PublicCheckpoint { .. }) {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            out.push(12);
             out.extend_from_slice(&validator_set_version.to_be_bytes());
             encode_scope(scope, &mut out)?;
             let len = u16::try_from(bytes.len()).map_err(|_| NetworkError::InvalidBftMessage)?;
@@ -290,6 +322,8 @@ pub fn encode_bft_network_message(message: &BftNetworkMessage) -> Result<Vec<u8>
             out.push(11);
             out.extend_from_slice(&validator_set_version.to_be_bytes());
             encode_scope(scope, &mut out)?;
+            let len = u16::try_from(bytes.len()).map_err(|_| NetworkError::InvalidBftMessage)?;
+            out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(bytes);
         }
     }
@@ -323,15 +357,24 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
             vote: decode_vote(&mut cursor)?,
         },
         3 => BftNetworkMessage::QuorumCertificate(decode_qc(&mut cursor)?),
-        4 => BftNetworkMessage::FinalityVote {
-            scope: decode_scope(&mut cursor)?,
-            statement: decode_finality_statement(&mut cursor)?,
-            vote: decode_finality_vote(&mut cursor)?,
-        },
-        5 => BftNetworkMessage::FinalityCertificate {
-            scope: decode_scope(&mut cursor)?,
-            certificate: decode_finality_certificate(&mut cursor)?,
-        },
+        4 => {
+            let scope = decode_scope(&mut cursor)?;
+            let encoded = cursor.bytes(cursor.remaining())?;
+            let (statement, vote) = finality_codec::decode_statement_and_vote(encoded)
+                .ok_or(NetworkError::InvalidBftMessage)?;
+            BftNetworkMessage::FinalityVote {
+                scope,
+                statement,
+                vote,
+            }
+        }
+        5 => {
+            let scope = decode_scope(&mut cursor)?;
+            let encoded = cursor.bytes(cursor.remaining())?;
+            let certificate = finality_codec::decode_certificate(encoded)
+                .ok_or(NetworkError::InvalidBftMessage)?;
+            BftNetworkMessage::FinalityCertificate { scope, certificate }
+        }
         6 => {
             let (validator_set_version, scope, expected_plan_digest) =
                 decode_prepared_task_control_head(&mut cursor)?;
@@ -381,9 +424,14 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
             }
         }
         10 => {
+            let collecting = match cursor.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(NetworkError::InvalidBftMessage),
+            };
             let validator_set_version = cursor.u64()?;
             let scope = decode_scope(&mut cursor)?;
-            if !matches!(scope, ConsensusScope::ValidatorSetTransition { .. }) {
+            if !matches!(scope, ConsensusScope::CurrencyAllocation { .. }) {
                 return Err(NetworkError::InvalidBftMessage);
             }
             let len = usize::from(cursor.u16()?);
@@ -391,6 +439,7 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
                 return Err(NetworkError::InvalidBftMessage);
             }
             BftNetworkMessage::ValidatorSetTransitionSource {
+                collecting,
                 validator_set_version,
                 scope,
                 bytes: cursor.bytes(len)?.to_vec(),
@@ -405,7 +454,25 @@ pub fn decode_bft_network_message(bytes: &[u8]) -> Result<BftNetworkMessage, Net
             BftNetworkMessage::StateRecoveryCheckpointSource {
                 validator_set_version,
                 scope,
-                bytes: cursor.array::<52>()?,
+                bytes: {
+                    let len = usize::from(cursor.u16()?);
+                    cursor.bytes(len)?.to_vec()
+                },
+            }
+        }
+        12 => {
+            let validator_set_version = cursor.u64()?;
+            let scope = decode_scope(&mut cursor)?;
+            if !matches!(scope, ConsensusScope::PublicCheckpoint { .. }) {
+                return Err(NetworkError::InvalidBftMessage);
+            }
+            BftNetworkMessage::PublicCheckpointSource {
+                validator_set_version,
+                scope,
+                bytes: {
+                    let len = usize::from(cursor.u16()?);
+                    cursor.bytes(len)?.to_vec()
+                },
             }
         }
         _ => return Err(NetworkError::InvalidBftMessage),
@@ -422,7 +489,10 @@ fn encode_prepared_task_control_head(
     expected_plan_digest: [u8; 32],
     out: &mut Vec<u8>,
 ) -> Result<(), NetworkError> {
-    if !matches!(scope, ConsensusScope::PreparedTask(_)) {
+    if !matches!(
+        scope,
+        ConsensusScope::PreparedTask(_) | ConsensusScope::CurrencyAllocation { .. }
+    ) {
         return Err(NetworkError::InvalidBftMessage);
     }
     out.extend_from_slice(&validator_set_version.to_be_bytes());
@@ -436,7 +506,10 @@ fn decode_prepared_task_control_head(
 ) -> Result<(u64, ConsensusScope, [u8; 32]), NetworkError> {
     let validator_set_version = cursor.u64()?;
     let scope = decode_scope(cursor)?;
-    if !matches!(scope, ConsensusScope::PreparedTask(_)) {
+    if !matches!(
+        scope,
+        ConsensusScope::PreparedTask(_) | ConsensusScope::CurrencyAllocation { .. }
+    ) {
         return Err(NetworkError::InvalidBftMessage);
     }
     let expected_plan_digest = cursor.array::<32>()?;
@@ -537,64 +610,16 @@ fn decode_vote(cursor: &mut Cursor<'_>) -> Result<BftVote, NetworkError> {
     ))
 }
 
-fn encode_finality_statement(statement: &FinalityStatement, out: &mut Vec<u8>) {
-    out.extend_from_slice(&statement.protocol_version().to_be_bytes());
-    out.extend_from_slice(&statement.validator_set_version().to_be_bytes());
-    out.extend_from_slice(&statement.subject_digest());
-}
-
-fn decode_finality_statement(cursor: &mut Cursor<'_>) -> Result<FinalityStatement, NetworkError> {
-    Ok(FinalityStatement::new(
-        cursor.u32()?,
-        cursor.u64()?,
-        cursor.array::<32>()?,
-    ))
-}
-
-fn encode_finality_certificate(
-    certificate: &FinalityCertificate,
-    out: &mut Vec<u8>,
-) -> Result<(), NetworkError> {
-    encode_finality_statement(&certificate.statement(), out);
-    let count =
-        u16::try_from(certificate.votes().len()).map_err(|_| NetworkError::InvalidBftMessage)?;
-    out.extend_from_slice(&count.to_be_bytes());
-    for vote in certificate.votes() {
-        encode_finality_vote(vote, out);
-    }
-    Ok(())
-}
-
-fn decode_finality_certificate(
-    cursor: &mut Cursor<'_>,
-) -> Result<FinalityCertificate, NetworkError> {
-    let statement = decode_finality_statement(cursor)?;
-    let count = usize::from(cursor.u16()?);
-    const ENCODED_FINALITY_VOTE_SIZE: usize = 8 + 64;
-    if count > cursor.remaining() / ENCODED_FINALITY_VOTE_SIZE {
-        return Err(NetworkError::InvalidBftMessage);
-    }
-    let mut votes = Vec::with_capacity(count);
-    for _ in 0..count {
-        votes.push(decode_finality_vote(cursor)?);
-    }
-    Ok(FinalityCertificate::from_untrusted_parts(statement, votes))
-}
-
-fn encode_finality_vote(vote: &ValidatorVote, out: &mut Vec<u8>) {
-    out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
-    out.extend_from_slice(&vote.signature_bytes());
-}
-
-fn decode_finality_vote(cursor: &mut Cursor<'_>) -> Result<ValidatorVote, NetworkError> {
-    Ok(ValidatorVote::from_untrusted_parts(
-        ValidatorId::new(cursor.u64()?),
-        cursor.array::<64>()?,
-    ))
-}
-
 fn encode_scope(scope: &ConsensusScope, out: &mut Vec<u8>) -> Result<(), NetworkError> {
     match scope {
+        ConsensusScope::CurrencyAllocation {
+            validator_set_version,
+            start,
+        } => {
+            out.push(5);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            out.extend_from_slice(&start.to_be_bytes());
+        }
         ConsensusScope::PreparedTask(task_id) => {
             let len = u8::try_from(task_id.len()).map_err(|_| NetworkError::InvalidBftMessage)?;
             out.push(1);
@@ -608,12 +633,6 @@ fn encode_scope(scope: &ConsensusScope, out: &mut Vec<u8>) -> Result<(), Network
             out.push(2);
             out.extend_from_slice(&validator_set_version.to_be_bytes());
             out.extend_from_slice(&epoch.to_be_bytes());
-        }
-        ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version,
-        } => {
-            out.push(3);
-            out.extend_from_slice(&current_validator_set_version.to_be_bytes());
         }
         ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version,
@@ -629,6 +648,10 @@ fn encode_scope(scope: &ConsensusScope, out: &mut Vec<u8>) -> Result<(), Network
 
 fn decode_scope(cursor: &mut Cursor<'_>) -> Result<ConsensusScope, NetworkError> {
     match cursor.u8()? {
+        5 => Ok(ConsensusScope::CurrencyAllocation {
+            validator_set_version: cursor.u64()?,
+            start: cursor.u64()?,
+        }),
         1 => {
             let len = usize::from(cursor.u8()?);
             let bytes = cursor.bytes(len)?;
@@ -639,9 +662,6 @@ fn decode_scope(cursor: &mut Cursor<'_>) -> Result<ConsensusScope, NetworkError>
         2 => Ok(ConsensusScope::PublicCheckpoint {
             validator_set_version: cursor.u64()?,
             epoch: cursor.u64()?,
-        }),
-        3 => Ok(ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version: cursor.u64()?,
         }),
         4 => Ok(ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version: cursor.u64()?,

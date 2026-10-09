@@ -54,6 +54,7 @@ fn execute_in_store(
     task: &second::VerifiedLegalTask,
     now: u64,
 ) {
+    support::allocate_task(store, state, task, now, validator_set).unwrap();
     let mut book = second::PreparedTaskBook::new(store.clone()).unwrap();
     assert_eq!(
         book.prepare(state, task, now, validator_set).unwrap(),
@@ -72,7 +73,9 @@ fn execute_in_store(
 
 #[test]
 fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_it() {
-    let base = temp_base("checkpoint-proof");
+    let root = temp_base("checkpoint-proof");
+    assert!(!root.exists());
+    let base = root.join("fresh").join("checkpoint-proof");
     let store = StateStore::new(&base);
     let state = SecondState::genesis([], 10).with_reserve(3).unwrap();
     let set = validators();
@@ -100,6 +103,8 @@ fn snapshot_restores_unverified_public_checkpoint_proof_without_auto_certifying_
     assert_eq!(certified.certificate().vote_count(), 3);
 
     store.remove_files().unwrap();
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -347,7 +352,7 @@ fn newer_snapshot_wins_and_generation_increments() {
     execute_in_store(&store, &mut state, &set, &issue, 1);
 
     let restored = store.load().unwrap().unwrap();
-    assert_eq!(restored.generation, 4);
+    assert_eq!(restored.generation, 5);
     assert_eq!(restored.state.balance(alice), 1);
 
     store.remove_files().unwrap();
@@ -395,6 +400,31 @@ fn corrupted_primary_slot_recovers_the_same_committed_snapshot_from_mirror() {
     let restored = store.load().unwrap().unwrap();
     assert_eq!(restored.generation, 2);
     assert_eq!(restored.public_checkpoint_proof, Some(proof));
+
+    store.remove_files().unwrap();
+}
+
+#[test]
+fn committed_generation_never_falls_back_to_an_older_valid_mirror() {
+    let base = temp_base("no-committed-rollback");
+    let store = StateStore::new(&base);
+    let state = SecondState::genesis([], 1).with_reserve(1).unwrap();
+    let set = validators();
+    let proof = checkpoint_proof(&state, &set, 1);
+
+    assert_eq!(store.initialize(&state, &set).unwrap(), 1);
+    let generation_one = fs::read(store.slot_path_for_generation(1)).unwrap();
+    assert_eq!(store.attach_checkpoint_proof(Some(&proof)).unwrap(), 2);
+
+    let primary = store.slot_path_for_generation(2);
+    let stale_mirror = store.slot_path_for_generation(1);
+    fs::write(&stale_mirror, generation_one).unwrap();
+    fs::write(&primary, b"corrupted committed primary").unwrap();
+
+    assert!(matches!(
+        store.load(),
+        Err(second::PersistenceError::NoValidSnapshot)
+    ));
 
     store.remove_files().unwrap();
 }

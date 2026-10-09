@@ -48,6 +48,10 @@ pub struct ValidatorSigner {
 }
 
 impl ValidatorSigner {
+    pub(crate) fn store(&self) -> &StateStore {
+        &self.store
+    }
+
     pub fn new(validator_id: ValidatorId, signing_key: SigningKey, store: StateStore) -> Self {
         Self {
             validator_id,
@@ -91,6 +95,37 @@ impl ValidatorSigner {
         )
     }
 
+    pub fn sign_currency_allocation(
+        &self,
+        allocation: &crate::CurrencyAllocation,
+        validator_set: &ValidatorSet,
+    ) -> Result<ValidatorVote, ValidatorSigningError> {
+        self.sign_locked(
+            &allocation.finality_statement(),
+            validator_set,
+            allocation.scope(),
+            |snapshot| {
+                if snapshot.state.next_currency_address() != allocation.start() {
+                    return Err(PersistenceError::StaleState);
+                }
+                if snapshot
+                    .state
+                    .protocol
+                    .task_bindings
+                    .get(&allocation.task_id())
+                    .is_some_and(|binding| {
+                        binding.allocation.is_some()
+                            || binding.outcome.is_terminal()
+                            || allocation.task.request_digest().ok() != Some(binding.request_digest)
+                    })
+                {
+                    return Err(PersistenceError::StaleState);
+                }
+                Ok(())
+            },
+        )
+    }
+
     pub fn sign_state_recovery_checkpoint(
         &self,
         checkpoint: &StateRecoveryCheckpoint,
@@ -104,7 +139,7 @@ impl ValidatorSigner {
                 serial: checkpoint.serial(),
             },
             |latest| {
-                if !checkpoint.matches_persisted(latest)? {
+                if !checkpoint.matches_admitted_or_persisted(latest)? {
                     return Err(PersistenceError::RecoveryCheckpointDoesNotMatchState);
                 }
                 Ok(())
@@ -117,18 +152,35 @@ impl ValidatorSigner {
         transition: &ValidatorSetTransition,
         validator_set: &ValidatorSet,
     ) -> Result<ValidatorVote, ValidatorSigningError> {
+        self.validate_consensus_key(validator_set)?;
+        let snapshot = self
+            .store
+            .load()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        if &snapshot.validator_set != validator_set {
+            return Err(PersistenceError::ValidatorRegistryMismatch.into());
+        }
+        if !snapshot.validator_safety_ready {
+            return Err(ValidatorSigningError::LocalSafetyStateUnavailable);
+        }
+        let hydrated = self
+            .store
+            .prepare_validator_set_transition(transition.clone())?;
+        if hydrated.digest() != transition.digest() {
+            return Err(PersistenceError::StalePreparedTasks.into());
+        }
+        // Admission is durable before signing and closes new task preparation.
+        // The vote transaction checks the coverage again under the store lock.
+        let target =
+            crate::runtime_consensus_target::ValidatorConsensusTarget::ValidatorSetTransition(
+                hydrated,
+            );
+        self.store.admit_governance(&target)?;
         self.sign_locked(
             &transition.finality_statement(),
             validator_set,
-            ConsensusScope::ValidatorSetTransition {
-                current_validator_set_version: transition.current_validator_set_version(),
-            },
-            |latest| {
-                latest
-                    .validator_registry
-                    .validate_transition(&latest.validator_set, transition.next_validator_set())
-                    .map_err(|_| PersistenceError::ValidatorRegistryMismatch)
-            },
+            transition.scope(),
+            |latest| crate::persistence::validate_transition_vote(latest, &target),
         )
     }
 
@@ -154,6 +206,14 @@ impl ValidatorSigner {
         validator_set: &ValidatorSet,
     ) -> Result<BftProposal, ValidatorSigningError> {
         self.validate_consensus_key(validator_set)?;
+        if let ConsensusScope::PreparedTask(task_id) = subject.scope()
+            && &self
+                .store
+                .validator_set_for_prepared_task(task_id, subject.digest())?
+                != validator_set
+        {
+            return Err(PersistenceError::ValidatorRegistryMismatch.into());
+        }
         Ok(BftProposal::sign(
             subject,
             round,
@@ -174,7 +234,7 @@ impl ValidatorSigner {
         self.validate_consensus_key(validator_set)?;
         self.validate_bft_scope(&scope, validator_set)?;
 
-        let unlock_round = if let Some(certificate) = unlock_certificate {
+        if let Some(certificate) = unlock_certificate {
             certificate.verify(validator_set)?;
             let statement = certificate.statement();
             if statement.phase() != BftPhase::Prevote
@@ -184,10 +244,7 @@ impl ValidatorSigner {
             {
                 return Err(PersistenceError::BftInvalidUnlockProof.into());
             }
-            Some(statement.round())
-        } else {
-            None
-        };
+        }
 
         self.store.lock_bft_prevote(
             self.validator_id,
@@ -195,7 +252,7 @@ impl ValidatorSigner {
             round,
             value,
             validator_set,
-            unlock_round,
+            unlock_certificate,
         )?;
 
         let statement = BftStatement::new(
@@ -223,7 +280,7 @@ impl ValidatorSigner {
         self.validate_consensus_key(validator_set)?;
         self.validate_bft_scope(&scope, validator_set)?;
 
-        let has_prevote_qc = if let BftValue::Digest(_) = value {
+        if let BftValue::Digest(_) = value {
             let certificate =
                 prevote_certificate.ok_or(PersistenceError::BftPrevoteCertificateRequired)?;
             certificate.verify(validator_set)?;
@@ -235,10 +292,7 @@ impl ValidatorSigner {
             {
                 return Err(PersistenceError::BftPrevoteCertificateRequired.into());
             }
-            true
-        } else {
-            false
-        };
+        }
 
         self.store.lock_bft_precommit(
             self.validator_id,
@@ -246,7 +300,11 @@ impl ValidatorSigner {
             round,
             value,
             validator_set,
-            has_prevote_qc,
+            if matches!(value, BftValue::Digest(_)) {
+                prevote_certificate
+            } else {
+                None
+            },
         )?;
 
         let statement = BftStatement::new(
@@ -280,8 +338,48 @@ impl ValidatorSigner {
         self.sign_locked(
             statement,
             validator_set,
-            ConsensusScope::PreparedTask(task_id),
-            |_| Ok(()),
+            ConsensusScope::PreparedTask(task_id.clone()),
+            |latest| {
+                let prepared = latest
+                    .prepared_tasks
+                    .get(&task_id)
+                    .ok_or(PersistenceError::StalePreparedTasks)?;
+                if !prepared
+                    .candidate(statement.subject_digest())
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?
+                    .is_some_and(|candidate| candidate.commit_authorized)
+                {
+                    return Err(PersistenceError::StalePreparedTasks);
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Requires a precommit QC for Abort in the original PreparedTask scope.
+    pub fn sign_prepared_abort(
+        &self,
+        task_id: TaskId,
+        statement: &FinalityStatement,
+        validators: &ValidatorSet,
+    ) -> Result<ValidatorVote, ValidatorSigningError> {
+        self.sign_locked(
+            statement,
+            validators,
+            ConsensusScope::PreparedTask(task_id.clone()),
+            |latest| {
+                let prepared = latest
+                    .prepared_tasks
+                    .get(&task_id)
+                    .ok_or(PersistenceError::StalePreparedTasks)?;
+                if *statement
+                    != crate::task_abort::statement(&task_id, prepared.request_digest, validators)
+                    || prepared.phase == crate::prepared_plan::PreparedTaskPhase::Finalized
+                {
+                    return Err(PersistenceError::StalePreparedTasks);
+                }
+                Ok(())
+            },
         )
     }
 

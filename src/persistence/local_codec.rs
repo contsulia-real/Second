@@ -6,7 +6,7 @@ use crate::payment::EstablishedTransfer;
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
 use crate::{
     AccountAddress, BftLocalState, BftValue, CurrencyAddress, PaymentAddress, PersistenceError,
-    TaskId, ValidatorId, ValidatorVote,
+    TaskId, ValidatorId,
 };
 
 use super::codec::{Decoder, push_len, push_task_id};
@@ -20,37 +20,7 @@ pub(super) fn encode_local_state(
     vote_locks: &VoteLocks,
     bft_states: &BftStates,
 ) -> Result<(), PersistenceError> {
-    push_len(out, prepared_tasks.len())?;
-    for prepared in prepared_tasks.values() {
-        push_task_id(out, &prepared.task_id);
-        out.extend_from_slice(&prepared.request_digest);
-        let source = encode_legal_task(&prepared.source_task)
-            .map_err(|_| PersistenceError::InvalidSnapshot)?;
-        push_len(out, source.len())?;
-        out.extend_from_slice(&source);
-        out.extend_from_slice(&prepared.validator_set_version.to_be_bytes());
-        out.push(match prepared.phase {
-            PreparedTaskPhase::Prepared => 1,
-            PreparedTaskPhase::Voting => 2,
-            PreparedTaskPhase::Finalized => 3,
-        });
-        match &prepared.finality_votes {
-            Some(votes) => {
-                out.push(1);
-                push_len(out, votes.len())?;
-                for vote in votes {
-                    out.extend_from_slice(&vote.validator_id().value().to_be_bytes());
-                    out.extend_from_slice(&vote.signature_bytes());
-                }
-            }
-            None => out.push(0),
-        }
-
-        push_len(out, prepared.operations.len())?;
-        for operation in &prepared.operations {
-            encode_prepared_operation(out, operation)?;
-        }
-    }
+    encode_prepared_tasks(out, prepared_tasks)?;
 
     push_len(out, vote_locks.len())?;
     for ((validator_id, scope), digest) in vote_locks {
@@ -66,6 +36,18 @@ pub(super) fn encode_local_state(
         out.extend_from_slice(&state.validator_set_version().to_be_bytes());
         out.extend_from_slice(&state.round().to_be_bytes());
         encode_optional_lock(out, state.locked_round(), state.locked_digest());
+        match state.valid_prevote_qc() {
+            Some(certificate) => {
+                out.push(1);
+                let bytes = crate::encode_bft_network_message(
+                    &crate::BftNetworkMessage::QuorumCertificate(certificate.clone()),
+                )
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+                push_len(out, bytes.len())?;
+                out.extend_from_slice(&bytes);
+            }
+            None => out.push(0),
+        }
         encode_optional_bft_value(out, state.prevote());
         encode_optional_bft_value(out, state.precommit());
         encode_optional_lock(
@@ -81,74 +63,7 @@ pub(super) fn encode_local_state(
 pub(super) fn decode_local_state(
     decoder: &mut Decoder<'_>,
 ) -> Result<(BTreeMap<TaskId, PreparedTask>, VoteLocks, BftStates), PersistenceError> {
-    let task_count = decoder.read_len()?;
-    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 1 + 8;
-    if task_count > decoder.remaining() / MIN_PREPARED_TASK_SIZE {
-        return Err(PersistenceError::InvalidSnapshot);
-    }
-
-    let mut prepared_tasks = BTreeMap::new();
-    for _ in 0..task_count {
-        let task_id = decoder.read_task_id()?;
-        let request_digest = decoder.read_array_32()?;
-        let source_len = decoder.read_len()?;
-        let source_task = decode_legal_task(decoder.read_exact(source_len)?)
-            .ok_or(PersistenceError::InvalidSnapshot)?;
-        let validator_set_version = decoder.read_u64()?;
-        let phase = match decoder.read_u8()? {
-            1 => PreparedTaskPhase::Prepared,
-            2 => PreparedTaskPhase::Voting,
-            3 => PreparedTaskPhase::Finalized,
-            _ => return Err(PersistenceError::InvalidSnapshot),
-        };
-        let finality_votes = match decoder.read_u8()? {
-            0 => None,
-            1 => {
-                let vote_count = decoder.read_len()?;
-                const FINALITY_VOTE_SIZE: usize = 8 + 64;
-                if vote_count > decoder.remaining() / FINALITY_VOTE_SIZE {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
-                let mut votes = Vec::with_capacity(vote_count);
-                for _ in 0..vote_count {
-                    votes.push(ValidatorVote::from_untrusted_parts(
-                        ValidatorId::new(decoder.read_u64()?),
-                        decoder.read_array_64()?,
-                    ));
-                }
-                Some(votes)
-            }
-            _ => return Err(PersistenceError::InvalidSnapshot),
-        };
-        let operation_count = decoder.read_len()?;
-        const MIN_PREPARED_OPERATION_SIZE: usize = 1 + 8;
-        if operation_count > decoder.remaining() / MIN_PREPARED_OPERATION_SIZE {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-
-        let mut operations = Vec::with_capacity(operation_count);
-        for _ in 0..operation_count {
-            operations.push(decode_prepared_operation(decoder)?);
-        }
-
-        if prepared_tasks
-            .insert(
-                task_id.clone(),
-                PreparedTask::from_persisted(
-                    task_id,
-                    request_digest,
-                    source_task,
-                    validator_set_version,
-                    phase,
-                    finality_votes,
-                    operations,
-                ),
-            )
-            .is_some()
-        {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
-    }
+    let prepared_tasks = decode_prepared_tasks(decoder)?;
 
     let lock_count = decoder.read_len()?;
     const MIN_VOTE_LOCK_SIZE: usize = 8 + 1 + 1 + 1 + 32;
@@ -182,6 +97,19 @@ pub(super) fn decode_local_state(
         if locked_round.is_some_and(|locked| locked > round) {
             return Err(PersistenceError::InvalidSnapshot);
         }
+        let valid_prevote_qc = match decoder.read_u8()? {
+            0 => None,
+            1 => {
+                let length = decoder.read_len()?;
+                match crate::decode_bft_network_message(decoder.read_exact(length)?)
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?
+                {
+                    crate::BftNetworkMessage::QuorumCertificate(certificate) => Some(certificate),
+                    _ => return Err(PersistenceError::InvalidSnapshot),
+                }
+            }
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
         let prevote = decode_optional_bft_value(decoder)?;
         let precommit = decode_optional_bft_value(decoder)?;
         let (finality_ready_round, finality_ready_digest) = decode_optional_lock(decoder)?;
@@ -194,6 +122,7 @@ pub(super) fn decode_local_state(
             round,
             locked_round,
             locked_digest,
+            valid_prevote_qc,
             prevote,
             precommit,
             finality_ready_round,
@@ -256,6 +185,10 @@ fn encode_prepared_operation(
     operation: &PreparedOperation,
 ) -> Result<(), PersistenceError> {
     match operation {
+        PreparedOperation::RegisterAccount { account } => {
+            out.push(8);
+            out.extend_from_slice(&account.bytes());
+        }
         PreparedOperation::Issue { account, addresses } => {
             out.push(1);
             out.extend_from_slice(&account.bytes());
@@ -313,6 +246,9 @@ fn decode_prepared_operation(
     decoder: &mut Decoder<'_>,
 ) -> Result<PreparedOperation, PersistenceError> {
     match decoder.read_u8()? {
+        8 => Ok(PreparedOperation::RegisterAccount {
+            account: AccountAddress::from_bytes(decoder.read_array_32()?),
+        }),
         1 => Ok(PreparedOperation::Issue {
             account: AccountAddress::from_bytes(decoder.read_array_32()?),
             addresses: decode_addresses(decoder)?,
@@ -388,6 +324,14 @@ fn decode_addresses(decoder: &mut Decoder<'_>) -> Result<Vec<CurrencyAddress>, P
 
 fn encode_scope(out: &mut Vec<u8>, scope: &ConsensusScope) {
     match scope {
+        ConsensusScope::CurrencyAllocation {
+            validator_set_version,
+            start,
+        } => {
+            out.push(5);
+            out.extend_from_slice(&validator_set_version.to_be_bytes());
+            out.extend_from_slice(&start.to_be_bytes());
+        }
         ConsensusScope::PreparedTask(task_id) => {
             out.push(1);
             push_task_id(out, task_id);
@@ -399,12 +343,6 @@ fn encode_scope(out: &mut Vec<u8>, scope: &ConsensusScope) {
             out.push(2);
             out.extend_from_slice(&validator_set_version.to_be_bytes());
             out.extend_from_slice(&epoch.to_be_bytes());
-        }
-        ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version,
-        } => {
-            out.push(3);
-            out.extend_from_slice(&current_validator_set_version.to_be_bytes());
         }
         ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version,
@@ -419,13 +357,14 @@ fn encode_scope(out: &mut Vec<u8>, scope: &ConsensusScope) {
 
 fn decode_scope(decoder: &mut Decoder<'_>) -> Result<ConsensusScope, PersistenceError> {
     match decoder.read_u8()? {
+        5 => Ok(ConsensusScope::CurrencyAllocation {
+            validator_set_version: decoder.read_u64()?,
+            start: decoder.read_u64()?,
+        }),
         1 => Ok(ConsensusScope::PreparedTask(decoder.read_task_id()?)),
         2 => Ok(ConsensusScope::PublicCheckpoint {
             validator_set_version: decoder.read_u64()?,
             epoch: decoder.read_u64()?,
-        }),
-        3 => Ok(ConsensusScope::ValidatorSetTransition {
-            current_validator_set_version: decoder.read_u64()?,
         }),
         4 => Ok(ConsensusScope::StateRecoveryCheckpoint {
             validator_set_version: decoder.read_u64()?,
@@ -433,4 +372,170 @@ fn decode_scope(decoder: &mut Decoder<'_>) -> Result<ConsensusScope, Persistence
         }),
         _ => Err(PersistenceError::InvalidSnapshot),
     }
+}
+
+pub(super) fn encode_prepared_tasks(
+    out: &mut Vec<u8>,
+    prepared_tasks: &BTreeMap<TaskId, PreparedTask>,
+) -> Result<(), PersistenceError> {
+    push_len(out, prepared_tasks.len())?;
+    for prepared in prepared_tasks.values() {
+        encode_prepared_task(out, prepared)?;
+    }
+
+    Ok(())
+}
+
+pub(super) fn decode_prepared_tasks(
+    decoder: &mut Decoder<'_>,
+) -> Result<BTreeMap<TaskId, PreparedTask>, PersistenceError> {
+    let task_count = decoder.read_len()?;
+    const MIN_PREPARED_TASK_SIZE: usize = 1 + 1 + 32 + 8 + 1 + 8;
+    if task_count > decoder.remaining() / MIN_PREPARED_TASK_SIZE {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+
+    let mut prepared_tasks = BTreeMap::new();
+    for _ in 0..task_count {
+        let task_id = decoder.read_task_id()?;
+        let request_digest = decoder.read_array_32()?;
+        let source_len = decoder.read_len()?;
+        let source_task = decode_legal_task(decoder.read_exact(source_len)?)
+            .ok_or(PersistenceError::InvalidSnapshot)?;
+        let validator_set_version = decoder.read_u64()?;
+        let phase = match decoder.read_u8()? {
+            1 => PreparedTaskPhase::Prepared,
+            2 => PreparedTaskPhase::Voting,
+            3 => PreparedTaskPhase::Finalized,
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
+        let (commit_authorized, conflict_abort) = match decoder.read_u8()? {
+            0 => (true, false),
+            1 => (true, true),
+            2 => (false, false),
+            3 => (false, true),
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
+        let finality_votes = match decoder.read_u8()? {
+            0 => None,
+            1 => {
+                let vote_count = decoder.read_len()?;
+                const FINALITY_VOTE_SIZE: usize = 8 + 64;
+                if vote_count > decoder.remaining() / FINALITY_VOTE_SIZE {
+                    return Err(PersistenceError::InvalidSnapshot);
+                }
+                let mut votes = Vec::with_capacity(vote_count);
+                for _ in 0..vote_count {
+                    votes.push(
+                        crate::finality_codec::decode_validator_vote(
+                            decoder
+                                .read_exact(crate::finality_codec::ENCODED_VALIDATOR_VOTE_SIZE)?,
+                        )
+                        .ok_or(PersistenceError::InvalidSnapshot)?,
+                    );
+                }
+                Some(votes)
+            }
+            _ => return Err(PersistenceError::InvalidSnapshot),
+        };
+        let operation_count = decoder.read_len()?;
+        const MIN_PREPARED_OPERATION_SIZE: usize = 1 + 8;
+        if operation_count > decoder.remaining() / MIN_PREPARED_OPERATION_SIZE {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+
+        let mut operations = Vec::with_capacity(operation_count);
+        for _ in 0..operation_count {
+            operations.push(decode_prepared_operation(decoder)?);
+        }
+
+        let mut prepared = PreparedTask::from_persisted(
+            task_id.clone(),
+            request_digest,
+            source_task,
+            validator_set_version,
+            phase,
+            finality_votes,
+            operations,
+        );
+        prepared.commit_authorized = commit_authorized;
+        prepared.conflict_abort = conflict_abort;
+        let variant_count = decoder.read_len()?;
+        // Every variant contains rights and an operation-count field. Bound
+        // allocation by available bytes before decoding the actual operations.
+        if variant_count > decoder.remaining() / 9 {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+        for _ in 0..variant_count {
+            let commit_authorized = match decoder.read_u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(PersistenceError::InvalidSnapshot),
+            };
+            let operation_count = decoder.read_len()?;
+            if operation_count != prepared.operations.len()
+                || operation_count > decoder.remaining() / MIN_PREPARED_OPERATION_SIZE
+            {
+                return Err(PersistenceError::InvalidSnapshot);
+            }
+            let mut operations = Vec::with_capacity(operation_count);
+            for _ in 0..operation_count {
+                operations.push(decode_prepared_operation(decoder)?);
+            }
+            prepared
+                .variants
+                .push(crate::prepared_plan::PreparedVariant {
+                    operations,
+                    commit_authorized,
+                });
+        }
+        if prepared_tasks.insert(task_id.clone(), prepared).is_some() {
+            return Err(PersistenceError::InvalidSnapshot);
+        }
+    }
+
+    Ok(prepared_tasks)
+}
+
+pub(super) fn encode_prepared_task(
+    out: &mut Vec<u8>,
+    prepared: &PreparedTask,
+) -> Result<(), PersistenceError> {
+    push_task_id(out, &prepared.task_id);
+    out.extend_from_slice(&prepared.request_digest);
+    let source =
+        encode_legal_task(&prepared.source_task).map_err(|_| PersistenceError::InvalidSnapshot)?;
+    push_len(out, source.len())?;
+    out.extend_from_slice(&source);
+    out.extend_from_slice(&prepared.validator_set_version.to_be_bytes());
+    out.push(match prepared.phase {
+        PreparedTaskPhase::Prepared => 1,
+        PreparedTaskPhase::Voting => 2,
+        PreparedTaskPhase::Finalized => 3,
+    });
+    out.push(u8::from(prepared.conflict_abort) | (u8::from(!prepared.commit_authorized) << 1));
+    match &prepared.finality_votes {
+        Some(votes) => {
+            out.push(1);
+            push_len(out, votes.len())?;
+            for vote in votes {
+                crate::finality_codec::encode_validator_vote(out, vote);
+            }
+        }
+        None => out.push(0),
+    }
+
+    push_len(out, prepared.operations.len())?;
+    for operation in &prepared.operations {
+        encode_prepared_operation(out, operation)?;
+    }
+    push_len(out, prepared.variants.len())?;
+    for variant in &prepared.variants {
+        out.push(u8::from(variant.commit_authorized));
+        push_len(out, variant.operations.len())?;
+        for operation in &variant.operations {
+            encode_prepared_operation(out, operation)?;
+        }
+    }
+    Ok(())
 }

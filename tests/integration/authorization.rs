@@ -95,6 +95,7 @@ fn verified_task_request_digest_binds_the_full_signed_request() {
     hasher.update(b"SECOND_SIGNED_LEGAL_TASK_V1\0");
     hasher.update(signed.authorizer_public_key());
     hasher.update(signed.signature_bytes());
+    hasher.update(0_u32.to_be_bytes()); // account signature vector length
     hasher.update(signed.canonical_signing_bytes().unwrap());
     let expected: [u8; 32] = hasher.finalize().into();
 

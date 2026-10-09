@@ -144,7 +144,29 @@ impl SecondState {
         destination: PaymentAddress,
         amount: u64,
     ) -> Result<EstablishedTransfer, ExecutionError> {
-        if let Some(existing) = self.prerequisite.payment_executions.get(&claim_id) {
+        let mut prerequisite = std::mem::take(&mut self.prerequisite);
+        let result = self.establish_transfer_in_prerequisite(
+            working,
+            &mut prerequisite,
+            claim_id,
+            source,
+            destination,
+            amount,
+        );
+        self.prerequisite = prerequisite;
+        result
+    }
+
+    pub(crate) fn establish_transfer_in_prerequisite(
+        &self,
+        working: &BusinessState,
+        prerequisite: &mut PrerequisiteState,
+        claim_id: OperationClaimId,
+        source: PaymentAddress,
+        destination: PaymentAddress,
+        amount: u64,
+    ) -> Result<EstablishedTransfer, ExecutionError> {
+        if let Some(existing) = prerequisite.payment_executions.get(&claim_id) {
             if !existing.matches(source, destination, amount) {
                 return Err(ExecutionError::InFlightTransferMismatch(claim_id));
             }
@@ -164,7 +186,7 @@ impl SecondState {
         let destination_account =
             self.require_payment_address_available_for_establishment(working, destination)?;
 
-        self.prerequisite.payment_executions.insert(
+        prerequisite.payment_executions.insert(
             claim_id,
             PaymentExecution {
                 source,
@@ -180,6 +202,28 @@ impl SecondState {
             destination_account,
             amount,
         })
+    }
+
+    /// Restore only the exact established execution in a verified terminal plan.
+    /// Retirement may have started since establishment; owner changes and fully
+    /// retired addresses still fail through the ordinary execution validator.
+    pub(crate) fn restore_certified_transfer_in_prerequisite(
+        &self,
+        working: &BusinessState,
+        prerequisite: &mut PrerequisiteState,
+        claim_id: OperationClaimId,
+        transfer: EstablishedTransfer,
+    ) -> Result<(), ExecutionError> {
+        self.validate_established_transfer_for_execution(working, transfer)?;
+        prerequisite.payment_executions.insert(
+            claim_id,
+            PaymentExecution {
+                source: transfer.source,
+                destination: transfer.destination,
+                amount: transfer.amount,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn apply_established_transfer(
@@ -206,6 +250,13 @@ impl SecondState {
             transfer.destination_account,
             currencies,
         )?;
+        // Keep the minimal settled payment for account history, outside active duties.
+        if working.payment_history.contains_key(&claim_id) {
+            return Err(ExecutionError::InFlightTransferMismatch(claim_id));
+        }
+        working
+            .payment_history
+            .insert(claim_id.clone(), execution.clone());
         prerequisite.payment_executions.remove(&claim_id);
         Ok(())
     }

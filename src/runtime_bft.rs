@@ -1,32 +1,40 @@
+#[cfg(test)]
+mod backpressure_tests;
+mod checkpoint_sync;
 mod config;
+mod connectivity;
 mod keys;
+mod membership_sync;
+mod source_sync;
 mod task_sync;
 #[cfg(test)]
 mod tests;
 
 pub use config::ValidatorRuntimeConfig;
 pub use keys::ValidatorRuntimeKeys;
+pub(crate) use membership_sync::load_transition_proof;
 
 use task_sync::PreparedTaskSyncState;
-pub(crate) use task_sync::{PreparedTaskChunk, PreparedTaskChunkResult};
+pub(crate) use task_sync::{
+    PreparedTaskChunk, PreparedTaskChunkResult, superseded_allocation_scope,
+};
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::mpsc;
 
 use crate::network::{
-    MAX_CONCURRENT_ONE_WAY_STREAMS, MAX_PEER_RECORDS, NetworkError, NodeId, PeerRecord, QuicClient,
-    QuicRequestStream, QuicTransportIdentity, SharedValidatorBftAuthority, ValidatorBftAuthority,
-    ValidatorBftPeer, authenticate_validator_bft_peer_with_authority, outbound_bind_address,
-    serve_validator_bft_connection_from_request,
+    MAX_CONCURRENT_ONE_WAY_STREAMS, NetworkError, NodeId, PeerRecord, QuicClient,
+    QuicRequestStream, QuicServer, QuicTransportIdentity, SharedValidatorBftAuthority,
+    ValidatorBftAuthority, ValidatorBftPeer, authenticate_validator_bft_peer_with_authority,
+    outbound_bind_address, serve_validator_bft_connection_from_request,
 };
-use crate::runtime::{ActiveConnectionPermit, MAX_ACTIVE_CONNECTIONS};
+use crate::runtime::ActiveConnectionPermit;
 use crate::runtime_bft_consensus::{MAX_BFT_RUNTIME_INBOUND_QUEUE, ValidatorConsensusRuntime};
 use crate::{
-    BftNetworkMessage, NodeRuntime, NodeRuntimeError, PersistenceError, StateStore, ValidatorId,
-    ValidatorSet, ValidatorSigner,
+    BftNetworkMessage, PersistenceError, StateStore, ValidatorId, ValidatorSet, ValidatorSigner,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,87 +105,28 @@ struct ManagedValidatorBftPeer {
     _permit: ActiveConnectionPermit,
 }
 
-impl NodeRuntime {
-    pub fn validator_id(&self) -> Option<ValidatorId> {
-        self.validator_bft
-            .as_ref()
-            .map(ValidatorBftRuntime::validator_id)
-    }
-
-    pub fn connected_validator_ids(&self) -> Vec<ValidatorId> {
-        self.validator_bft
-            .as_ref()
-            .map(ValidatorBftRuntime::connected_validator_ids)
-            .unwrap_or_default()
-    }
-
-    pub(crate) async fn dial_validator_bft(
-        &self,
-        record: &PeerRecord,
-    ) -> Result<ValidatorId, NodeRuntimeError> {
-        let runtime = self
-            .validator_bft
-            .as_ref()
-            .ok_or(NodeRuntimeError::ValidatorBftNotConfigured)?;
-        runtime.refresh_authority()?;
-        let permit = ActiveConnectionPermit::try_acquire(&self.active_connections).ok_or(
-            NodeRuntimeError::ConnectionCapacityReached {
-                maximum: MAX_ACTIVE_CONNECTIONS,
-            },
-        )?;
-        Ok(runtime
-            .dial(record, self.transport_identity.clone(), permit)
-            .await?)
-    }
-
-    pub(crate) async fn maintain_validator_bft_peers(
-        &self,
-        bootstrap_records: &[PeerRecord],
-    ) -> Result<(), NodeRuntimeError> {
-        let Some(runtime) = self.validator_bft.as_ref() else {
-            return Ok(());
+impl ManagedValidatorBftPeer {
+    fn enqueue(&self, message: &BftNetworkMessage) -> Result<(), NetworkError> {
+        let sender = if matches!(
+            message,
+            BftNetworkMessage::FinalityVote { .. } | BftNetworkMessage::FinalityCertificate { .. }
+        ) {
+            &self.finality_sender
+        } else {
+            &self.sender
         };
-        runtime.refresh_authority()?;
-        let target = runtime
-            .validator_ids()
-            .into_iter()
-            .filter(|validator_id| *validator_id != runtime.validator_id())
-            .count();
-        if runtime.connected_validator_ids().len() >= target {
-            return Ok(());
-        }
-
-        let connected_nodes = runtime.connected_node_ids();
-        let rejected_nodes = runtime.rejected_node_ids();
-        let mut seen = HashSet::new();
-        let mut candidates = self.peer_store.recent(MAX_PEER_RECORDS, &[self.node_id()]);
-        candidates.extend(
-            bootstrap_records
-                .iter()
-                .filter(|record| record.node_id() != self.node_id())
-                .cloned(),
-        );
-
-        for record in candidates {
-            if runtime.connected_validator_ids().len() >= target {
-                break;
-            }
-            if !seen.insert(record.node_id())
-                || connected_nodes.contains(&record.node_id())
-                || rejected_nodes.contains(&record.node_id())
-            {
-                continue;
-            }
-
-            match self.dial_validator_bft(&record).await {
-                Ok(_) => {}
-                Err(NodeRuntimeError::ValidatorBft(ValidatorBftRuntimeError::Network(
-                    NetworkError::BftUnauthorized,
-                ))) => runtime.reject_node(record.node_id()),
-                Err(_) => {}
+        match sender.try_send(message.clone()) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(NetworkError::Transport(
+                "validator BFT send queue is full".to_owned(),
+            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.alive.store(false, Ordering::Release);
+                Err(NetworkError::Transport(
+                    "validator BFT send worker is closed".to_owned(),
+                ))
             }
         }
-        Ok(())
     }
 }
 
@@ -264,20 +213,6 @@ impl ValidatorBftRuntime {
             .collect()
     }
 
-    pub(crate) fn has_all_active_validator_peers(&self) -> bool {
-        let validator_set = self.validator_set();
-        let expected = validator_set
-            .credentials()
-            .map(|credential| credential.id())
-            .filter(|validator_id| *validator_id != self.validator_id())
-            .collect::<BTreeSet<_>>();
-        let connected = self
-            .connected_validator_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        expected.is_subset(&connected)
-    }
-
     pub(crate) fn validator_set(&self) -> ValidatorSet {
         self.inner
             .authority
@@ -297,12 +232,36 @@ impl ValidatorBftRuntime {
         let persisted = self
             .inner
             .store
-            .load()?
+            .load_shared()?
             .ok_or(PersistenceError::MissingSnapshot)?;
-        let authority = ValidatorBftAuthority::new_with_completed(
-            persisted.validator_set,
-            persisted.retained_validator_sets.into_values(),
-            self.inner.consensus.completed_relay_authorities(),
+        let mut terminal_scopes = self
+            .inner
+            .consensus
+            .completed_relay_authorities()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        if let Some(handoff) = &persisted.state.protocol.task_handoff {
+            for plan in handoff.plans.values() {
+                let origin = crate::persistence::resolve_validator_set(
+                    &persisted.validator_set,
+                    &persisted.retained_validator_sets,
+                    plan.validator_set_version,
+                )
+                .ok_or(PersistenceError::InvalidSnapshot)?;
+                let scope = crate::ConsensusScope::PreparedTask(plan.task_id.clone());
+                if let Some(existing) = terminal_scopes.get(&scope) {
+                    if existing != origin {
+                        return Err(NetworkError::BftUnauthorized.into());
+                    }
+                } else {
+                    terminal_scopes.insert(scope, origin.clone());
+                }
+            }
+        }
+        let authority = ValidatorBftAuthority::new_with_terminal_scopes(
+            persisted.validator_set.clone(),
+            persisted.retained_validator_sets.values().cloned(),
+            terminal_scopes,
         )?;
 
         if let Some(identity_public_key) = authority.identity_public_key(self.validator_id())
@@ -361,56 +320,98 @@ impl ValidatorBftRuntime {
         Ok(())
     }
 
+    pub(crate) async fn refresh_authority_for_network(
+        &self,
+    ) -> Result<(), ValidatorBftRuntimeError> {
+        let refresh = self.clone();
+        tokio::task::spawn_blocking(move || refresh.refresh_authority())
+            .await
+            .map_err(|error| {
+                NetworkError::Transport(format!("BFT authority worker failed: {error}"))
+            })?
+    }
+
     pub(crate) async fn serve_inbound(
         &self,
         peer: &crate::network::QuicPeer,
         first_request: QuicRequestStream,
     ) -> Result<ValidatorId, ValidatorBftRuntimeError> {
-        self.refresh_authority()?;
+        self.refresh_authority_for_network().await?;
         let inbound = Arc::clone(&self.inner);
-        Ok(serve_validator_bft_connection_from_request(
+        let started = std::time::Instant::now();
+        let result = serve_validator_bft_connection_from_request(
             peer,
             first_request,
             self.inner.keys.validator_id(),
             self.inner.keys.identity_key(),
             &self.inner.authority,
             move |validator_id, message| {
-                let envelope = InboundBftMessage {
-                    validator_id,
-                    message,
-                };
-                match inbound.inbound_sender.try_send(envelope) {
-                    Ok(()) => {
-                        inbound.consensus.wake();
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => Err(NetworkError::Transport(
-                        "validator BFT inbound queue is full".to_owned(),
-                    )),
-                    Err(mpsc::error::TrySendError::Closed(_)) => Err(NetworkError::Transport(
-                        "validator BFT inbound queue is closed".to_owned(),
-                    )),
+                let inbound = Arc::clone(&inbound);
+                async move {
+                    inbound
+                        .inbound_sender
+                        .send(InboundBftMessage {
+                            validator_id,
+                            message,
+                        })
+                        .await
+                        .map_err(|_| {
+                            NetworkError::Transport(
+                                "validator BFT inbound queue is closed".to_owned(),
+                            )
+                        })?;
+                    inbound.consensus.wake();
+                    Ok(())
                 }
             },
         )
-        .await?)
+        .await
+        .map_err(ValidatorBftRuntimeError::Network);
+        if let Err(error) = &result {
+            self.consensus().record_connection_failure(
+                peer.remote_node_id(),
+                peer.remote_address(),
+                started.elapsed(),
+                error.clone(),
+            );
+        }
+        result
     }
 
     pub(crate) async fn dial(
         &self,
         record: &PeerRecord,
         transport_identity: QuicTransportIdentity,
+        server: QuicServer,
         permit: ActiveConnectionPermit,
+        peer_store: crate::network::PeerStore,
     ) -> Result<ValidatorId, ValidatorBftRuntimeError> {
-        let client = QuicClient::new(
-            outbound_bind_address(record.address()),
-            record.certificate_der(),
-            transport_identity,
-        )?;
+        let (client, permit) =
+            match server.shared_client(record.address(), record.certificate_der())? {
+                Some(client) => (Ok(client), permit),
+                None => {
+                    let dial_record = record.clone();
+                    tokio::task::spawn_blocking(move || {
+                        (
+                            QuicClient::new(
+                                outbound_bind_address(dial_record.address()),
+                                dial_record.certificate_der(),
+                                transport_identity,
+                            ),
+                            permit,
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        NetworkError::Transport(format!("validator dial worker failed: {error}"))
+                    })?
+                }
+            };
+        let client = client?;
         let peer = client
             .connect_expected(record.address(), record.node_id())
             .await?;
-        let peer = authenticate_validator_bft_peer_with_authority(
+        let mut peer = authenticate_validator_bft_peer_with_authority(
             peer,
             self.inner.keys.validator_id(),
             self.inner.keys.identity_key(),
@@ -418,6 +419,7 @@ impl ValidatorBftRuntime {
         )
         .await?;
         let remote_validator_id = peer.remote_validator_id();
+        let remote_validator_set_version = peer.remote_validator_set_version();
         if remote_validator_id == self.inner.keys.validator_id() {
             peer.close();
             return Err(ValidatorBftRuntimeError::SelfValidatorPeer(
@@ -425,33 +427,71 @@ impl ValidatorBftRuntime {
             ));
         }
 
+        if remote_validator_set_version > self.validator_set().version() {
+            // Release the BFT connection before borrowing its slot for public evidence.
+            peer.close();
+            self.sync_durable_membership(&client, record, remote_validator_set_version)
+                .await?;
+            peer = authenticate_validator_bft_peer_with_authority(
+                client
+                    .connect_expected(record.address(), record.node_id())
+                    .await?,
+                self.inner.keys.validator_id(),
+                self.inner.keys.identity_key(),
+                &self.inner.authority,
+            )
+            .await?;
+            if peer.remote_validator_id() != remote_validator_id {
+                peer.close();
+                return Err(ValidatorBftRuntimeError::Network(
+                    NetworkError::InvalidValidatorTransitionProof,
+                ));
+            }
+        }
+
+        // Publish connectivity only after its authenticated endpoint is durable.
+        // Cancellation before publication can leave a candidate, never a live
+        // connection whose only recovery endpoint was lost with a dial batch.
+        let cached_record = record.clone();
+        let (cached, permit) = tokio::task::spawn_blocking(move || {
+            let result =
+                peer_store.record_validator_authenticated(&cached_record, remote_validator_id);
+            (result, permit)
+        })
+        .await
+        .map_err(|error| {
+            NetworkError::Transport(format!("validator peer cache worker failed: {error}"))
+        })?;
+        cached?;
+
         let (sender, receiver) = mpsc::channel(VALIDATOR_BFT_SEND_QUEUE_CAPACITY);
         let (finality_sender, finality_receiver) =
             mpsc::channel(VALIDATOR_FINALITY_SEND_QUEUE_CAPACITY);
         let alive = Arc::new(AtomicBool::new(true));
 
-        let mut outbound = self
-            .inner
-            .outbound
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        prune_dead_outbound(&mut outbound);
-        if outbound.contains_key(&remote_validator_id) {
-            peer.close();
-            return Ok(remote_validator_id);
+        {
+            let mut outbound = self
+                .inner
+                .outbound
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            prune_dead_outbound(&mut outbound);
+            if outbound.contains_key(&remote_validator_id) {
+                peer.close();
+                return Ok(remote_validator_id);
+            }
+            outbound.insert(
+                remote_validator_id,
+                ManagedValidatorBftPeer {
+                    peer: peer.clone(),
+                    sender,
+                    finality_sender,
+                    alive: Arc::clone(&alive),
+                    _client: client,
+                    _permit: permit,
+                },
+            );
         }
-        outbound.insert(
-            remote_validator_id,
-            ManagedValidatorBftPeer {
-                peer: peer.clone(),
-                sender,
-                finality_sender,
-                alive: Arc::clone(&alive),
-                _client: client,
-                _permit: permit,
-            },
-        );
-        drop(outbound);
 
         tokio::spawn(run_validator_bft_sender(
             peer,
@@ -461,6 +501,7 @@ impl ValidatorBftRuntime {
             alive,
             Arc::downgrade(&self.inner),
         ));
+        self.sync_checkpoints(remote_validator_id).await?;
         self.inner.consensus.wake();
         Ok(remote_validator_id)
     }
@@ -514,8 +555,14 @@ impl ValidatorBftRuntime {
             .inbound_receiver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut inbound = Vec::new();
-        while let Ok(message) = receiver.try_recv() {
+        // Bound this drive to the messages already queued. Concurrent producers
+        // must not turn a bounded channel into an unbounded consensus batch.
+        let count = receiver.len();
+        let mut inbound = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Ok(message) = receiver.try_recv() else {
+                break;
+            };
             inbound.push(message);
         }
         inbound
@@ -532,29 +579,17 @@ impl ValidatorBftRuntime {
         let mut failures = Vec::new();
         let mut failed_ids = Vec::new();
         for (validator_id, managed) in outbound.iter() {
-            if !managed.peer.accepts_recipient(message) {
+            if !managed.peer.can_send(message) {
                 continue;
             }
-            let sender = if matches!(
-                message,
-                BftNetworkMessage::FinalityVote { .. }
-                    | BftNetworkMessage::FinalityCertificate { .. }
-            ) {
-                &managed.finality_sender
-            } else {
-                &managed.sender
-            };
-            if let Err(error) = sender.try_send(message.clone()) {
-                managed.alive.store(false, Ordering::Release);
-                let detail = match error {
-                    mpsc::error::TrySendError::Full(_) => "validator BFT send queue is full",
-                    mpsc::error::TrySendError::Closed(_) => "validator BFT send worker is closed",
-                };
+            if let Err(error) = managed.enqueue(message) {
                 failures.push(ValidatorBftSendFailure {
                     validator_id: *validator_id,
-                    error: NetworkError::Transport(detail.to_owned()),
+                    error,
                 });
-                failed_ids.push(*validator_id);
+                if !managed.alive.load(Ordering::Acquire) {
+                    failed_ids.push(*validator_id);
+                }
             }
         }
         for validator_id in failed_ids {
@@ -633,7 +668,9 @@ async fn run_validator_bft_sender(
                     None => None,
                 };
                 if let Some((scope, error)) = failure {
-                    alive.store(false, Ordering::Release);
+                    // send() rejects locally before writing when authority
+                    // changed after enqueue. This is not a broken transport.
+                    let locally_rejected = error == NetworkError::BftUnauthorized;
                     if let (Some(runtime), Some(scope)) = (runtime.upgrade(), scope) {
                         runtime.consensus.record_send_failures(
                             scope,
@@ -644,6 +681,10 @@ async fn run_validator_bft_sender(
                         );
                         runtime.consensus.wake();
                     }
+                    if locally_rejected {
+                        continue;
+                    }
+                    alive.store(false, Ordering::Release);
                     peer.close();
                     return;
                 }

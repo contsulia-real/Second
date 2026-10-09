@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::currency::Currency;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::{
-    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, NetworkError, OperationClaimId,
-    PaymentAddress, PublicCurrencyPage, PublicCurrencyState, TaskId, VerifiedLegalTask,
+    AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, FinalityStatement, NetworkError,
+    OperationClaimId, PaymentAddress, PublicCurrencyPage, PublicCurrencyState, TaskId,
+    VerifiedLegalTask,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,15 +15,34 @@ pub enum ExecutionOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TaskOutcome {
+    Pending,
+    Succeeded,
+    Cancelled(FinalityStatement),
+}
+
+impl TaskOutcome {
+    pub(crate) fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskBinding {
     pub(crate) request_digest: [u8; 32],
-    pub(crate) succeeded: bool,
+    pub(crate) outcome: TaskOutcome,
+    pub(crate) allocation: Option<(u64, u64)>,
+    // Original signed request awaiting allocation/preparation, including retry
+    // after a quorum-certified committee cut retires unprotected local rights.
+    pub(crate) allocation_task: Option<crate::LegalTask>,
+    pub(crate) allocation_certificate: Option<crate::FinalityCertificate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProtocolState {
     pub(crate) next_currency_address: u64,
     pub(crate) task_bindings: BTreeMap<TaskId, TaskBinding>,
+    pub(crate) task_handoff: Option<std::sync::Arc<crate::persistence::TaskHandoff>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -35,6 +55,7 @@ pub(crate) struct BusinessState {
     pub(crate) accounts: BTreeSet<AccountAddress>,
     pub(crate) payment_addresses: BTreeMap<PaymentAddress, PaymentAddressRecord>,
     pub(crate) currencies: BTreeMap<CurrencyAddress, Currency>,
+    pub(crate) payment_history: BTreeMap<OperationClaimId, PaymentExecution>,
 }
 
 #[derive(Clone)]
@@ -59,12 +80,14 @@ impl SecondState {
             protocol: ProtocolState {
                 next_currency_address: first_currency_address,
                 task_bindings: BTreeMap::new(),
+                task_handoff: None,
             },
             prerequisite: PrerequisiteState::default(),
             business: BusinessState {
                 accounts: accounts.into_iter().collect(),
                 payment_addresses: BTreeMap::new(),
                 currencies: BTreeMap::new(),
+                payment_history: BTreeMap::new(),
             },
         }
     }
@@ -162,13 +185,20 @@ impl SecondState {
             Some(binding) if binding.request_digest != request_digest => {
                 Err(ExecutionError::TaskIdAlreadyBound)
             }
-            Some(binding) => Ok(binding.succeeded),
+            Some(binding) => match binding.outcome {
+                TaskOutcome::Pending => Ok(false),
+                TaskOutcome::Succeeded => Ok(true),
+                TaskOutcome::Cancelled(_) => Err(ExecutionError::TaskCancelled),
+            },
             None => {
                 self.protocol.task_bindings.insert(
                     task_id,
                     TaskBinding {
                         request_digest,
-                        succeeded: false,
+                        outcome: TaskOutcome::Pending,
+                        allocation: None,
+                        allocation_task: None,
+                        allocation_certificate: None,
                     },
                 );
                 Ok(false)
@@ -178,7 +208,9 @@ impl SecondState {
 
     pub(crate) fn mark_task_succeeded(&mut self, task_id: TaskId) {
         if let Some(binding) = self.protocol.task_bindings.get_mut(&task_id) {
-            binding.succeeded = true;
+            binding.outcome = TaskOutcome::Succeeded;
+            binding.allocation_certificate = None;
+            binding.allocation_task = None;
         }
     }
 
@@ -188,11 +220,18 @@ impl SecondState {
             .get(&task_id)
             .map(|binding| binding.request_digest)
     }
+    pub fn task_cancelled(&self, task_id: TaskId) -> bool {
+        self.protocol
+            .task_bindings
+            .get(&task_id)
+            .is_some_and(|binding| matches!(binding.outcome, TaskOutcome::Cancelled(_)))
+    }
+
     pub fn task_succeeded(&self, task_id: TaskId) -> Option<bool> {
         self.protocol
             .task_bindings
             .get(&task_id)
-            .map(|binding| binding.succeeded)
+            .map(|binding| matches!(binding.outcome, TaskOutcome::Succeeded))
     }
 
     pub(crate) fn allocate_currency_range(
@@ -207,15 +246,51 @@ impl SecondState {
         let end_exclusive = start
             .checked_add(count)
             .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
+        let addresses = Self::materialize_addresses(start, count)?;
+        self.protocol.next_currency_address = end_exclusive;
+        Ok(addresses)
+    }
+
+    pub(crate) fn materialize_addresses(
+        start: u64,
+        count: u64,
+    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
+        let end_exclusive = start
+            .checked_add(count)
+            .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
+        let mut addresses = Self::reserve_address_buffer(count)?;
+        addresses.extend((start..end_exclusive).map(CurrencyAddress::new));
+        Ok(addresses)
+    }
+
+    pub(crate) fn reserve_address_buffer(
+        count: u64,
+    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
         let capacity = usize::try_from(count)
             .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
         let mut addresses = Vec::new();
         addresses
             .try_reserve_exact(capacity)
             .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
-        addresses.extend((start..end_exclusive).map(CurrencyAddress::new));
-
-        self.protocol.next_currency_address = end_exclusive;
         Ok(addresses)
+    }
+
+    pub(crate) fn allocated_task_addresses(
+        &self,
+        task: &VerifiedLegalTask,
+        offset: u64,
+        count: u64,
+    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
+        let (start, total) = self
+            .protocol
+            .task_bindings
+            .get(&task.task_id())
+            .filter(|binding| binding.request_digest == task.request_digest())
+            .and_then(|binding| binding.allocation)
+            .ok_or(ExecutionError::CurrencyAllocationRequired)?;
+        if offset.checked_add(count).is_none_or(|end| end > total) {
+            return Err(ExecutionError::CurrencyAllocationRequired);
+        }
+        Self::materialize_addresses(start + offset, count)
     }
 }

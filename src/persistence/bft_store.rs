@@ -14,18 +14,65 @@ use super::store::StateStore;
 use super::store_recovery::next_recovery_checkpoint_serial;
 
 impl StateStore {
+    /// Called only with a QC verified against the driver's exact set.
+    /// Snapshot loading still verifies persisted proofs independently.
+    pub(crate) fn remember_verified_bft_prevote_qc(
+        &self,
+        validator_id: ValidatorId,
+        certificate: &BftQuorumCertificate,
+        validator_set: &ValidatorSet,
+    ) -> Result<(), PersistenceError> {
+        let statement = certificate.statement();
+        if statement.phase() != BftPhase::Prevote
+            || !matches!(statement.value(), BftValue::Digest(_))
+        {
+            return Err(PersistenceError::BftInvalidUnlockProof);
+        }
+        let _guard = self.lock()?;
+        let mut latest = self
+            .load_unlocked()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        validate_vote_validator_set(&latest, statement.scope(), validator_set)?;
+        if !validator_set.contains(validator_id) {
+            return Err(PersistenceError::Bft(BftError::UnknownValidator(
+                validator_id,
+            )));
+        }
+        let state = latest
+            .bft_local_states
+            .get_mut(&(validator_id, statement.scope().clone()))
+            .ok_or(PersistenceError::BftInvalidUnlockProof)?;
+        validate_bft_state_version(state, validator_set)?;
+        if statement.round() > state.round() {
+            return Err(PersistenceError::BftRoundMismatch {
+                current: state.round(),
+                attempted: statement.round(),
+            });
+        }
+        if state.remember_prevote_qc(certificate) {
+            self.write_local_metadata_unlocked(&latest)?;
+        }
+        Ok(())
+    }
+
     pub fn prepared_bft_proposal_subject(
         &self,
         task_id: TaskId,
     ) -> Result<BftProposalSubject, PersistenceError> {
-        let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
+        let snapshot = self
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
         let prepared = snapshot
             .prepared_tasks
             .get(&task_id)
             .ok_or(PersistenceError::StalePreparedTasks)?;
-        let digest = prepared
-            .plan_digest()
-            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        let digest = if prepared.commit_authorized && !prepared.conflict_abort {
+            prepared
+                .plan_digest()
+                .map_err(|_| PersistenceError::InvalidSnapshot)?
+        } else {
+            self.prepared_abort_statement(&task_id)?.subject_digest()
+        };
         let validator_set = self.validator_set_for_prepared_task(&task_id, digest)?;
         Ok(BftProposalSubject::new(
             validator_set.version(),
@@ -38,7 +85,9 @@ impl StateStore {
         &self,
         checkpoint: &PublicCurrencyCheckpoint,
     ) -> Result<BftProposalSubject, PersistenceError> {
-        let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
+        let snapshot = self
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
         if checkpoint.protocol_version() != CURRENT_PROTOCOL_VERSION {
             return Err(PersistenceError::Bft(BftError::WrongProtocolVersion {
                 expected: CURRENT_PROTOCOL_VERSION,
@@ -68,56 +117,30 @@ impl StateStore {
         &self,
         transition: &ValidatorSetTransition,
     ) -> Result<BftProposalSubject, PersistenceError> {
-        let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
-        if transition.current_validator_set_version() != snapshot.validator_set.version() {
-            return Err(PersistenceError::Bft(BftError::WrongValidatorSetVersion {
-                expected: snapshot.validator_set.version(),
-                actual: transition.current_validator_set_version(),
-            }));
-        }
-        snapshot
-            .validator_registry
-            .validate_transition(&snapshot.validator_set, transition.next_validator_set())
-            .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
-        Ok(BftProposalSubject::new(
-            snapshot.validator_set.version(),
-            ConsensusScope::ValidatorSetTransition {
-                current_validator_set_version: snapshot.validator_set.version(),
-            },
-            transition.digest(),
-        ))
+        let snapshot = self
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        governance_subject(
+            &snapshot,
+            &crate::runtime_consensus_target::ValidatorConsensusTarget::ValidatorSetTransition(
+                transition.clone(),
+            ),
+        )
     }
 
     pub fn state_recovery_bft_proposal_subject(
         &self,
         checkpoint: &StateRecoveryCheckpoint,
     ) -> Result<BftProposalSubject, PersistenceError> {
-        let snapshot = self.load()?.ok_or(PersistenceError::MissingSnapshot)?;
-        if checkpoint.validator_set_version() != snapshot.validator_set.version() {
-            return Err(PersistenceError::Bft(BftError::WrongValidatorSetVersion {
-                expected: snapshot.validator_set.version(),
-                actual: checkpoint.validator_set_version(),
-            }));
-        }
-        let expected_serial = next_recovery_checkpoint_serial(&snapshot)?;
-        if checkpoint.serial() != expected_serial {
-            return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
-                validator_set_version: snapshot.validator_set.version(),
-                expected: expected_serial,
-                actual: checkpoint.serial(),
-            });
-        }
-        if !checkpoint.matches_persisted(&snapshot)? {
-            return Err(PersistenceError::RecoveryCheckpointDoesNotMatchState);
-        }
-        Ok(BftProposalSubject::new(
-            snapshot.validator_set.version(),
-            ConsensusScope::StateRecoveryCheckpoint {
-                validator_set_version: snapshot.validator_set.version(),
-                serial: checkpoint.serial(),
-            },
-            checkpoint.digest(),
-        ))
+        let snapshot = self
+            .load_shared()?
+            .ok_or(PersistenceError::MissingSnapshot)?;
+        governance_subject(
+            &snapshot,
+            &crate::runtime_consensus_target::ValidatorConsensusTarget::StateRecoveryCheckpoint(
+                checkpoint.clone(),
+            ),
+        )
     }
 
     pub fn bft_local_state(
@@ -125,7 +148,7 @@ impl StateStore {
         validator_id: ValidatorId,
         scope: &ConsensusScope,
     ) -> Result<Option<BftLocalState>, PersistenceError> {
-        Ok(self.load()?.and_then(|snapshot| {
+        Ok(self.load_shared()?.and_then(|snapshot| {
             snapshot
                 .bft_local_states
                 .get(&(validator_id, scope.clone()))
@@ -165,7 +188,7 @@ impl StateStore {
             });
         }
         state.set_round(next_round);
-        self.write_bft_local_states_unlocked(&latest)
+        self.write_local_metadata_unlocked(&latest)
     }
 
     pub(crate) fn catch_up_bft_round(
@@ -199,7 +222,7 @@ impl StateStore {
             });
         }
         state.set_round(target_round);
-        self.write_bft_local_states_unlocked(&latest)
+        self.write_local_metadata_unlocked(&latest)
     }
 
     pub fn accept_bft_nil_precommit_qc(
@@ -242,7 +265,7 @@ impl StateStore {
                     current: statement.round(),
                 })?;
         state.set_round(next_round);
-        self.write_bft_local_states_unlocked(&latest)
+        self.write_local_metadata_unlocked(&latest)
     }
 
     pub(crate) fn lock_bft_prevote(
@@ -252,13 +275,14 @@ impl StateStore {
         round: u64,
         value: BftValue,
         validator_set: &ValidatorSet,
-        unlock_round: Option<u64>,
+        unlock_certificate: Option<&BftQuorumCertificate>,
     ) -> Result<(), PersistenceError> {
         let _guard = self.lock()?;
         let mut latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
         validate_bft_signing_context(&latest, validator_id, &scope, validator_set)?;
+        validate_bft_vote_value(&latest, &scope, value, validator_set)?;
         open_prepared_voting(&mut latest, &scope)?;
 
         let state = latest
@@ -268,8 +292,14 @@ impl StateStore {
         validate_bft_state_version(state, validator_set)?;
         validate_bft_round(state, round)?;
 
+        let unlock_round = unlock_certificate.map(|certificate| certificate.statement().round());
         if let Some(existing) = state.prevote() {
             if existing == value {
+                if let Some(certificate) = unlock_certificate
+                    && state.remember_prevote_qc(certificate)
+                {
+                    self.write_local_metadata_unlocked(&latest)?;
+                }
                 return Ok(());
             }
             return Err(PersistenceError::BftVoteConflict {
@@ -296,8 +326,11 @@ impl StateStore {
             }
         }
 
+        if let Some(certificate) = unlock_certificate {
+            state.remember_prevote_qc(certificate);
+        }
         state.set_prevote(value);
-        self.write_bft_local_states_unlocked(&latest)?;
+        self.write_local_metadata_unlocked(&latest)?;
         Ok(())
     }
 
@@ -308,13 +341,14 @@ impl StateStore {
         round: u64,
         value: BftValue,
         validator_set: &ValidatorSet,
-        has_prevote_qc: bool,
+        prevote_certificate: Option<&BftQuorumCertificate>,
     ) -> Result<(), PersistenceError> {
         let _guard = self.lock()?;
         let mut latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
         validate_bft_signing_context(&latest, validator_id, &scope, validator_set)?;
+        validate_bft_vote_value(&latest, &scope, value, validator_set)?;
         open_prepared_voting(&mut latest, &scope)?;
 
         let state = latest
@@ -336,12 +370,15 @@ impl StateStore {
             });
         }
 
-        if matches!(value, BftValue::Digest(_)) && !has_prevote_qc {
+        if matches!(value, BftValue::Digest(_)) && prevote_certificate.is_none() {
             return Err(PersistenceError::BftPrevoteCertificateRequired);
         }
 
+        if let Some(certificate) = prevote_certificate {
+            state.remember_prevote_qc(certificate);
+        }
         state.set_precommit(value);
-        self.write_bft_local_states_unlocked(&latest)?;
+        self.write_local_metadata_unlocked(&latest)?;
         Ok(())
     }
 
@@ -368,6 +405,8 @@ impl StateStore {
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
         validate_vote_validator_set(&latest, statement.scope(), validator_set)?;
+        let opens_voting = matches!(statement.scope(), ConsensusScope::PreparedTask(task_id)
+            if latest.prepared_tasks[task_id].phase == PreparedTaskPhase::Prepared);
         open_prepared_voting(&mut latest, statement.scope())?;
         if !validator_set.contains(validator_id) {
             return Err(PersistenceError::Bft(BftError::UnknownValidator(
@@ -380,11 +419,19 @@ impl StateStore {
             .entry((validator_id, statement.scope().clone()))
             .or_insert_with(|| BftLocalState::new(validator_set.version()));
         validate_bft_state_version(state, validator_set)?;
+        // A repeated proof has no new signing state to make durable.
+        if !opens_voting
+            && state.round() >= statement.round()
+            && state.finality_ready_round() == Some(statement.round())
+            && state.finality_ready_digest() == Some(digest)
+        {
+            return Ok(latest.generation);
+        }
         if statement.round() > state.round() {
             state.set_round(statement.round());
         }
         state.mark_finality_ready(statement.round(), digest);
-        self.write_bft_local_states_unlocked(&latest)
+        self.write_local_metadata_unlocked(&latest)
     }
 
     pub fn bft_finality_ready(
@@ -393,7 +440,7 @@ impl StateStore {
         scope: &ConsensusScope,
         digest: [u8; 32],
     ) -> Result<bool, PersistenceError> {
-        Ok(self.load()?.is_some_and(|snapshot| {
+        Ok(self.load_shared()?.is_some_and(|snapshot| {
             snapshot
                 .bft_local_states
                 .get(&(validator_id, scope.clone()))
@@ -427,13 +474,15 @@ impl StateStore {
         }
     }
 
-    fn write_bft_local_states_unlocked(
+    pub(super) fn write_local_metadata_unlocked(
         &self,
         latest: &crate::PersistedNodeState,
     ) -> Result<u64, PersistenceError> {
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -496,7 +545,51 @@ pub(super) fn open_prepared_voting(
     Ok(())
 }
 
-fn validate_bft_signing_context(
+fn validate_bft_vote_value(
+    snapshot: &PersistedNodeState,
+    scope: &ConsensusScope,
+    value: BftValue,
+    validators: &ValidatorSet,
+) -> Result<(), PersistenceError> {
+    if let BftValue::Digest(digest) = value
+        && let Some(transition) =
+            snapshot
+                .pending_governance
+                .values()
+                .find_map(|pending| match pending {
+                    super::PendingGovernance::CollectingTransition(transition)
+                        if &transition.scope() == scope
+                            && (transition.digest() == digest
+                                || transition.clone().with_handoff_digest(None).digest()
+                                    == digest) =>
+                    {
+                        Some(transition)
+                    }
+                    _ => None,
+                })
+    {
+        return Err(PersistenceError::TransitionCollectionIncomplete {
+            validator_set_version: transition.current_validator_set_version(),
+            currency_frontier: transition.currency_frontier(),
+        });
+    }
+    if let ConsensusScope::PreparedTask(task_id) = scope
+        && let Some(plan) = snapshot.prepared_tasks.get(task_id)
+        && let BftValue::Digest(digest) = value
+        && digest
+            != crate::task_abort::statement(task_id, plan.request_digest, validators)
+                .subject_digest()
+        && !plan
+            .candidate(digest)
+            .map_err(|_| PersistenceError::InvalidSnapshot)?
+            .is_some_and(|candidate| candidate.commit_authorized)
+    {
+        return Err(PersistenceError::StalePreparedTasks);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_bft_signing_context(
     snapshot: &crate::PersistedNodeState,
     validator_id: ValidatorId,
     scope: &ConsensusScope,
@@ -516,7 +609,39 @@ fn validate_bft_signing_context(
             validator_id,
         )));
     }
-    validate_vote_validator_set(snapshot, scope, validator_set)
+    validate_vote_validator_set(snapshot, scope, validator_set)?;
+    if let ConsensusScope::PreparedTask(task_id) = scope {
+        let plan = snapshot
+            .prepared_tasks
+            .get(task_id)
+            .ok_or(PersistenceError::StalePreparedTasks)?;
+        let contains = |handoff: &super::TaskHandoff| {
+            handoff.task_context(task_id).is_some_and(|context| {
+                context.validator_set_version == plan.validator_set_version
+                    && context.request_digest == plan.request_digest
+            })
+        };
+        // Closing ownership alone does not close Abort signing for a late
+        // unowned witness. Every sealed candidate must cover the request.
+        let outside_sealed = snapshot.pending_governance.values().any(|pending| {
+            matches!(pending, super::PendingGovernance::Transition(transition)
+                if transition.current_validator_set_version() == snapshot.validator_set.version()
+                    && transition.handoff.as_ref().is_none_or(|handoff| !contains(handoff)))
+        });
+        let outside_installed = plan.validator_set_version < snapshot.validator_set.version()
+            && snapshot
+                .state
+                .protocol
+                .task_handoff
+                .as_ref()
+                .is_none_or(|handoff| !contains(handoff));
+        if outside_sealed || outside_installed {
+            return Err(PersistenceError::TaskAdmissionClosed {
+                validator_set_version: snapshot.validator_set.version(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_bft_state_version(
@@ -563,8 +688,8 @@ pub(super) fn validate_vote_validator_set(
                 return Err(PersistenceError::ValidatorRegistryMismatch);
             }
         }
-        ConsensusScope::PublicCheckpoint { .. }
-        | ConsensusScope::ValidatorSetTransition { .. }
+        ConsensusScope::CurrencyAllocation { .. }
+        | ConsensusScope::PublicCheckpoint { .. }
         | ConsensusScope::StateRecoveryCheckpoint { .. } => {
             snapshot
                 .validator_registry
@@ -573,4 +698,96 @@ pub(super) fn validate_vote_validator_set(
         }
     }
     Ok(())
+}
+
+pub(super) fn governance_subject(
+    snapshot: &PersistedNodeState,
+    target: &crate::runtime_consensus_target::ValidatorConsensusTarget,
+) -> Result<BftProposalSubject, PersistenceError> {
+    use crate::runtime_consensus_target::ValidatorConsensusTarget;
+    let version = snapshot.validator_set.version();
+    let actual_version = match target {
+        ValidatorConsensusTarget::ValidatorSetTransition(value) => {
+            value.current_validator_set_version()
+        }
+        ValidatorConsensusTarget::StateRecoveryCheckpoint(value) => value.validator_set_version(),
+        _ => return Err(PersistenceError::InvalidSnapshot),
+    };
+    if actual_version != version {
+        return Err(PersistenceError::Bft(BftError::WrongValidatorSetVersion {
+            expected: version,
+            actual: actual_version,
+        }));
+    }
+    let (_, scope, digest) = match target {
+        ValidatorConsensusTarget::ValidatorSetTransition(transition) => {
+            let already_admitted = matches!(
+                snapshot.pending_governance.get(&transition.digest()),
+                Some(super::PendingGovernance::Transition(value)) if value == transition
+            );
+            if !already_admitted
+                && snapshot.pending_governance.values().any(|pending| {
+                    matches!(pending, super::PendingGovernance::CollectingTransition(value)
+                    if value.scope() == transition.scope())
+                })
+            {
+                return Err(PersistenceError::TransitionCollectionIncomplete {
+                    validator_set_version: version,
+                    currency_frontier: transition.currency_frontier(),
+                });
+            }
+            if snapshot.state.next_currency_address() != transition.currency_frontier() {
+                return Err(PersistenceError::StaleState);
+            }
+            let hydrated = super::task_handoff::hydrate(snapshot, transition)?;
+            if hydrated.handoff_digest != transition.handoff_digest {
+                return Err(PersistenceError::StalePreparedTasks);
+            }
+            snapshot
+                .validator_registry
+                .validate_transition(&snapshot.validator_set, transition.next_validator_set())
+                .map_err(|_| PersistenceError::ValidatorRegistryMismatch)?;
+            (
+                transition.current_validator_set_version(),
+                transition.scope(),
+                transition.digest(),
+            )
+        }
+        ValidatorConsensusTarget::StateRecoveryCheckpoint(checkpoint) => {
+            let resumed = snapshot
+                .pending_governance
+                .contains_key(&checkpoint.digest())
+                && snapshot
+                    .recovery_checkpoint_floors
+                    .get(&version)
+                    .is_some_and(|floor| {
+                        !floor.certified
+                            && floor.serial == checkpoint.serial()
+                            && floor.checkpoint_digest == checkpoint.digest()
+                    });
+            if !resumed {
+                let expected = next_recovery_checkpoint_serial(snapshot)?;
+                if checkpoint.serial() != expected {
+                    return Err(PersistenceError::UnexpectedRecoveryCheckpointSerial {
+                        validator_set_version: version,
+                        expected,
+                        actual: checkpoint.serial(),
+                    });
+                }
+            }
+            if !checkpoint.matches_admitted_or_persisted(snapshot)? {
+                return Err(PersistenceError::RecoveryCheckpointDoesNotMatchState);
+            }
+            (
+                checkpoint.validator_set_version(),
+                ConsensusScope::StateRecoveryCheckpoint {
+                    validator_set_version: checkpoint.validator_set_version(),
+                    serial: checkpoint.serial(),
+                },
+                checkpoint.digest(),
+            )
+        }
+        _ => return Err(PersistenceError::InvalidSnapshot),
+    };
+    Ok(BftProposalSubject::new(version, scope, digest))
 }

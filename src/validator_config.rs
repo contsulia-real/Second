@@ -15,6 +15,7 @@ const MAX_VALIDATOR_CONFIG_SIZE: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 struct ValidatorConfigFile {
     authorizer_public_keys_base64: Vec<String>,
+    network_id_base64: String,
     bft_timeouts_ms: BftTimeoutFile,
 }
 
@@ -51,19 +52,7 @@ impl BftTimeoutFile {
 }
 
 pub(crate) fn load(snapshot_base: &str) -> Result<ValidatorRuntimeConfig, String> {
-    let path = config_path(Path::new(snapshot_base));
-    let bytes = read_bounded(&path, MAX_VALIDATOR_CONFIG_SIZE, "validator config")?;
-
-    let file = serde_json::from_slice::<ValidatorConfigFile>(&bytes)
-        .map_err(|error| format!("invalid validator config {}: {error}", path.display()))?;
-    let public_keys = decode_authorizer_keys(&path, &file.authorizer_public_keys_base64)?;
-    let authorizers = AuthorizerSet::new(CURRENT_PROTOCOL_VERSION, public_keys)
-        .map_err(|error| format!("invalid validator config {}: {error:?}", path.display()))?;
-    let timeouts = file
-        .bft_timeouts_ms
-        .to_runtime()
-        .map_err(|error| format!("invalid validator config {}: {error}", path.display()))?;
-
+    let (authorizers, timeouts) = load_parts(snapshot_base)?;
     Ok(ValidatorRuntimeConfig::new(
         authorizers,
         timeouts,
@@ -71,9 +60,29 @@ pub(crate) fn load(snapshot_base: &str) -> Result<ValidatorRuntimeConfig, String
     ))
 }
 
+pub(crate) fn load_parts(snapshot_base: &str) -> Result<(AuthorizerSet, BftTimeoutConfig), String> {
+    let path = config_path(Path::new(snapshot_base));
+    let bytes = read_bounded(&path, MAX_VALIDATOR_CONFIG_SIZE, "validator config")?;
+
+    let file = serde_json::from_slice::<ValidatorConfigFile>(&bytes)
+        .map_err(|error| format!("invalid validator config {}: {error}", path.display()))?;
+    let public_keys = decode_authorizer_keys(&path, &file.authorizer_public_keys_base64)?;
+    let network_id = decode_standard_base64_32(&file.network_id_base64).map_err(str::to_owned)?;
+    let authorizers =
+        AuthorizerSet::new_for_network(CURRENT_PROTOCOL_VERSION, network_id, public_keys)
+            .map_err(|error| format!("invalid validator config {}: {error:?}", path.display()))?;
+    let timeouts = file
+        .bft_timeouts_ms
+        .to_runtime()
+        .map_err(|error| format!("invalid validator config {}: {error}", path.display()))?;
+
+    Ok((authorizers, timeouts))
+}
+
 pub(crate) fn write(
     snapshot_base: &Path,
     authorizer_public_keys: &[[u8; 32]],
+    network_id: [u8; 32],
     bft_timeouts_ms: BftTimeoutFile,
 ) -> Result<(), String> {
     bft_timeouts_ms.validate()?;
@@ -84,6 +93,7 @@ pub(crate) fn write(
     .map_err(|error| format!("invalid AuthorizerSet for validator config: {error:?}"))?;
 
     let file = ValidatorConfigFile {
+        network_id_base64: STANDARD.encode(network_id),
         authorizer_public_keys_base64: authorizer_public_keys
             .iter()
             .map(|key| STANDARD.encode(key))

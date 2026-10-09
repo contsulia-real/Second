@@ -3,7 +3,7 @@ use support::FinalizedExecute as _;
 
 use second::{
     AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError, ExecutionOutcome,
-    LegalTask, LegalTaskPayload, Operation, SecondState, VerifiedLegalTask,
+    LegalTaskPayload, Operation, SecondState, VerifiedLegalTask,
 };
 use support::{key as test_key, payment_address, register_payment_addresses};
 
@@ -22,7 +22,7 @@ fn verified_task(
         operations,
     );
 
-    LegalTask::sign(payload, &key)
+    support::sign_task(payload, &key)
         .unwrap()
         .verify(&authorizers)
         .unwrap()

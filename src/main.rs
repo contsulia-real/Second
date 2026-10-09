@@ -3,6 +3,7 @@ mod cli_legal_task;
 mod cli_network;
 mod cli_node;
 mod cli_public;
+mod cli_transaction_sign;
 mod local_file;
 mod network_init;
 mod node_capabilities;
@@ -10,6 +11,9 @@ mod validator_config;
 mod validator_keyring;
 mod validator_operator;
 mod validator_rotation_keys;
+mod wallet_cli;
+#[cfg(windows)]
+mod windows_service_host;
 
 use cli_legal_task::{submit, task_status};
 use cli_network::ping;
@@ -41,6 +45,24 @@ async fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
 
     match args.as_slice() {
+        [command, rest @ ..] if command == "wallet" => wallet_cli::run(rest).await,
+        [command] if command == "--version" => {
+            println!("Second {} {} {}", env!("CARGO_PKG_VERSION"), env::consts::OS, env::consts::ARCH);
+            Ok(())
+        }
+        #[cfg(windows)]
+        [command, name, address, base, log_directory] if command == "service" => {
+            windows_service_host::dispatch(name, address, base, log_directory)
+        }
+        [command, address, base] if command == "node-check" => {
+            cli_node::check(address, base).await
+        }
+        [command, key_file] if command == "authorizer-keygen" => {
+            cli_transaction_sign::keygen(key_file)
+        }
+        [command, key_file, unsigned_file, signed_file] if command == "transaction-sign" => {
+            cli_transaction_sign::sign(key_file, unsigned_file, signed_file)
+        }
         [command, validator_id, keyring_file] if command == "validator-keygen" => {
             validator_keygen(parse_u64("validator id", validator_id)?, keyring_file)
         }
@@ -66,13 +88,16 @@ async fn run() -> Result<(), String> {
             )
             .await
         }
+        [command, address, snapshot_base, server_certificate] if command == "public-checkpoint" => {
+            validator_operator::request_checkpoint(address, snapshot_base, server_certificate, true).await
+        }
         [command, address, snapshot_base, server_certificate]
             if command == "recovery-checkpoint" =>
         {
-            validator_operator::request_recovery_checkpoint(
+            validator_operator::request_checkpoint(
                 address,
                 snapshot_base,
-                server_certificate,
+                server_certificate, false,
             )
             .await
         }
@@ -86,6 +111,11 @@ async fn run() -> Result<(), String> {
                 server_certificate,
             )
             .await
+        }
+        [command, address, destination_snapshot_base, trust_snapshot_base, server_certificate]
+            if command == "handoff-install" =>
+        {
+            validator_operator::install_handoff(address, destination_snapshot_base, trust_snapshot_base, server_certificate).await
         }
         [command, config_file, output_dir] if command == "init-network" => {
             init_network(config_file, output_dir)
@@ -145,7 +175,7 @@ async fn run() -> Result<(), String> {
             .await
         }
         _ => Err(
-            "usage: second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second public-init <destination-snapshot-base> <trust-snapshot-base> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second task-status <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
+            "usage: second --version | second node-check <listen-address> <snapshot-base> | second authorizer-keygen <key-file> | second transaction-sign <authorizer-key-file> <unsigned-json> <signed-json> | second validator-keygen <validator-id> <keyring-file> | second validator-admission <keyring-file> <request-file> | second validator-rotate <snapshot-base> <identity|recovery> <request-file> | second validator-transition-build <snapshot-base> <plan-json> <source-file> | second validator-transition-submit <address> <snapshot-base> <source-file> <server-cert-base64> | second public-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-checkpoint <address> <snapshot-base> <server-cert-base64> | second recovery-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second handoff-install <address> <destination-snapshot-base> <trust-snapshot-base> <server-cert-base64> | second init-network <config-json> <output-dir> | second public-init <destination-snapshot-base> <trust-snapshot-base> | second node <listen-address> <snapshot-base> | second submit <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second task-status <address> <transaction-json-file> <authorizer-public-key-base64> <server-cert-base64> | second ping <address> <nonce> <server-cert-base64> | second snapshot-status <snapshot-base> | second query-public <address> <start-u64> <limit-u16> <server-cert-base64> | second sync-public <address> <server-cert-base64> | second sync-public-certified <address> <trust-snapshot-base> <server-cert-base64> | second observe-public-network <snapshot-base>"
                 .to_owned(),
         ),
     }

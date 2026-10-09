@@ -1,4 +1,9 @@
+pub(crate) mod account_query;
 mod bft;
+pub use account_query::{
+    AccountPaymentAddress, AccountTransfer, AccountView, MAX_ACCOUNT_QUERY_PAGE,
+    client_account_query,
+};
 mod bft_codec;
 mod codec;
 mod governance;
@@ -8,6 +13,8 @@ mod peer_record;
 mod peer_store;
 mod quic;
 mod recovery;
+#[cfg(test)]
+pub(crate) use recovery::fetch_from_current_member;
 mod session;
 mod submission;
 mod task_status;
@@ -31,22 +38,28 @@ pub(crate) use bft_codec::MAX_PREPARED_TASK_SOURCE_CHUNK_SIZE;
 pub use bft_codec::{BftNetworkMessage, decode_bft_network_message, encode_bft_network_message};
 pub use codec::{decode_network_message, encode_network_message};
 pub use governance::{
-    RemoteRecoveryCheckpointSubmission, RemoteValidatorTransitionSubmission,
+    RemotePublicCheckpointSubmission, RemoteRecoveryCheckpointSubmission,
+    RemoteValidatorTransitionSubmission, client_submit_public_checkpoint,
     client_submit_recovery_checkpoint, client_submit_validator_transition,
 };
 pub(crate) use governance::{
     recovery_accepted as governance_recovery_accepted, rejected as governance_rejected,
-    transition_accepted as governance_transition_accepted, verify_recovery_request,
-    verify_transition_request,
+    transition_accepted as governance_transition_accepted, verify_public_checkpoint_request,
+    verify_recovery_request, verify_transition_request,
 };
 pub use identity::{QuicTransportIdentity, transport_identity_path};
 pub(crate) use peer_manager::{PeerDirection, PeerLease, PeerManager, PeerRegistrationError};
 pub(crate) use peer_record::validate_peer_limit;
-pub use peer_record::{MAX_PEER_CERTIFICATE_SIZE, MAX_PEER_RECORDS, PeerRecord};
+pub use peer_record::{
+    MAX_DEPLOYED_VALIDATORS, MAX_LOCAL_PEER_CANDIDATES, MAX_PEER_CERTIFICATE_SIZE,
+    MAX_PEER_RECORDS, PeerRecord,
+};
 pub(crate) use peer_store::PeerStore;
 pub(crate) use quic::{MAX_CONCURRENT_ONE_WAY_STREAMS, outbound_bind_address};
 pub use quic::{QuicClient, QuicPeer, QuicRequestStream, QuicServer, SECOND_QUIC_SERVER_NAME};
-pub use recovery::{MAX_STATE_RECOVERY_CHUNK_SIZE, client_fetch_state_recovery};
+pub use recovery::{
+    MAX_STATE_RECOVERY_CHUNK_SIZE, client_fetch_state_recovery, client_fetch_validator_handoff,
+};
 pub(crate) use recovery::{
     StateRecoveryProvider, StateRecoveryProviderHandle, new_state_recovery_provider_handle,
     state_recovery_response, validate_chunk_limit,
@@ -54,7 +67,7 @@ pub(crate) use recovery::{
 pub(crate) use session::{
     PublicNetworkServices, RuntimeNetworkSnapshot, RuntimePublicSnapshot,
     client_sync_certified_public_currency_view_from_checkpoint, serve_public_network_connection,
-    serve_public_network_connection_from_request,
+    serve_public_network_connection_from_request, serve_transition_proof_requests,
 };
 pub use session::{
     client_peer_records, client_ping, client_public_currency_checkpoint_proof,
@@ -160,6 +173,20 @@ pub enum GovernanceRejection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkMessage {
+    AccountQuery {
+        account: [u8; 32],
+        kind: u8,
+        cursor: u64,
+        generation: Option<u64>,
+        nonce: [u8; 32],
+        signature: [u8; 64],
+    },
+    AccountQueryResult {
+        view: AccountView,
+    },
+    AccountQueryDenied {
+        reason: String,
+    },
     Hello {
         node_id: NodeId,
         signature: [u8; 64],
@@ -232,10 +259,12 @@ pub enum NetworkMessage {
     StateRecoveryDenied,
     BftAuthenticate {
         validator_id: ValidatorId,
+        validator_set_version: u64,
         signature: [u8; 64],
     },
     BftAuthenticated {
         validator_id: ValidatorId,
+        validator_set_version: u64,
         signature: [u8; 64],
     },
     BftMessage {
@@ -280,6 +309,16 @@ pub enum NetworkMessage {
         next_validator_set_version: u64,
         transition_digest: [u8; 32],
     },
+    PublicCheckpointSubmit {
+        validator_id: ValidatorId,
+        validator_set_version: u64,
+        signature: [u8; 64],
+    },
+    PublicCheckpointAccepted {
+        validator_set_version: u64,
+        epoch: u64,
+        checkpoint_digest: [u8; 32],
+    },
     StateRecoveryCheckpointSubmit {
         validator_id: ValidatorId,
         validator_set_version: u64,
@@ -298,6 +337,8 @@ pub enum NetworkMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkError {
+    InvalidAccountQuery,
+    AccountQueryDenied(String),
     Transport(String),
     TransportIdentity(String),
     InvalidTransportIdentity,

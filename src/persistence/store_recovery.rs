@@ -23,24 +23,39 @@ impl StateStore {
 
         checkpoint.verify_payload(payload, trusted_validator_set)?;
 
-        let retained_validator_sets = BTreeMap::new();
-        let recovery_checkpoint_floors = BTreeMap::from([(
-            checkpoint.checkpoint().validator_set_version(),
-            RecoveryCheckpointFloor {
-                serial: checkpoint.checkpoint().serial(),
-                checkpoint_digest: checkpoint.checkpoint().digest(),
-                certified: true,
-            },
-        )]);
+        self.write_initial_shared_state_unlocked(payload, Some(checkpoint.to_unverified_proof()))
+    }
+
+    /// Caller holds the store lock and has authenticated the shared state.
+    pub(super) fn write_initial_shared_state_unlocked(
+        &self,
+        payload: &StateRecoveryPayload,
+        recovery_checkpoint_proof: Option<StateRecoveryCheckpointProof>,
+    ) -> Result<u64, PersistenceError> {
+        let retained_validator_sets = payload.retained_validator_sets().clone();
+        let recovery_checkpoint_floors = recovery_checkpoint_proof
+            .iter()
+            .map(|proof| {
+                (
+                    proof.checkpoint().validator_set_version(),
+                    RecoveryCheckpointFloor {
+                        serial: proof.checkpoint().serial(),
+                        checkpoint_digest: proof.checkpoint().digest(),
+                        certified: true,
+                    },
+                )
+            })
+            .collect();
         let pending_public_changes = BTreeSet::new();
-        let validator_transition_proofs = BTreeMap::new();
+        let validator_transition_proofs = payload.validator_transition_proofs.clone();
         let prepared_tasks = BTreeMap::new();
         let validator_vote_locks = BTreeMap::new();
         let bft_local_states = BTreeMap::new();
-        let recovery_checkpoint_proof = checkpoint.to_unverified_proof();
         self.write_next_unlocked(
             None,
             SnapshotContents {
+                task_receipts: &BTreeMap::new(),
+                pending_governance: None,
                 state: payload.state(),
                 validator_set: payload.validator_set(),
                 retained_validator_sets: &retained_validator_sets,
@@ -49,7 +64,7 @@ impl StateStore {
                 latest_public_delta: None,
                 pending_public_changes: Some(&pending_public_changes),
                 validator_transition_proofs: &validator_transition_proofs,
-                recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
+                recovery_checkpoint_proof: recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: 0,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: false,
@@ -156,6 +171,8 @@ impl StateStore {
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -197,7 +214,7 @@ impl StateStore {
         if pending.validator_id != validator_id {
             return Err(PersistenceError::InvalidValidatorSafetyRecovery);
         }
-        pending.validate(&latest.validator_set)?;
+        pending.validate_current(&latest.validator_set, &latest.validator_transition_proofs)?;
 
         let current = latest
             .validator_set
@@ -228,6 +245,8 @@ impl StateStore {
         let generation = self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&latest.pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -258,6 +277,15 @@ impl StateStore {
         let latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
+        if let Some(floor) = latest
+            .recovery_checkpoint_floors
+            .get(&latest.validator_set.version())
+            && !floor.certified
+            && let Some(super::PendingGovernance::Recovery(checkpoint)) =
+                latest.pending_governance.get(&floor.checkpoint_digest)
+        {
+            return Ok(checkpoint.clone());
+        }
         let serial = next_recovery_checkpoint_serial(&latest)?;
         StateRecoveryCheckpoint::from_persisted(serial, &latest)
     }
@@ -266,13 +294,64 @@ impl StateStore {
         &self,
         checkpoint: &CertifiedStateRecoveryCheckpoint,
     ) -> Result<u64, PersistenceError> {
+        self.install_recovery_checkpoint_inner(checkpoint, false)
+    }
+
+    pub(crate) fn install_recovery_checkpoint_evidence(
+        &self,
+        checkpoint: &CertifiedStateRecoveryCheckpoint,
+    ) -> Result<u64, PersistenceError> {
+        self.install_recovery_checkpoint_inner(checkpoint, true)
+    }
+
+    fn install_recovery_checkpoint_inner(
+        &self,
+        checkpoint: &CertifiedStateRecoveryCheckpoint,
+        allow_historical: bool,
+    ) -> Result<u64, PersistenceError> {
         let _guard = self.lock()?;
         let latest = self
             .load_unlocked()?
             .ok_or(PersistenceError::MissingSnapshot)?;
 
-        let payload = StateRecoveryPayload::from_persisted(&latest)?;
-        checkpoint.verify_payload(&payload, &latest.validator_set)?;
+        checkpoint
+            .certificate()
+            .verify(&latest.validator_set)
+            .map_err(PersistenceError::RecoveryCheckpointFinality)?;
+        if allow_historical
+            && let Some(floor) = latest
+                .recovery_checkpoint_floors
+                .get(&latest.validator_set.version())
+        {
+            if checkpoint.checkpoint().serial() < floor.serial {
+                return Err(PersistenceError::StaleRecoveryCheckpointSerial {
+                    validator_set_version: latest.validator_set.version(),
+                    minimum: floor.serial,
+                    actual: checkpoint.checkpoint().serial(),
+                });
+            }
+            if floor.certified
+                && floor.serial == checkpoint.checkpoint().serial()
+                && floor.checkpoint_digest == checkpoint.checkpoint().digest()
+            {
+                return Ok(latest.generation);
+            }
+        }
+        let matches = checkpoint.checkpoint().matches_persisted(&latest)?;
+        if !matches && !allow_historical {
+            return Err(PersistenceError::RecoveryCheckpointDoesNotMatchState);
+        }
+        if latest
+            .recovery_checkpoint_floors
+            .get(&latest.validator_set.version())
+            .is_some_and(|floor| {
+                floor.certified
+                    && floor.serial == checkpoint.checkpoint().serial()
+                    && floor.checkpoint_digest == checkpoint.checkpoint().digest()
+            })
+        {
+            return Ok(latest.generation);
+        }
         let mut recovery_checkpoint_floors = latest.recovery_checkpoint_floors.clone();
         advance_recovery_checkpoint_floor_entry(
             &mut recovery_checkpoint_floors,
@@ -281,11 +360,27 @@ impl StateStore {
             checkpoint.checkpoint().digest(),
             RecoveryCheckpointFloorUpdate::Certified,
         )?;
-        let recovery_checkpoint_proof = checkpoint.to_unverified_proof();
+        let recovery_checkpoint_proof = matches.then(|| checkpoint.to_unverified_proof());
+        let mut pending_governance = latest.pending_governance.clone();
+        pending_governance.retain(|_, pending| !matches!(pending, super::PendingGovernance::Recovery(value) if value.serial() <= checkpoint.checkpoint().serial()));
+        if !matches {
+            let serial = checkpoint.checkpoint().serial().checked_add(1).ok_or(
+                PersistenceError::RecoveryCheckpointSerialOverflow {
+                    validator_set_version: latest.validator_set.version(),
+                },
+            )?;
+            let successor = StateRecoveryCheckpoint::from_persisted(serial, &latest)?;
+            pending_governance.insert(
+                successor.digest(),
+                super::PendingGovernance::Recovery(successor),
+            );
+        }
 
         self.write_next_unlocked(
             Some(latest.generation),
             SnapshotContents {
+                task_receipts: &latest.task_receipts,
+                pending_governance: Some(&pending_governance),
                 state: &latest.state,
                 validator_set: &latest.validator_set,
                 retained_validator_sets: &latest.retained_validator_sets,
@@ -294,7 +389,7 @@ impl StateStore {
                 latest_public_delta: latest.latest_public_delta.as_ref(),
                 pending_public_changes: latest.pending_public_changes.as_ref(),
                 validator_transition_proofs: &latest.validator_transition_proofs,
-                recovery_checkpoint_proof: Some(&recovery_checkpoint_proof),
+                recovery_checkpoint_proof: recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
                 recovery_checkpoint_floors: &recovery_checkpoint_floors,
                 validator_safety_ready: latest.validator_safety_ready,
@@ -342,13 +437,17 @@ pub(super) fn recovery_checkpoint_matches(
     state: &SecondState,
     validator_set: &ValidatorSet,
     validator_registry: &ValidatorRegistry,
+    retained_validator_sets: &BTreeMap<u64, ValidatorSet>,
 ) -> bool {
     let Ok(certified) = proof.clone().verify_checkpoint(validator_set) else {
         return false;
     };
-    let Ok(payload) =
-        StateRecoveryPayload::from_shared_parts(state, validator_set, validator_registry)
-    else {
+    let Ok(payload) = StateRecoveryPayload::from_shared_parts(
+        state,
+        validator_set,
+        validator_registry,
+        retained_validator_sets,
+    ) else {
         return false;
     };
     certified.verify_payload(&payload, validator_set).is_ok()
