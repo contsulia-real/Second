@@ -79,3 +79,7 @@ Windows–WSL 混合验收是必须执行的门禁，测试不再标记 ignored�
 2026-10-09 本地验收：`cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 与 `git diff --check` 均通过。库测试 105 项、集成测试 249 项、34 节点发现测试 1 项通过；跨进程锁 helper 在子进程另行通过。默认忽略的两项分别为该 helper 的直接运行入口和需要额外 WSL 环境的混合运行测试。最终测试日志保留在忽略目录 target/m0-final-tests.log；没有执行生产压测或 WSL 混合运行验收。
 
 随后补验：已移除混合测试的 ignored，当前生产源码两端原生 Release 的 2 Windows + 2 WSL 场景通过（25.83 秒，target/m0-required-mixed-release.log）。普通 Windows 全量门禁 105 项库测试、250 项集成测试和 34 节点目标全部通过，混合场景在默认门禁中实际执行，集成 0 忽略；fmt/check/clippy/diff 通过。缺少 SECOND_WSL_BINARY 的反向检查立即失败而非跳过。测试节点及临时私有目录已清理。此补验覆盖支付、掉线 quorum、重启追赶、认证恢复与签名隔离/恢复，不将它描述为 M0 私有查询的跨系统对抗证明；M0 查询风险仍由前述定向测试和真实钱包测试覆盖。完整入口与证据见 node-operations.md。
+
+M0 专属跨系统补验扩展上述强制混合测试：原生 Windows 钱包仅连接 Linux Validator，原生 Linux 钱包仅连接 Windows Validator；真实账户分别查询 balance、257 份资产（三页）、地址和交易历史，完整清单与余额一致，来源说明保留不提供最终性/最新/线性化保证的边界。两端没有备用本系统端点；无需复制现有签名规则或新增生产协议。Release 场景 1 项通过、0 失败、0 忽略，29.68 秒（target/m0-query-mixed-release.log）。此前只有支付恢复基线的补验记录不能代替本段实际查询验收；恶意页、认证前加载、资源预算和元数据并发等对抗行为仍由账户查询定向测试覆盖。
+
+本段最终全量门禁并未全部通过：fmt/check/clippy(-D warnings)/diff 通过，库 105 项及主集成 250 项通过（包含专属 M0 混合查询，集成 0 忽略，64.48 秒）；随后 34 节点发现目标失败，PeerStore 报系统找不到指定文件，重启节点 30 秒内恢复连接数为 0（target/m0-query-mixed-all-targets.log）。该目标单独诊断重跑 11.76 秒通过（target/m0-query-discovery-diagnostic.log），不能据此抹掉全量失败或宣称间歇根因已修复。账户查询专项与跨系统真实调用已通过，但按完整门禁要求，M0 整体验收不能标记完成。失败日志与私有测试现场保留；本段只扩展验收夹具，没有擅自修改 PeerStore、共识或持久化实现。

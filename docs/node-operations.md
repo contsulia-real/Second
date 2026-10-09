@@ -178,9 +178,13 @@ Windows 父测试持有本次 Windows 子进程句柄；WSL worker 持有本次 
 
 验收检查双向固定证书 QUIC 与错误证书拒绝；Windows 单源提交开户、发行、支付，全体余额/地址绑定和 canonical shared payload 一致；停 Windows 1 后，Windows 2 + Linux 3/4 形成必要 3/4 quorum；Windows 1 重启补齐成功任务。随后 Linux 3 离线，由其余混合成员认证恢复状态，恢复到全新 Linux base；故意在三个健康成员完成 V2 并全部重启后才上线恢复目标，读取持久 membership proof 后仍 locked。中间重启，再取得 V2 recovery proof 自动恢复签名安全。再次重启检查 transport identity/证书连续，停止 Linux 4，仅 Windows 1/2 + 恢复后的 Linux 3 完成新业务，核对精确余额、签名 floor 和完整 canonical shared payload。
 
+M0 专属验收同时运行原生 Windows 与 Linux 钱包，每个钱包只配置另一操作系统的一个固定证书端点，不允许回退到本系统节点。复用同一混合集群和真实账户密钥，各自完成 balance、assets、address list、history；目标账户持有 257 份 Currency，资产必须跨三页完整枚举。检查真实账户、余额与数量、终页、地址/历史及来源说明，比较两端完整资产/地址/历史清单；不比较独立查询的本地 generation 或 nonce，不把两节点相同结果称为独立 BFT 证明。夹具私有文件只放入原临时目录，沿原成功清理路径回收。
+
 2026-10-09 从最新源码重建 Windows / WSL Ubuntu 26.04 原生 Release，257 个源码输入 SHA-256 一致；上述完整场景 1 项通过、0 失败，31.53 秒，日志 `target/closure-mixed-release.log`。此前 2026-10-08 验收 41.78 秒，日志 `target/cross-mixed-acceptance.log`，只对应当时源码。Linux 数据位于原生文件系统，全部原有期限和断言保留；成功后停止本次子进程并清理临时节点目录。验收只证明同机跨系统场景，独立主机路由、防火墙和整机 boot 行为未验证。
 
 2026-10-09 M0 补验并强制门禁：从当前生产源码重建两端原生 Release，205 个生产构建输入在 CRLF→LF 归一化后 SHA-256 一致（target/m0-mixed-source-verification.json）。Release 混合验收 1 项通过、0 失败、0 忽略，25.83 秒（target/m0-required-mixed-release.log）；普通 Windows all-targets 的 250 项主集成全部通过，包含混合场景、0 忽略，44.86 秒（target/m0-required-mixed-all-targets.log）。库 105 项、34 节点目标及 examples 同样通过，fmt/check/clippy(-D warnings)/diff 检查通过。故意移除 SECOND_WSL_BINARY 的负向验收立即退出 101、1 失败、0 忽略，证明缺少环境不能被当作通过（target/m0-required-mixed-missing-env.log）。本次没有修改生产代码、测试期限或安全断言；成功现场与 owned 子进程清理完毕。该验收是同机跨系统支付/恢复基线，不是专门的账户查询跨系统对抗测试，也不覆盖独立物理主机或整机 boot。
+
+随后加入上述 M0 专属钱包调用的 Release 场景 29.68 秒通过（target/m0-query-mixed-release.log），两端主程序及 probe 摘要与此前重建产物相同。默认 Windows 全量库 105、主集成 250 通过，包含混合查询；但后续 34 节点目标在 PeerStore 文件未找到与重启发现阶段失败（target/m0-query-mixed-all-targets.log）。单独重跑通过（11.76 秒，target/m0-query-discovery-diagnostic.log）只提供定位线索，不能覆盖原失败。当前整套验收未全绿；混合查询成功现场已清理，34 节点失败现场保留，不延长期限或将其标为 ignored。
 
 ### Membership 持久追赶边界
 

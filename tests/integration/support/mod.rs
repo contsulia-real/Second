@@ -128,7 +128,7 @@ fn deterministic_address_bytes(value: u64) -> [u8; 32] {
     bytes
 }
 
-fn account_key(value: u64) -> SigningKey {
+pub fn account_key(value: u64) -> SigningKey {
     let mut seed = deterministic_address_bytes(value);
     seed[0] = 0x53;
     SigningKey::from_bytes(&seed)

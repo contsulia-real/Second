@@ -16,6 +16,9 @@ use crate::cli_network_init::start_node;
 use crate::support::{self, account, key, payment, write_transaction_request_in_network};
 
 mod soak;
+mod wallet;
+
+const M0_ACCOUNT_ASSETS: u64 = 257;
 
 struct LinuxWorker {
     child: Child,
@@ -323,7 +326,7 @@ fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
             },
             Operation::Issue {
                 account: alice,
-                count: 2,
+                count: M0_ACCOUNT_ASSETS + 1,
             },
             Operation::Transfer {
                 source,
@@ -335,7 +338,7 @@ fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
             {"type":"register_account","account":alice.to_string()}, {"type":"register_account","account":bob.to_string()},
             {"type":"register_payment_address","address":source.to_string(),"account":alice.to_string()},
             {"type":"register_payment_address","address":destination.to_string(),"account":bob.to_string()},
-            {"type":"issue","recipient":alice.to_string(),"amount":2},
+            {"type":"issue","recipient":alice.to_string(),"amount":M0_ACCOUNT_ASSETS + 1},
             {"type":"transfer","source":source.to_string(),"destination":destination.to_string(),"amount":1}
         ]),
         network_id,
@@ -357,12 +360,13 @@ fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
     });
     for base in &bases {
         let state = snapshot(base, &mut worker).state;
-        assert_eq!(state.balance(alice), 1);
+        assert_eq!(state.balance(alice), M0_ACCOUNT_ASSETS);
         assert_eq!(state.balance(bob), 1);
         assert_eq!(state.payment_address_account(source), Some(alice));
         assert_eq!(state.payment_address_account(destination), Some(bob));
     }
     equal_shared(&bases, &mut worker);
+    wallet::check(&mut worker, &root, &distro, &bases, &wallet_config);
     // Windows failure: two Linux members are necessary to complete 3/4 quorum.
     drop(windows[0].take());
     let issue = |id| {
@@ -542,7 +546,7 @@ fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
     for base in &bases[..3] {
         let state = snapshot(base, &mut worker);
         assert_eq!(state.state.balance(bob), 3);
-        assert_eq!(state.state.balance(alice), 1);
+        assert_eq!(state.state.balance(alice), M0_ACCOUNT_ASSETS);
         if base == &bases[2] {
             assert_eq!(state.minimum_signing_validator_set_version, 2);
         }
