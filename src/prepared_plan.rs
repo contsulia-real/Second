@@ -26,9 +26,6 @@ pub(crate) enum PreparedOperation {
         transfer: EstablishedTransfer,
         currencies: AddressRanges,
     },
-    Destroy {
-        currencies: Vec<CurrencyAddress>,
-    },
     LeakRepair {
         leaked: Vec<CurrencyAddress>,
         leaked_owners: Vec<AccountAddress>,
@@ -79,13 +76,6 @@ impl PreparedOperation {
                     *transfer,
                     currencies,
                 )?;
-            }
-            Self::Destroy { currencies } => {
-                if currencies.is_empty() {
-                    return Err(PreparationError::InvalidPreparedPlan);
-                }
-                state.validate_destroy_targets(working, currencies)?;
-                state.apply_destroy(working, currencies);
             }
             Self::LeakRepair {
                 leaked,
@@ -142,7 +132,6 @@ impl PreparedOperation {
                 transfer,
                 currencies,
             } => claims.restore_transfer(claim_id, transfer.source_account, currencies),
-            Self::Destroy { currencies } => claims.restore_explicit(claim_id, currencies),
             Self::LeakRepair {
                 leaked, reserve, ..
             } => claims.restore_leak_repair(claim_id, leaked, reserve),
@@ -160,10 +149,7 @@ impl PreparedOperation {
             | Self::FinalizePaymentAddressRetirement { address } => {
                 Some(LifecycleAddress::Payment(*address))
             }
-            Self::Issue { .. }
-            | Self::Transfer { .. }
-            | Self::Destroy { .. }
-            | Self::LeakRepair { .. } => None,
+            Self::Issue { .. } | Self::Transfer { .. } | Self::LeakRepair { .. } => None,
         }
     }
 }
@@ -289,7 +275,7 @@ impl PreparedTask {
         for operation in operations {
             match operation {
                 PreparedOperation::RegisterAccount { account } => {
-                    hasher.update([8]);
+                    hasher.update([7]);
                     hasher.update(account.bytes());
                 }
                 PreparedOperation::Issue { account, addresses } => {
@@ -309,17 +295,13 @@ impl PreparedTask {
                     hasher.update(transfer.amount.to_be_bytes());
                     hash_ranges(&mut hasher, currencies)?;
                 }
-                PreparedOperation::Destroy { currencies } => {
-                    hasher.update([3]);
-                    hash_addresses(&mut hasher, currencies)?;
-                }
                 PreparedOperation::LeakRepair {
                     leaked,
                     leaked_owners,
                     reserve,
                     replacement_reserve,
                 } => {
-                    hasher.update([4]);
+                    hasher.update([3]);
                     hash_addresses(&mut hasher, leaked)?;
                     hash_len(&mut hasher, leaked_owners.len())?;
                     for owner in leaked_owners {
@@ -329,16 +311,16 @@ impl PreparedTask {
                     hash_ranges(&mut hasher, replacement_reserve)?;
                 }
                 PreparedOperation::RegisterPaymentAddress { address, account } => {
-                    hasher.update([5]);
+                    hasher.update([4]);
                     hasher.update(address.bytes());
                     hasher.update(account.bytes());
                 }
                 PreparedOperation::RetirePaymentAddress { address } => {
-                    hasher.update([6]);
+                    hasher.update([5]);
                     hasher.update(address.bytes());
                 }
                 PreparedOperation::FinalizePaymentAddressRetirement { address } => {
-                    hasher.update([7]);
+                    hasher.update([6]);
                     hasher.update(address.bytes());
                 }
             }

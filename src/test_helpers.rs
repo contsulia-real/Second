@@ -65,7 +65,7 @@ pub(crate) fn sign(
                     owners.insert(account(seed));
                 }
             }
-            Operation::Issue { .. } | Operation::Destroy { .. } | Operation::LeakRepair { .. } => {}
+            Operation::Issue { .. } | Operation::LeakRepair { .. } => {}
         }
     }
     let mut task = LegalTask::sign(payload, authorizer)?;

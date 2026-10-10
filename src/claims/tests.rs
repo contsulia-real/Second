@@ -6,10 +6,6 @@ fn restored_signed_lists_reject_unallocatable_addresses_without_panicking_or_cla
     let id = OperationClaimId::new(TaskId::parse("boundary").unwrap(), 0);
     let invalid = [CurrencyAddress::new(u64::MAX)];
     assert!(matches!(
-        claims.restore_explicit(id.clone(), &invalid),
-        Err(ClaimError::ClaimIdentityConflict(_))
-    ));
-    assert!(matches!(
         claims.restore_leak_repair(id, &invalid, &AddressRanges::default()),
         Err(ClaimError::ClaimIdentityConflict(_))
     ));

@@ -93,7 +93,7 @@ pub(crate) fn decode_legal_task(bytes: &[u8]) -> Option<LegalTask> {
 fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), TaskEncodingError> {
     match operation {
         Operation::RegisterAccount { account } => {
-            out.push(8);
+            out.push(7);
             out.extend_from_slice(&account.bytes());
         }
         Operation::Transfer {
@@ -111,25 +111,21 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
             out.extend_from_slice(&account.bytes());
             out.extend_from_slice(&count.to_be_bytes());
         }
-        Operation::Destroy { currencies } => {
-            out.push(3);
-            push_currency_addresses(out, currencies)?;
-        }
         Operation::LeakRepair { leaked } => {
-            out.push(4);
+            out.push(3);
             push_currency_addresses(out, leaked)?;
         }
         Operation::RegisterPaymentAddress { address, account } => {
-            out.push(5);
+            out.push(4);
             out.extend_from_slice(&address.bytes());
             out.extend_from_slice(&account.bytes());
         }
         Operation::RetirePaymentAddress { address } => {
-            out.push(6);
+            out.push(5);
             out.extend_from_slice(&address.bytes());
         }
         Operation::FinalizePaymentAddressRetirement { address } => {
-            out.push(7);
+            out.push(6);
             out.extend_from_slice(&address.bytes());
         }
     }
@@ -138,7 +134,7 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
 
 fn decode_operation(cursor: &mut Cursor<'_>) -> Option<Operation> {
     match cursor.u8()? {
-        8 => Some(Operation::RegisterAccount {
+        7 => Some(Operation::RegisterAccount {
             account: AccountAddress::from_bytes(cursor.array_32()?),
         }),
         1 => Some(Operation::Transfer {
@@ -150,20 +146,17 @@ fn decode_operation(cursor: &mut Cursor<'_>) -> Option<Operation> {
             account: AccountAddress::from_bytes(cursor.array_32()?),
             count: cursor.u64()?,
         }),
-        3 => Some(Operation::Destroy {
-            currencies: decode_currency_addresses(cursor)?,
-        }),
-        4 => Some(Operation::LeakRepair {
+        3 => Some(Operation::LeakRepair {
             leaked: decode_currency_addresses(cursor)?,
         }),
-        5 => Some(Operation::RegisterPaymentAddress {
+        4 => Some(Operation::RegisterPaymentAddress {
             address: PaymentAddress::from_bytes(cursor.array_32()?),
             account: AccountAddress::from_bytes(cursor.array_32()?),
         }),
-        6 => Some(Operation::RetirePaymentAddress {
+        5 => Some(Operation::RetirePaymentAddress {
             address: PaymentAddress::from_bytes(cursor.array_32()?),
         }),
-        7 => Some(Operation::FinalizePaymentAddressRetirement {
+        6 => Some(Operation::FinalizePaymentAddressRetirement {
             address: PaymentAddress::from_bytes(cursor.array_32()?),
         }),
         _ => None,

@@ -20,7 +20,6 @@ pub enum SignatureParseError {
 pub enum TaskValidationError {
     TransferAmountZero,
     IssueAmountZero,
-    EmptyDestroy,
     EmptyLeakRepair,
     TooManyLeakRepairAddresses { maximum: usize, actual: usize },
     DuplicateCurrency(CurrencyAddress),
@@ -64,7 +63,6 @@ pub enum ExecutionError {
         available: u64,
     },
     CurrencyNotFound(CurrencyAddress),
-    CurrencyStillOccupied(CurrencyAddress),
     CurrencyNotCirculation(CurrencyAddress),
     CurrencyNotOwned(CurrencyAddress),
     DuplicateCurrency(CurrencyAddress),

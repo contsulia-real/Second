@@ -219,7 +219,7 @@ impl LegalTask {
         let needs_authorizer = self.payload.operations().iter().any(|operation| {
             matches!(
                 operation,
-                Operation::Issue { .. } | Operation::Destroy { .. } | Operation::LeakRepair { .. }
+                Operation::Issue { .. } | Operation::LeakRepair { .. }
             )
         });
         if self.authorizer_public_key == [0; 32] {

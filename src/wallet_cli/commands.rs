@@ -118,9 +118,7 @@ pub(super) fn signed_task(request: &StoredRequest) -> Result<Option<LegalTask>, 
     let needs_authorizer = account_task.payload().operations().iter().any(|operation| {
         matches!(
             operation,
-            second::Operation::Issue { .. }
-                | second::Operation::Destroy { .. }
-                | second::Operation::LeakRepair { .. }
+            second::Operation::Issue { .. } | second::Operation::LeakRepair { .. }
         )
     });
     match (&request.signed, request.authorizer) {
@@ -182,12 +180,9 @@ fn save_request(session: &mut WalletSession, operations: Value) -> Result<String
     let intent: Value =
         serde_json::from_slice(&signed_intent).map_err(|error| error.to_string())?;
     let requires_authorizer = unsigned["operations"].as_array().is_some_and(|operations| {
-        operations.iter().any(|op| {
-            matches!(
-                op["type"].as_str(),
-                Some("issue" | "destroy" | "leak_repair")
-            )
-        })
+        operations
+            .iter()
+            .any(|op| matches!(op["type"].as_str(), Some("issue" | "leak_repair")))
     });
     let (signed, authorizer) = match session.data.authorizer_seed.filter(|_| requires_authorizer) {
         Some(seed) => {

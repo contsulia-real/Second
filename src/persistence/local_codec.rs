@@ -203,7 +203,7 @@ fn encode_prepared_operation(
 ) -> Result<(), PersistenceError> {
     match operation {
         PreparedOperation::RegisterAccount { account } => {
-            out.push(8);
+            out.push(7);
             out.extend_from_slice(&account.bytes());
         }
         PreparedOperation::Issue { account, addresses } => {
@@ -223,17 +223,13 @@ fn encode_prepared_operation(
             out.extend_from_slice(&transfer.amount.to_be_bytes());
             encode_ranges(out, currencies)?;
         }
-        PreparedOperation::Destroy { currencies } => {
-            out.push(3);
-            encode_addresses(out, currencies)?;
-        }
         PreparedOperation::LeakRepair {
             leaked,
             leaked_owners,
             reserve,
             replacement_reserve,
         } => {
-            out.push(4);
+            out.push(3);
             encode_addresses(out, leaked)?;
             push_len(out, leaked_owners.len())?;
             for owner in leaked_owners {
@@ -243,16 +239,16 @@ fn encode_prepared_operation(
             encode_ranges(out, replacement_reserve)?;
         }
         PreparedOperation::RegisterPaymentAddress { address, account } => {
-            out.push(5);
+            out.push(4);
             out.extend_from_slice(&address.bytes());
             out.extend_from_slice(&account.bytes());
         }
         PreparedOperation::RetirePaymentAddress { address } => {
-            out.push(6);
+            out.push(5);
             out.extend_from_slice(&address.bytes());
         }
         PreparedOperation::FinalizePaymentAddressRetirement { address } => {
-            out.push(7);
+            out.push(6);
             out.extend_from_slice(&address.bytes());
         }
     }
@@ -263,7 +259,7 @@ fn decode_prepared_operation(
     decoder: &mut Decoder<'_>,
 ) -> Result<PreparedOperation, PersistenceError> {
     match decoder.read_u8()? {
-        8 => Ok(PreparedOperation::RegisterAccount {
+        7 => Ok(PreparedOperation::RegisterAccount {
             account: AccountAddress::from_bytes(decoder.read_array_32()?),
         }),
         1 => Ok(PreparedOperation::Issue {
@@ -280,10 +276,7 @@ fn decode_prepared_operation(
             },
             currencies: decode_ranges(decoder)?,
         }),
-        3 => Ok(PreparedOperation::Destroy {
-            currencies: decode_addresses(decoder)?,
-        }),
-        4 => {
+        3 => {
             let leaked = decode_addresses(decoder)?;
             let owner_count = decoder.read_len()?;
             if owner_count > decoder.remaining() / 32 {
@@ -301,14 +294,14 @@ fn decode_prepared_operation(
                 replacement_reserve: decode_ranges(decoder)?,
             })
         }
-        5 => Ok(PreparedOperation::RegisterPaymentAddress {
+        4 => Ok(PreparedOperation::RegisterPaymentAddress {
             address: PaymentAddress::from_bytes(decoder.read_array_32()?),
             account: AccountAddress::from_bytes(decoder.read_array_32()?),
         }),
-        6 => Ok(PreparedOperation::RetirePaymentAddress {
+        5 => Ok(PreparedOperation::RetirePaymentAddress {
             address: PaymentAddress::from_bytes(decoder.read_array_32()?),
         }),
-        7 => Ok(PreparedOperation::FinalizePaymentAddressRetirement {
+        6 => Ok(PreparedOperation::FinalizePaymentAddressRetirement {
             address: PaymentAddress::from_bytes(decoder.read_array_32()?),
         }),
         _ => Err(PersistenceError::InvalidSnapshot),

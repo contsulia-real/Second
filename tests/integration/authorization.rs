@@ -189,18 +189,12 @@ fn structurally_invalid_operations_never_become_verified_tasks() {
             second::TaskValidationError::IssueAmountZero,
         ),
         (
-            Operation::Destroy {
-                currencies: Vec::new(),
-            },
-            second::TaskValidationError::EmptyDestroy,
-        ),
-        (
             Operation::LeakRepair { leaked: Vec::new() },
             second::TaskValidationError::EmptyLeakRepair,
         ),
         (
-            Operation::Destroy {
-                currencies: vec![
+            Operation::LeakRepair {
+                leaked: vec![
                     second::CurrencyAddress::new(1),
                     second::CurrencyAddress::new(1),
                 ],

@@ -19,9 +19,12 @@ fn fragmented_claim_pool_is_uniform_stable_and_sampled_without_replacement() {
     }
     let mut claims = CurrencyClaimBook::new();
     claims
-        .claim_explicit(
+        .restore_leak_repair(
             OperationClaimId::new(TaskId::parse("other-task").unwrap(), 0),
-            &[CurrencyAddress::new(10), CurrencyAddress::new(50)],
+            &[CurrencyAddress::new(160), CurrencyAddress::new(161)],
+            &[CurrencyAddress::new(10), CurrencyAddress::new(50)]
+                .into_iter()
+                .collect(),
         )
         .unwrap();
     let task = TaskId::parse("sampling-task").unwrap();

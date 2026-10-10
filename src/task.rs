@@ -23,9 +23,6 @@ pub enum Operation {
         account: AccountAddress,
         count: u64,
     },
-    Destroy {
-        currencies: Vec<CurrencyAddress>,
-    },
     LeakRepair {
         leaked: Vec<CurrencyAddress>,
     },
@@ -90,9 +87,6 @@ impl LegalTaskPayload {
                 Operation::Issue { count, .. } if *count == 0 => {
                     return Err(TaskValidationError::IssueAmountZero);
                 }
-                Operation::Destroy { currencies } => {
-                    validate_currency_set(currencies, TaskValidationError::EmptyDestroy)?;
-                }
                 Operation::LeakRepair { leaked } => {
                     leak_repair_addresses = leak_repair_addresses.saturating_add(leaked.len());
                     if leak_repair_addresses > MAX_LEAK_REPAIR_ADDRESSES_PER_TASK {
@@ -101,7 +95,7 @@ impl LegalTaskPayload {
                             actual: leak_repair_addresses,
                         });
                     }
-                    validate_currency_set(leaked, TaskValidationError::EmptyLeakRepair)?;
+                    validate_currency_set(leaked)?;
                 }
                 Operation::Transfer { .. }
                 | Operation::RegisterAccount { .. }
@@ -139,7 +133,7 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
     match operation {
         Operation::RegisterAccount { account } => {
             push_array_len(out, 2)?;
-            push_unsigned(out, 7);
+            push_unsigned(out, 6);
             push_text(out, &account.canonical_string())?;
         }
         Operation::Transfer {
@@ -159,30 +153,25 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
             push_text(out, &account.canonical_string())?;
             push_unsigned(out, *count);
         }
-        Operation::Destroy { currencies } => {
-            push_array_len(out, 2)?;
-            push_unsigned(out, 2);
-            push_currency_addresses(out, currencies)?;
-        }
         Operation::LeakRepair { leaked } => {
             push_array_len(out, 2)?;
-            push_unsigned(out, 3);
+            push_unsigned(out, 2);
             push_currency_addresses(out, leaked)?;
         }
         Operation::RegisterPaymentAddress { address, account } => {
             push_array_len(out, 3)?;
-            push_unsigned(out, 4);
+            push_unsigned(out, 3);
             push_text(out, &address.canonical_string())?;
             push_text(out, &account.canonical_string())?;
         }
         Operation::RetirePaymentAddress { address } => {
             push_array_len(out, 2)?;
-            push_unsigned(out, 5);
+            push_unsigned(out, 4);
             push_text(out, &address.canonical_string())?;
         }
         Operation::FinalizePaymentAddressRetirement { address } => {
             push_array_len(out, 2)?;
-            push_unsigned(out, 6);
+            push_unsigned(out, 5);
             push_text(out, &address.canonical_string())?;
         }
     }
@@ -190,12 +179,9 @@ fn encode_operation(out: &mut Vec<u8>, operation: &Operation) -> Result<(), Task
     Ok(())
 }
 
-fn validate_currency_set(
-    addresses: &[CurrencyAddress],
-    empty_error: TaskValidationError,
-) -> Result<(), TaskValidationError> {
+fn validate_currency_set(addresses: &[CurrencyAddress]) -> Result<(), TaskValidationError> {
     if addresses.is_empty() {
-        return Err(empty_error);
+        return Err(TaskValidationError::EmptyLeakRepair);
     }
 
     let mut seen = BTreeSet::new();

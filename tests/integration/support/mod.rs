@@ -193,7 +193,7 @@ pub fn sign_task_in_network(
             Operation::LeakRepair { .. } => {
                 owners.insert(account(1));
             }
-            Operation::Issue { .. } | Operation::Destroy { .. } => {}
+            Operation::Issue { .. } => {}
         }
     }
     drop(payments);

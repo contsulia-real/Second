@@ -284,7 +284,6 @@ pub(super) fn validate_prepared_plans_against_state(
                 } => Some(replacement_reserve),
                 PreparedOperation::Transfer { .. }
                 | PreparedOperation::RegisterAccount { .. }
-                | PreparedOperation::Destroy { .. }
                 | PreparedOperation::RegisterPaymentAddress { .. }
                 | PreparedOperation::RetirePaymentAddress { .. }
                 | PreparedOperation::FinalizePaymentAddressRetirement { .. } => None,

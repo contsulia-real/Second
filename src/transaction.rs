@@ -69,9 +69,6 @@ enum RawOperation {
         recipient: String,
         amount: u64,
     },
-    Destroy {
-        currencies: Vec<String>,
-    },
     LeakRepair {
         currencies: Vec<String>,
     },
@@ -271,9 +268,6 @@ fn parse_operation(operation: RawOperation) -> Result<Operation, TransactionRequ
             account: AccountAddress::parse(&recipient)
                 .map_err(|_| TransactionRequestParseError::InvalidAccountAddress)?,
             count: amount,
-        }),
-        RawOperation::Destroy { currencies } => Ok(Operation::Destroy {
-            currencies: parse_currency_addresses(currencies)?,
         }),
         RawOperation::LeakRepair { currencies } => Ok(Operation::LeakRepair {
             leaked: parse_currency_addresses(currencies)?,

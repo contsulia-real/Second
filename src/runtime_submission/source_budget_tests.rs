@@ -90,23 +90,27 @@ async fn allocation_source_rejection_precedes_all_durable_admission() {
             },
         ],
     ] {
-        operations.push(Operation::Destroy {
-            currencies: vec![CurrencyAddress::new(3)],
-        });
         let overhead = encoded_source_length(0, [1]).unwrap();
         let target_request_length = MAX_PREPARED_SOURCE_SIZE + 1 - overhead;
         let initial_length = encode_legal_task(&signed("a", operations.clone()))
             .unwrap()
             .len();
-        // Align the request to the eight-byte Destroy addresses without changing limits.
-        let name = "a".repeat(1 + (target_request_length - initial_length) % size_of::<u64>());
-        let initial_length = encode_legal_task(&signed(&name, operations.clone()))
-            .unwrap()
-            .len();
-        let count = 1 + (target_request_length - initial_length) / size_of::<u64>();
-        *operations.last_mut().unwrap() = Operation::Destroy {
-            currencies: (3..3 + count as u64).map(CurrencyAddress::new).collect(),
+        let filler = Operation::Issue {
+            account: crate::test_helpers::account(61),
+            count: 1,
         };
+        let mut with_filler = operations.clone();
+        with_filler.push(filler.clone());
+        let filler_length =
+            encode_legal_task(&signed("a", with_filler)).unwrap().len() - initial_length;
+        // Align with complete Issue operations; leave one TaskId byte for the accepted boundary.
+        let mut name_length = 1 + (target_request_length - initial_length) % filler_length;
+        if name_length == 1 {
+            name_length += filler_length;
+        }
+        let name = "a".repeat(name_length);
+        let count = (target_request_length - initial_length - (name_length - 1)) / filler_length;
+        operations.extend(std::iter::repeat_n(filler, count));
         let task = signed(&name, operations.clone());
         let request_length = encode_legal_task(&task).unwrap().len();
         assert_eq!(request_length, target_request_length);

@@ -41,7 +41,7 @@ impl SecondState {
                         }
                     }
                 }
-                Operation::Issue { .. } | Operation::Destroy { .. } => {}
+                Operation::Issue { .. } => {}
             }
         }
         Ok(())

@@ -42,40 +42,6 @@ impl SecondState {
         Ok(())
     }
 
-    pub(crate) fn validate_destroy_targets(
-        &self,
-        working: &BusinessState,
-        currencies: &[CurrencyAddress],
-    ) -> Result<(), ExecutionError> {
-        self.require_unique_currency_list(currencies)?;
-
-        for address in currencies {
-            let currency = working
-                .currencies
-                .get(address)
-                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
-
-            if currency.role != CurrencyRole::Circulation {
-                return Err(ExecutionError::CurrencyNotCirculation(*address));
-            }
-            if currency.owner.is_some() {
-                return Err(ExecutionError::CurrencyStillOccupied(*address));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn apply_destroy(
-        &self,
-        working: &mut BusinessState,
-        currencies: &[CurrencyAddress],
-    ) {
-        for address in currencies {
-            working.currencies.remove(address);
-        }
-    }
-
     pub(crate) fn validate_leaked_owners(
         &self,
         working: &BusinessState,

@@ -12,7 +12,7 @@ Second 的工程目标是安全、去中心化协作、隐私保护、高吞吐�
 
 ### 1.1 系统主要路径
 
-~~~text
+```text
 用户钱包或外部签发者
          │
          ▼
@@ -40,20 +40,20 @@ PreparedTask：按序预执行，冻结资源与选择
          │
          ▼
 任务状态、私有账户查询和公开 Currency 更新
-~~~
+```
 
 ## 2. 标识与权限域
 
 Second 使用相互独立的标识和密钥职责。
 
-| 概念 | 源码类型 | 语义 |
-| --- | --- | --- |
-| 账户 | `AccountAddress` | 32 字节账户公钥身份，文本前缀 `acct_`，注册后永久存在 |
-| 支付地址 | `PaymentAddress` | 32 字节支付标识，文本前缀 `pay_`，注册后永久绑定一个账户 |
+| 概念     | 源码类型            | 语义                                                       |
+| -------- | ------------------- | ---------------------------------------------------------- |
+| 账户     | `AccountAddress`  | 32 字节账户公钥身份，文本前缀`acct_`，注册后永久存在     |
+| 支付地址 | `PaymentAddress`  | 32 字节支付标识，文本前缀`pay_`，注册后永久绑定一个账户  |
 | 货币对象 | `CurrencyAddress` | `u64` 唯一货币地址，规范 Base62 文本表示，分配后永久消费 |
-| 任务 | `TaskId` | 1–128 字节合法 ASCII 标识，永久绑定具体请求摘要 |
-| 网络节点 | `NodeId` | QUIC 传输身份对应的节点标识 |
-| 验证者 | `ValidatorId` | 委员会注册表中的验证者身份 |
+| 任务     | `TaskId`          | 1–128 字节合法 ASCII 标识，永久绑定具体请求摘要           |
+| 网络节点 | `NodeId`          | QUIC 传输身份对应的节点标识                                |
+| 验证者   | `ValidatorId`     | 委员会注册表中的验证者身份                                 |
 
 账户使用 Ed25519 密钥签名。`AccountAddress` 的 32 字节对应账户公钥，协议据此校验与账户有关的操作。业务签名、私有查询签名和验证者投票各有独立签名域与输入约束。
 
@@ -63,11 +63,11 @@ Second 使用相互独立的标识和密钥职责。
 
 `SecondState` 由三层组成：
 
-| 状态 | 源码结构 | 主要字段 |
-| --- | --- | --- |
-| 协议状态 | `ProtocolState` | `next_currency_address`、`task_bindings`、`task_handoff` |
-| 执行前置状态 | `PrerequisiteState` | `payment_executions` |
-| 业务状态 | `BusinessState` | `accounts`、`payment_addresses`、`currencies`、`payment_history` |
+| 状态         | 源码结构              | 主要字段                                                                 |
+| ------------ | --------------------- | ------------------------------------------------------------------------ |
+| 协议状态     | `ProtocolState`     | `next_currency_address`、`task_bindings`、`task_handoff`           |
+| 执行前置状态 | `PrerequisiteState` | `payment_executions`                                                   |
+| 业务状态     | `BusinessState`     | `accounts`、`payment_addresses`、`currencies`、`payment_history` |
 
 ### 3.1 Currency
 
@@ -75,11 +75,11 @@ Second 使用相互独立的标识和密钥职责。
 
 资产归属的权威事实是 `BusinessState.currencies` 中的 owner。`SecondState::balance(account)` 累加 owner 等于目标账户的区间长度，得到该账户的 Secoin 数量。账户存在性由 `has_account` 单独判定。
 
-~~~text
+```text
 balance(A) = sum(run.len where run.owner = A)
-~~~
+```
 
-`current_supply` 统计当前存在的 Currency；`reserve_count` 统计未被占有的 Reserve 对象。由 `CurrencyAllocation` 确认的地址区间以及 `next_currency_address` 遵守身份单调消费规则；销毁或后续业务失败均不能重新使用已经消费的身份。
+`current_supply` 统计当前存在的 Currency；`reserve_count` 统计未被占有的 Reserve 对象。由 `CurrencyAllocation` 确认的地址区间以及 `next_currency_address` 遵守身份单调消费规则；修复废弃旧对象或后续业务失败均不能重新使用已经消费的身份。
 
 逻辑上每单位 Secoin 仍是独立 Currency。完整状态节点使用 `CurrencyLedger` 保存 `{start, len, role, owner}` 区间；不重叠，相邻且 role/owner 相同的区间自动合并。单地址修改拆分并合并，余额和 Reserve 数量由区间长度求和，不另存余额真值。私有快照保存规范区间，解码拒绝空、溢出、重叠和可合并相邻区间；当前格式版本保持 1，无旧格式读取。
 
@@ -91,9 +91,9 @@ balance(A) = sum(run.len where run.owner = A)
 
 支付地址的生命周期：
 
-~~~text
+```text
 Active → Retiring → Retired
-~~~
+```
 
 `Active` 允许建立新支付；`Retiring` 停止建立以该地址参与的新支付，并保留已建立的在途执行；`Retired` 表示已完成认证退休。最终退休验证活动执行、资源占用和交接约束。地址与账户的永久绑定继续保留。
 
@@ -103,22 +103,21 @@ Active → Retiring → Retired
 
 ## 4. 操作模型
 
-`src/task.rs` 中的 `Operation` 定义八类操作。
+`src/task.rs` 中的 `Operation` 定义七类操作。
 
-| 操作 | 内容 | 必需条件与结果 |
-| --- | --- | --- |
-| `RegisterAccount` | account | 账户签名；注册新账户 |
-| `RegisterPaymentAddress` | address, account | 账户签名；永久绑定新支付地址 |
-| `Transfer` | source, destination, amount | 源账户签名、有效地址、可用流通 Currency；提交后更新 owner |
-| `Issue` | account, count | Authorizer 授权、有效分配区间；创建对应数量的流通 Currency |
-| `Destroy` | currencies | Authorizer 授权；移除列举的空 owner 流通 Currency |
-| `LeakRepair` | leaked | Authorizer 与相关所有者签名；Reserve 替换、归属保留与 Reserve 补充 |
-| `RetirePaymentAddress` | address | 账户签名；进入 Retiring |
-| `FinalizePaymentAddressRetirement` | address | 账户签名；满足在途约束后进入 Retired |
+| 操作                                 | 内容                        | 必需条件与结果                                                     |
+| ------------------------------------ | --------------------------- | ------------------------------------------------------------------ |
+| `RegisterAccount`                  | account                     | 账户签名；注册新账户                                               |
+| `RegisterPaymentAddress`           | address, account            | 账户签名；永久绑定新支付地址                                       |
+| `Transfer`                         | source, destination, amount | 源账户签名、有效地址、可用流通 Currency；提交后更新 owner          |
+| `Issue`                            | account, count              | Authorizer 授权、有效分配区间；创建对应数量的流通 Currency         |
+| `LeakRepair`                       | leaked                      | Authorizer 与相关所有者签名；Reserve 替换、归属保留与 Reserve 补充 |
+| `RetirePaymentAddress`             | address                     | 账户签名；进入 Retiring                                            |
+| `FinalizePaymentAddressRetirement` | address                     | 账户签名；满足在途约束后进入 Retired                               |
 
-转账金额和发行数量必须大于零。Destroy 和 LeakRepair 使用非空、唯一的 Currency 列表。Prepare 在同一任务中按照 operations 的原始顺序构建中间业务状态并重新验证每步条件。任务执行遵守整体业务原子性。
+转账金额和发行数量必须大于零。LeakRepair 使用非空、唯一的 Currency 列表。Prepare 在同一任务中按照 operations 的原始顺序构建中间业务状态并重新验证每步条件。任务执行遵守整体业务原子性。
 
-一个 LegalTask 内全部 LeakRepair 操作的 leaked 地址总数不得超过 `MAX_LEAK_REPAIR_ADDRESSES_PER_TASK = 16,384`；合法任务结构校验返回明确的 `TooManyLeakRepairAddresses`，不截断列表。大批量泄露需拆成多个任务。Issue、Transfer、Destroy 的数量限制及组合任务的原子性不变。
+一个 LegalTask 内全部 LeakRepair 操作的 leaked 地址总数不得超过 `MAX_LEAK_REPAIR_ADDRESSES_PER_TASK = 16,384`；合法任务结构校验返回明确的 `TooManyLeakRepairAddresses`，不截断列表。大批量泄露需拆成多个任务。Issue、Transfer 的数量限制及组合任务的原子性不变。
 
 ### 4.1 Transfer 的冻结选择
 
@@ -126,9 +125,9 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 
 冻结阶段维护区间资源占用，业务最终提交时按区间更改 Currency.owner。支付历史同业务结果一起持久化。同一请求的多个合法冻结变体具有各自的规范计划摘要，证据处理必须保持原冻结选择和对应签票约束。
 
-### 4.2 发行、销毁与修复
+### 4.2 发行与修复
 
-`Issue` 使用认证地址区间创建新对象，分配、冻结和提交均不展开单位地址缓冲。`Destroy` 只能删除 owner 为空的 Circulation 对象。`LeakRepair` 验证每个被修复对象的角色、owner 和授权，从空闲 Reserve 中取出相同数量的对象，将其调整为原账户拥有的 Circulation，同时销毁旧对象，并用新分配地址补充同数量 Reserve。
+`Issue` 使用认证地址区间创建新对象，分配、冻结和提交均不展开单位地址缓冲。当前没有销毁货币的操作。`LeakRepair` 验证每个被修复对象的角色、owner 和授权，从空闲 Reserve 中取出相同数量的对象，将其调整为原账户拥有的 Circulation，同时废弃旧对象，并用新分配地址补充同数量 Reserve。
 
 每项操作的 Currency 选择、需要的地址区间和资源冲突均纳入认证任务上下文。
 
@@ -148,9 +147,11 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 
 `LegalTaskPayload` 包含 TaskId、`protocol_version`、`expires_at` 和有序 `operations`。`LegalTask` 携带网络 ID、签发者公钥及签名、账户签名列表。请求使用规范化编码签名，操作顺序参与任务身份。当前协议版本为 `CURRENT_PROTOCOL_VERSION = 1`。
 
+操作标签连续编号：CBOR 签名字节按 Transfer、Issue、LeakRepair、RegisterPaymentAddress、RetirePaymentAddress、FinalizePaymentAddressRetirement、RegisterAccount 顺序取 0–6；请求二进制编码同序取 1–7。冻结计划的本地编码和摘要按 Issue、Transfer、LeakRepair、RegisterPaymentAddress、RetirePaymentAddress、FinalizePaymentAddressRetirement、RegisterAccount 顺序取 1–7。
+
 `LegalTask::verify` 校验协议版本、网络 ID、操作结构、Authorizer 签名以及账户签名。`SecondState::authorize_task` 依据当前状态检查每项操作所要求的账户签名，并在实际准备过程中复验。
 
-含 Issue 或 LeakRepair 的任务还在生成 `VerifiedLegalTask` 前检查分配入场来源预算，早于 TaskId 绑定和地址分配排队。计量与 `PreparedTask::encode_source` 共用函数：来源包含 4 字节请求长度、原请求，以及每项冻结选择的 4 字节区间数和每区间 16 字节起点/长度。入场预算为 `4 + 请求字节 + Σ_LeakRepair(4 + 16 × leaked数量) + Σ_Transfer(4 + 16 × 1)`，超过既有 2,097,156 字节来源上限返回 `AllocationSourceTooLarge { maximum, required }`。Issue 没有选择字段，只有全来源共用的 4 字节请求长度；Transfer 使用最好情形的一段，仅排除其必然超限情况，LeakRepair 使用确定的最坏碎片化上界。这是保守的入场预算，不保证含 Transfer 的计划一定可编码。纯 Transfer/Destroy 任务不增加此检查，现有字节上限、签名域、协议版本和 Prepare 恢复分支不变。
+含 Issue 或 LeakRepair 的任务还在生成 `VerifiedLegalTask` 前检查分配入场来源预算，早于 TaskId 绑定和地址分配排队。计量与 `PreparedTask::encode_source` 共用函数：来源包含 4 字节请求长度、原请求，以及每项冻结选择的 4 字节区间数和每区间 16 字节起点/长度。入场预算为 `4 + 请求字节 + Σ_LeakRepair(4 + 16 × leaked数量) + Σ_Transfer(4 + 16 × 1)`，超过既有 2,097,156 字节来源上限返回 `AllocationSourceTooLarge { maximum, required }`。Issue 没有选择字段，只有全来源共用的 4 字节请求长度；Transfer 使用最好情形的一段，仅排除其必然超限情况，LeakRepair 使用确定的最坏碎片化上界。这是保守的入场预算，不保证含 Transfer 的计划一定可编码。纯 Transfer 任务不增加此检查，现有字节上限、签名域、协议版本和 Prepare 恢复分支不变。
 
 纯 LeakRepair 任务设地址总数 Q、操作数 m、选择区间总数 r、TaskId 字节数 t、可选过期字段额外字节 e（0 或 8）、账户签名数 s，则来源字节为 `146 + t + e + 9m + 8Q + 16r + 96s`。非空操作保证 m ≤ Q，碎片化最坏 r = Q；取 Q = m = r = 16,384、t = 128、e = 8、s = 1,024，实际来源为 639,258 字节，距上限余 1,457,898 字节。该上限为随机 Reserve 选择导致 r 接近 Q 时预留确定预算，不增加任何既有字节上限；混合任务另受上述入场预算约束。
 
@@ -158,7 +159,7 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 
 - 注册账户、注册支付地址、转账、退役及最终退休要求对应账户签名。
 - LeakRepair 要求相关 Currency 所有者的账户签名。
-- Issue、Destroy 和 LeakRepair 还要求受网络 `AuthorizerSet` 信任的签发者签名。
+- Issue 和 LeakRepair 还要求受网络 `AuthorizerSet` 信任的签发者签名。
 - 普通账户操作允许使用零值 Authorizer 信息和有效账户签名。
 - Authorizer 权限由当前网络配置提供。签名有效性与业务可执行性分别校验。
 
@@ -176,15 +177,15 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 
 `LegalTaskStatus` 提供以下状态：
 
-| 状态 | 语义 |
-| --- | --- |
-| `Unknown` | 当前节点没有匹配 TaskId 和请求摘要的绑定 |
-| `Bound` | 请求已持久绑定，相关业务尚未进入可报告的活动准备阶段 |
-| `Prepared` | 已建立冻结业务计划 |
-| `Voting` | 计划已进入共识签票阶段 |
-| `Finalized` | Commit 最终性已持久保存，等待或正在执行最终提交 |
-| `Succeeded` | 业务已成功提交 |
-| `Cancelled` | 原任务得到合法 Abort 终态 |
+| 状态          | 语义                                                 |
+| ------------- | ---------------------------------------------------- |
+| `Unknown`   | 当前节点没有匹配 TaskId 和请求摘要的绑定             |
+| `Bound`     | 请求已持久绑定，相关业务尚未进入可报告的活动准备阶段 |
+| `Prepared`  | 已建立冻结业务计划                                   |
+| `Voting`    | 计划已进入共识签票阶段                               |
+| `Finalized` | Commit 最终性已持久保存，等待或正在执行最终提交      |
+| `Succeeded` | 业务已成功提交                                       |
+| `Cancelled` | 原任务得到合法 Abort 终态                            |
 
 任务提交回复中的 accepted、allocating、pending 等词表示受理和处理中状态。钱包及业务客户端根据 `Succeeded` 确认实际业务成功。
 
@@ -196,7 +197,7 @@ Issue 与 LeakRepair 需要新的 CurrencyAddress。`CurrencyAllocation` 以当�
 
 ### 6.4 PreparedTask
 
-`PreparedTaskBook` 按操作顺序模拟业务变化，恢复或建立 `CurrencyClaimBook` 和生命周期资源占用，生成冻结的 `PreparedTask`，保存原签名请求、原委员会版本、业务操作及规范选币区间。`AddressRanges` 有序、不相交、不相邻；计划摘要及冻结见证编码使用起点与长度。Transfer 仍选择最低的可用 amount 个身份，按区间跳过其他任务占用；claim 引用计数、资源 fence 和私有持久化均按区间工作。Destroy/LeakRepair 的原签名地址列表及 LeakRepair 对应关系不变。
+`PreparedTaskBook` 按操作顺序模拟业务变化，恢复或建立 `CurrencyClaimBook` 和生命周期资源占用，生成冻结的 `PreparedTask`，保存原签名请求、原委员会版本、业务操作及规范选币区间。`AddressRanges` 有序、不相交、不相邻；计划摘要及冻结见证编码使用起点与长度。Transfer 仍选择最低的可用 amount 个身份，按区间跳过其他任务占用；claim 引用计数、资源 fence 和私有持久化均按区间工作。LeakRepair 的原签名地址列表保持请求顺序，接替者对应关系按第 4.2 节的私有种子配对规则重建。
 
 `PreparedTaskPhase` 为 Prepared、Voting、Finalized。持久化共识证据和签票权限决定可执行阶段转换。最终证书持久化后再执行资源依赖闭包的业务提交。`PreparedTaskBook::commit_certified_component` 基于已验证最终性和资源阻塞形成完整认证组件，复验计划，在同一 StateStore 业务写入中完成状态变化、移除准备项和触发等待者恢复。
 
@@ -228,9 +229,9 @@ Issue 与 LeakRepair 需要新的 CurrencyAddress。`CurrencyAllocation` 以当�
 
 `ValidatorSet` 维护给定版本的验证者及其三类公钥。每成员一票，采用：
 
-~~~text
+```text
 quorum_threshold(n) = n - floor((n - 1) / 3)
-~~~
+```
 
 例如四验证者集合要求三份合法成员签名。BFT 对象的验证绑定精确 ValidatorSet、版本、范围、摘要、轮次与签名。`FinalityCertificate` 验证原集合内去重后的有效法定票数。
 
@@ -238,12 +239,12 @@ quorum_threshold(n) = n - floor((n - 1) / 3)
 
 源码 `ConsensusScope` 包含四类：
 
-| 范围 | 身份键 | 目的 |
-| --- | --- | --- |
-| `CurrencyAllocation` | validator_set_version + start | Currency 地址分配及同前沿成员切换 |
-| `PreparedTask` | TaskId | 已冻结业务的 Commit / Abort |
-| `PublicCheckpoint` | validator_set_version + epoch | 公开状态检查点 |
-| `StateRecoveryCheckpoint` | validator_set_version + serial | 共享恢复检查点 |
+| 范围                        | 身份键                         | 目的                              |
+| --------------------------- | ------------------------------ | --------------------------------- |
+| `CurrencyAllocation`      | validator_set_version + start  | Currency 地址分配及同前沿成员切换 |
+| `PreparedTask`            | TaskId                         | 已冻结业务的 Commit / Abort       |
+| `PublicCheckpoint`        | validator_set_version + epoch  | 公开状态检查点                    |
+| `StateRecoveryCheckpoint` | validator_set_version + serial | 共享恢复检查点                    |
 
 任务范围保留任务实际绑定的原委员会。其他带显式版本的范围由其目标版本与当前签名权限校验。
 
@@ -314,15 +315,15 @@ BFT 会话在传输身份之外验证 ValidatorId、委员会及会话角色。�
 
 ## 12. 公开 Currency 状态
 
-`PublicCurrencyState` 仅保存存活区间 `{start, len, occupied}`。occupied 为 `owner.is_some() || role == Reserve`；Reserve 与有主的 Circulation 在公开投影中相同。不保存 owner 或 role，且相邻同 occupied 的区间必须合并，不泄露内部边界。低于地址前沿但不存活的地址视为已废弃，无需另存废弃区间；身份不复用。Destroy 与 LeakRepair 的旧地址在公开投影中都只表现为存活转废弃。
+`PublicCurrencyState` 仅保存存活区间 `{start, len, occupied}`。occupied 为 `owner.is_some() || role == Reserve`；Reserve 与有主的 Circulation 在公开投影中相同。不保存 owner 或 role，且相邻同 occupied 的区间必须合并，不泄露内部边界。低于地址前沿但不存活的地址视为已废弃，无需另存废弃区间；身份不复用。LeakRepair 的旧地址在公开投影中表现为存活转废弃。
 
 `PublicCurrencySummary` 的 current_supply、occupied_count 是单位数；state_digest 对地址前沿、可重算计数和规范公开存活区间求哈希，不包含无法公开重算的 reserve_count。reserve_count 由委员会认证检查点对完整摘要的签名背书；`PublicCurrencyView::new` 只验证 `reserve_count <= occupied_count <= current_supply` 等可检查关系，不能独立证明其精确值。未认证的 summary 不具有此证书保证。
 
 公开分页、同步内存预算和 `PublicCurrencyDelta` 的数量上限按区间计。完整节点保存上次认证检查点的规范公开区间作为历史基线（不是当前资产的第二份真值），直接比较基线与新投影生成 `Upsert(存活区间)` / `Retire(地址范围)`。周期内被触碰但公开状态没变的地址不出现在增量中；应用增量后重新归并为规范视图并核验 digest。超出增量区间或字节预算时走已有全量公开同步。
 
-正常 Issue、Transfer、LeakRepair 均不会产生空 owner 的 Circulation。内部状态格式仍允许这种状态并由 Destroy 处理，公开 occupied 因此继续保留；当前任务没有缩减此内部语义。
+从正常创世经 Issue、Transfer、LeakRepair 演化的所有存活地址，公开 occupied 恒为 true：Reserve 视为被占有，Circulation 必有 owner。公开格式、occupied 位、摘要、增量和检查点编码保持不变。内部快照解码仍允许空 owner 的 Circulation，恢复与交接也可保留该状态；此类输入的公开 occupied 可以为 false，不能把正常流程的不变量误解为现有解码器的强制约束。
 
-Destroy 与 LeakRepair 使用相同的 Retire 编码，不携带业务类型；完整公开历史仍可区分它们：Destroy 仅删除此前 occupied=false 的空 owner Circulation，而 LeakRepair 仅替换此前 occupied=true 的有主 Circulation。保留 occupied 和内部操作语义时，这条残余信息无法消除，不能把相同的废弃表示解释为完整历史不可区分。
+正常协议演化中，公开增量的 Retire 只可能来自 LeakRepair，因此一个周期内出现 Retire 即可判断发生过修复；请求摘要保密时仍无法据此推出接替者。
 
 完整状态节点仍持有 owner 和 role；公开观察者与完整私有节点的可见范围不同。
 
@@ -330,12 +331,12 @@ Destroy 与 LeakRepair 使用相同的 Retire 编码，不携带业务类型；�
 
 `src/network/account_query.rs` 提供以账户密钥签名的私有查询。签名消息绑定 QUIC channel binding、账户地址、查询类型、nonce、cursor 和 generation。应答者先完成认证，再加载其本地私有快照。
 
-| kind | 数据 |
-| --- | --- |
-| 1 | 账户存在性与余额 |
-| 2 | 账户支付地址和生命周期状态 |
-| 3 | 账户收付款历史 |
-| 4 | 该账户拥有的规范地址区间 `{start, len}` |
+| kind | 数据                                     |
+| ---- | ---------------------------------------- |
+| 1    | 账户存在性与余额                         |
+| 2    | 账户支付地址和生命周期状态               |
+| 3    | 账户收付款历史                           |
+| 4    | 该账户拥有的规范地址区间`{start, len}` |
 
 服务端从单次 `StateStore::load_shared` 的已验证快照派生短期投影。同一分页查询的余额、行、委员会版本与 generation 来自该快照。投影扫描 CurrencyLedger 区间，balance 按 owner 区间长度求和，kind 4 按区间保存与分页；不展开单位地址。后续分页只切片读取。
 
@@ -347,12 +348,12 @@ Destroy 与 LeakRepair 使用相同的 Retire 编码，不携带业务类型；�
 
 当前接口输出明确标注：
 
-~~~text
+```text
 authenticated_node_snapshot=true
 independent_account_finality_proof=false
 network_latest_guaranteed=false
 linearizable_read=false
-~~~
+```
 
 `generation` 为本地快照代次，`validator_set_version` 是应答快照所使用的委员会版本。当前客户端没有独立的账户资产完整性最终性证明，也无法凭该接口保证回答节点已追上全网全部已确认的相关业务。
 
@@ -362,7 +363,7 @@ linearizable_read=false
 
 主要命令：
 
-~~~text
+```text
 second wallet init <dir> <trust-snapshot> <network-json>
 second wallet open <dir>
 second wallet register <dir>
@@ -375,7 +376,7 @@ second wallet retry <dir> <task-id>
 second wallet history <dir>
 second wallet backup <dir> <backup-file>
 second wallet restore <backup-file> <dir>
-~~~
+```
 
 还包括多账户创建、导入、导出、切换，支付地址注册、退役及最终退休，联系人，钱包请求导出与 Authorizer 授权、密码修改和公开同步。
 
@@ -397,7 +398,7 @@ second wallet restore <backup-file> <dir>
 
 常用主程序入口：
 
-~~~text
+```text
 second init-network <config-json> <deployment-directory>
 second node <listen-address> <snapshot-base>
 second node-check <listen-address> <snapshot-base>
@@ -405,7 +406,7 @@ second snapshot-status <snapshot-base>
 second ping <address> <nonce> <server-cert-base64>
 second submit <address> <request-file> <authorizer-public-key> <server-cert>
 second task-status <address> <request-file> <authorizer-public-key> <server-cert>
-~~~
+```
 
 密钥生成、签发者工具、成员准入与轮换、委员会切换、恢复检查点、恢复安装及公开状态同步由主 CLI 对应子命令提供。
 
@@ -428,42 +429,43 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 
 ## 17. 当前架构边界
 
-| 子系统 | 源码实现的范围 |
-| --- | --- |
-| 业务状态 | 独立 Currency 身份，私有规范区间保存，完整私有状态在相应节点维护 |
-| 委员会 | 有准入的 ValidatorSet 和认证成员切换 |
-| 共识 | 四类 ConsensusScope 与固定委员会法定票数 |
-| 提交 | 冻结计划、认证终态、依赖闭包与单次业务原子写入 |
-| 分配后来源超限 | 入场按 LeakRepair 最坏碎片化、Transfer 一段计量；含 Transfer 的分配任务仍可能因持有人货币碎片化或 claim 分割使实际来源超限。此时本次 claim 释放，但已认证分配、原签名待办及 TaskId 绑定保留，状态可能停在 Bound，重启后重试。该路径要求 Authorizer 签名；终止入口待设计 |
-| 磁盘 | 完整快照编码与双槽提交，载荷上限 512 MiB |
-| 公开同步 | 规范公开存活区间、基线差异增量及委员会认证检查点 |
-| 残余公开泄露 | 一个周期只有一次修复时，废弃数量等于前沿新增数量，仍可看出发生过修复，但在请求摘要保密的假设下无法据此推出接替者。单凭数量也可能是等量销毁与发行；保存此前 occupied 可进一步识别有主对象的修复。规范增量不列出 Reserve 接替者，默认选择使用私有种子加权抽样 |
-| Reserve 抽样隐私 | 匿名集为可用 Reserve 总数；账户持有人、Authorizer、验证者可重算，恶意验证者或完整请求/摘要泄露后不再保密；冻结来源允许恢复非默认选择并验证摘要。随机修复增加账户区间碎片，与 Transfer 来源超限边界相互影响 |
-| 钱包账户查询 | 对单个完整状态节点本地已提交快照的签名读取；资产区间分页、余额按长度求和，成本取决于区间数 |
-| 账户数据完整性 | 目前缺少跨节点独立验证的全部资产覆盖证据 |
-| 余额新鲜度 | 当前接口没有全网最新性与线性化读取保证 |
-| 自动更新 | 钱包当前采用按需查询，缺少持续资产订阅与完整离线追赶 |
-| 网络规模 | 初始化连接预算限定当前活动验证者上限；运行成本随全量状态和活动任务增长 |
-| 部署验证 | 支持 Windows 和 Linux 节点/服务操作；跨独立物理主机与长期规模性能需实际验收 |
+| 子系统           | 源码实现的范围                                                                                                                                                                                                                                                          |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 业务状态         | 独立 Currency 身份，私有规范区间保存，完整私有状态在相应节点维护                                                                                                                                                                                                        |
+| 货币操作         | 协议目前没有销毁货币的操作                                                                                                                                                                                                                                              |
+| 委员会           | 有准入的 ValidatorSet 和认证成员切换                                                                                                                                                                                                                                    |
+| 共识             | 四类 ConsensusScope 与固定委员会法定票数                                                                                                                                                                                                                                |
+| 提交             | 冻结计划、认证终态、依赖闭包与单次业务原子写入                                                                                                                                                                                                                          |
+| 分配后来源超限   | 入场按 LeakRepair 最坏碎片化、Transfer 一段计量；含 Transfer 的分配任务仍可能因持有人货币碎片化或 claim 分割使实际来源超限。此时本次 claim 释放，但已认证分配、原签名待办及 TaskId 绑定保留，状态可能停在 Bound，重启后重试。该路径要求 Authorizer 签名；终止入口待设计 |
+| 磁盘             | 完整快照编码与双槽提交，载荷上限 512 MiB                                                                                                                                                                                                                                |
+| 公开同步         | 规范公开存活区间、基线差异增量及委员会认证检查点                                                                                                                                                                                                                        |
+| 残余公开泄露     | 正常协议演化中的公开增量出现 Retire 即可判断发生过修复；只有一次修复的周期内，废弃数量等于前沿新增数量。规范增量不列出 Reserve 接替者，默认选择使用私有种子加权抽样；请求摘要保密时无法据此推出接替者                                                                   |
+| Reserve 抽样隐私 | 匿名集为可用 Reserve 总数；账户持有人、Authorizer、验证者可重算，恶意验证者或完整请求/摘要泄露后不再保密；冻结来源允许恢复非默认选择并验证摘要。随机修复增加账户区间碎片，与 Transfer 来源超限边界相互影响                                                              |
+| 钱包账户查询     | 对单个完整状态节点本地已提交快照的签名读取；资产区间分页、余额按长度求和，成本取决于区间数                                                                                                                                                                              |
+| 账户数据完整性   | 目前缺少跨节点独立验证的全部资产覆盖证据                                                                                                                                                                                                                                |
+| 余额新鲜度       | 当前接口没有全网最新性与线性化读取保证                                                                                                                                                                                                                                  |
+| 自动更新         | 钱包当前采用按需查询，缺少持续资产订阅与完整离线追赶                                                                                                                                                                                                                    |
+| 网络规模         | 初始化连接预算限定当前活动验证者上限；运行成本随全量状态和活动任务增长                                                                                                                                                                                                  |
+| 部署验证         | 支持 Windows 和 Linux 节点/服务操作；跨独立物理主机与长期规模性能需实际验收                                                                                                                                                                                             |
 
 这些边界与协议安全规则共同定义现阶段产品能够提供的行为。规模与能耗评估以业务吞吐、节点资源、状态规模和故障恢复成本的实测结果为准。
 
 ## 18. 源码职责
 
-| 模块 | 职责 |
-| --- | --- |
-| `src/ids.rs`、`src/account.rs`、`src/currency.rs`、`src/currency_ledger.rs`、`src/payment.rs`、`src/state.rs` | 身份、账户、支付、资产与唯一业务状态 |
-| `src/address_ranges.rs`、`src/range_map.rs` | 规范地址集合，以及账本、claim 和公开增量共用的区间拆分与合并 |
-| `src/reserve_sampling.rs` | 私有请求种子、固定地址树加权抽样与修复配对 |
-| `src/task.rs`、`src/authorization.rs`、`src/transaction.rs` | LegalTask、交易输入、签名与授权 |
-| `src/currency_allocation.rs`、`src/claims.rs`、`src/prepared.rs`、`src/prepared_plan.rs`、`src/prepared/` | 地址分配、冻结准备、冲突与业务提交 |
-| `src/bft.rs`、`src/bft_driver.rs`、`src/finality.rs`、`src/validator_signer.rs` | BFT、投票安全与最终性 |
-| `src/validator.rs`、`src/validator_registry.rs`、`src/validator_transition.rs`、`src/validator_admission.rs` | 验证者身份、准入和委员会演进 |
-| `src/persistence/` | 快照、签名锁、任务、交接与安全恢复 |
-| `src/network/`、`src/runtime.rs`、`src/runtime_bft.rs`、`src/runtime_bft_consensus.rs` | QUIC、连接管理、在线共识与恢复 |
-| `src/public_state.rs`、`src/public_checkpoint.rs`、`src/public_sync.rs` | 公开 Currency 状态及认证同步 |
-| `src/network/account_query.rs`、`src/network/account_query/` | 私有账户认证、分页与数据源 |
-| `src/wallet_cli/` | 钱包密钥存储、支付、备份、查询与 CLI |
-| `src/network_init.rs`、`src/cli_node.rs`、`src/main.rs`、`deploy/` | Genesis、节点管理、入口和服务部署 |
+| 模块                                                                                                                      | 职责                                                         |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `src/ids.rs`、`src/account.rs`、`src/currency.rs`、`src/currency_ledger.rs`、`src/payment.rs`、`src/state.rs` | 身份、账户、支付、资产与唯一业务状态                         |
+| `src/address_ranges.rs`、`src/range_map.rs`                                                                           | 规范地址集合，以及账本、claim 和公开增量共用的区间拆分与合并 |
+| `src/reserve_sampling.rs`                                                                                               | 私有请求种子、固定地址树加权抽样与修复配对                   |
+| `src/task.rs`、`src/authorization.rs`、`src/transaction.rs`                                                         | LegalTask、交易输入、签名与授权                              |
+| `src/currency_allocation.rs`、`src/claims.rs`、`src/prepared.rs`、`src/prepared_plan.rs`、`src/prepared/`       | 地址分配、冻结准备、冲突与业务提交                           |
+| `src/bft.rs`、`src/bft_driver.rs`、`src/finality.rs`、`src/validator_signer.rs`                                   | BFT、投票安全与最终性                                        |
+| `src/validator.rs`、`src/validator_registry.rs`、`src/validator_transition.rs`、`src/validator_admission.rs`      | 验证者身份、准入和委员会演进                                 |
+| `src/persistence/`                                                                                                      | 快照、签名锁、任务、交接与安全恢复                           |
+| `src/network/`、`src/runtime.rs`、`src/runtime_bft.rs`、`src/runtime_bft_consensus.rs`                            | QUIC、连接管理、在线共识与恢复                               |
+| `src/public_state.rs`、`src/public_checkpoint.rs`、`src/public_sync.rs`                                             | 公开 Currency 状态及认证同步                                 |
+| `src/network/account_query.rs`、`src/network/account_query/`                                                          | 私有账户认证、分页与数据源                                   |
+| `src/wallet_cli/`                                                                                                       | 钱包密钥存储、支付、备份、查询与 CLI                         |
+| `src/network_init.rs`、`src/cli_node.rs`、`src/main.rs`、`deploy/`                                                | Genesis、节点管理、入口和服务部署                            |
 
 本文件随协议当前行为变化更新。历史变更、测试日志、回归记录及开发过程由版本控制与对应工程记录承担。

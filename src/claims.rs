@@ -66,9 +66,6 @@ enum ClaimKind {
     Reserve {
         count: u64,
     },
-    Explicit {
-        currencies: Vec<CurrencyAddress>,
-    },
     LeakRepair {
         leaked: Vec<CurrencyAddress>,
         reserve_count: u64,
@@ -181,25 +178,6 @@ impl CurrencyClaimBook {
         Ok(selected)
     }
 
-    pub(crate) fn claim_explicit(
-        &mut self,
-        claim_id: OperationClaimId,
-        currencies: &[CurrencyAddress],
-    ) -> Result<AddressRanges, ClaimError> {
-        let requested_kind = ClaimKind::Explicit {
-            currencies: currencies.to_vec(),
-        };
-        if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
-            return Ok(existing);
-        }
-
-        self.ensure_unique_explicit(currencies, &claim_id)?;
-        self.ensure_claimable(currencies, claim_id.task_id())?;
-        let selected = currencies.iter().copied().collect::<AddressRanges>();
-        self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
-        Ok(selected)
-    }
-
     pub(crate) fn claim_leak_repair_in_business_state(
         &mut self,
         claim_id: OperationClaimId,
@@ -298,23 +276,6 @@ impl CurrencyClaimBook {
             },
             currencies.clone(),
             currencies.clone(),
-        )
-    }
-
-    pub(crate) fn restore_explicit(
-        &mut self,
-        claim_id: OperationClaimId,
-        currencies: &[CurrencyAddress],
-    ) -> Result<(), ClaimError> {
-        self.ensure_unique_explicit(currencies, &claim_id)?;
-        self.ensure_claimable(currencies, claim_id.task_id())?;
-        self.insert_claim(
-            claim_id,
-            ClaimKind::Explicit {
-                currencies: currencies.to_vec(),
-            },
-            currencies.iter().copied().collect(),
-            currencies.iter().copied().collect(),
         )
     }
 

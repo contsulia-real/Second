@@ -668,15 +668,6 @@ impl PreparedTaskBook {
                         currencies,
                     }
                 }
-                Operation::Destroy { currencies } => {
-                    state.validate_destroy_targets(working, currencies)?;
-                    self.claims.claim_explicit(claim_id, currencies)?;
-                    state.apply_destroy(working, currencies);
-
-                    PreparedOperation::Destroy {
-                        currencies: currencies.clone(),
-                    }
-                }
                 Operation::LeakRepair { leaked } => {
                     let seed = crate::reserve_sampling::ReserveSamplingSeed::new(
                         task.request_digest(),

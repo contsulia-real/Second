@@ -609,7 +609,7 @@ fn committed_prepared_task_is_durable_before_commit_returns() {
 }
 
 #[test]
-fn destroy_and_leak_repair_targets_are_claimed_during_preparation() {
+fn leak_repair_targets_are_claimed_during_preparation() {
     let alice = support::account(1);
     let mut state = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
     register_payment_addresses(&mut state, [alice]);

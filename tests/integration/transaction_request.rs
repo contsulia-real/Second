@@ -20,8 +20,8 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
             account: account(3),
             count: 4,
         },
-        Operation::Destroy {
-            currencies: vec![CurrencyAddress::new(10)],
+        Operation::RegisterAccount {
+            account: account(10),
         },
         Operation::LeakRepair {
             leaked: vec![CurrencyAddress::new(11)],
@@ -62,8 +62,8 @@ fn strict_json_request_maps_losslessly_to_the_signed_typed_task() {
                 "amount": 4
             },
             {
-                "type": "destroy",
-                "currencies": [CurrencyAddress::new(10).to_string()]
+                "type": "register_account",
+                "account": account(10).to_string()
             },
             {
                 "type": "leak_repair",
@@ -235,7 +235,7 @@ fn strict_json_rejects_protocol_invalid_values_before_signature_verification() {
                 "version": 1,
                 "expires_at": 10,
                 "operations": [{
-                    "type": "destroy",
+                    "type": "leak_repair",
                     "currencies": ["0lxii00"]
                 }],
                 "signature": valid_signature
