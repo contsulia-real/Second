@@ -8,9 +8,9 @@ pub enum CurrencyRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicCurrencyState {
-    pub address: CurrencyAddress,
+    pub start: CurrencyAddress,
+    pub len: u64,
     pub occupied: bool,
-    pub role: CurrencyRole,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,9 +23,15 @@ pub(crate) struct Currency {
 impl Currency {
     pub(crate) fn public_state(&self) -> PublicCurrencyState {
         PublicCurrencyState {
-            address: self.address,
-            occupied: self.owner.is_some(),
-            role: self.role,
+            start: self.address,
+            len: 1,
+            occupied: self.owner.is_some() || self.role == CurrencyRole::Reserve,
         }
+    }
+}
+
+impl PublicCurrencyState {
+    pub fn range(&self) -> Option<crate::AddressRange> {
+        crate::AddressRange::new(self.start, self.len)
     }
 }

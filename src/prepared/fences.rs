@@ -2,13 +2,13 @@
 use super::lifecycle::{LifecycleAddress, LifecycleClaimBook};
 use crate::prepared_plan::{PreparedOperation, PreparedTask};
 use crate::{
-    CurrencyAddress, CurrencyClaimBook, PaymentAddress, PreparationError, SecondState, TaskId,
+    AddressRanges, CurrencyClaimBook, PaymentAddress, PreparationError, SecondState, TaskId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResourceFenceIndex {
-    currency: BTreeMap<CurrencyAddress, BTreeSet<TaskId>>,
+    currency: BTreeMap<TaskId, AddressRanges>,
     lifecycle: BTreeMap<LifecycleAddress, BTreeSet<TaskId>>,
     executions: BTreeMap<PaymentAddress, BTreeSet<TaskId>>,
 }
@@ -43,13 +43,11 @@ impl ResourceFenceIndex {
             let mut lifecycle = LifecycleClaimBook::default();
             plan.restore_candidate_claims(&mut currencies, owned_only)?;
             plan.restore_candidate_lifecycle_claims(&mut lifecycle, owned_only)?;
-            for address in currencies.claimed_addresses() {
-                index
-                    .currency
-                    .entry(address)
-                    .or_default()
-                    .insert(plan.task_id.clone());
-            }
+            index
+                .currency
+                .entry(plan.task_id.clone())
+                .or_default()
+                .union_with(&currencies.claimed_ranges());
             for address in lifecycle.addresses() {
                 index
                     .lifecycle
@@ -87,14 +85,22 @@ impl ResourceFenceIndex {
         candidate.restore_claims(&mut currencies)?;
         candidate.restore_lifecycle_claims(&mut lifecycle)?;
         let mut blocked = BTreeSet::new();
-        for owners in currencies
-            .claimed_addresses()
-            .filter_map(|address| self.currency.get(&address))
-            .chain(
-                lifecycle
-                    .addresses()
-                    .filter_map(|address| self.lifecycle.get(&address)),
-            )
+        let candidate_ranges = currencies.claimed_ranges();
+        for (owner, ranges) in &self.currency {
+            if ranges.intersects(&candidate_ranges)
+                && owner != &candidate.task_id
+                && !state
+                    .protocol
+                    .task_bindings
+                    .get(owner)
+                    .is_some_and(|binding| binding.outcome.is_terminal())
+            {
+                blocked.insert(owner.clone());
+            }
+        }
+        for owners in lifecycle
+            .addresses()
+            .filter_map(|address| self.lifecycle.get(&address))
         {
             for owner in owners {
                 if owner != &candidate.task_id

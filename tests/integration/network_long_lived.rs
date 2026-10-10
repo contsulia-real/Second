@@ -56,17 +56,18 @@ async fn one_quic_connection_supports_multiple_independent_request_streams() {
         .await
         .unwrap();
     assert_eq!(first.states.len(), 1);
-    assert_eq!(first.states[0].address, CurrencyAddress::new(1));
-    assert_eq!(first.next_start, Some(CurrencyAddress::new(2)));
+    assert_eq!(first.states[0].start, CurrencyAddress::new(1));
+    assert_eq!(first.states[0].len, 3);
+    assert_eq!(first.next_start, None);
 
     assert_eq!(client_ping(&peer, 77).await.unwrap(), server_node_id);
 
     let second = client_public_currency_page(&peer, CurrencyAddress::new(2), 2)
         .await
         .unwrap();
-    assert_eq!(second.states.len(), 2);
-    assert_eq!(second.states[0].address, CurrencyAddress::new(2));
-    assert_eq!(second.states[1].address, CurrencyAddress::new(3));
+    assert_eq!(second.states.len(), 1);
+    assert_eq!(second.states[0].start, CurrencyAddress::new(2));
+    assert_eq!(second.states[0].len, 2);
     assert_eq!(second.next_start, None);
 
     peer.close();

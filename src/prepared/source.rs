@@ -1,13 +1,13 @@
 use crate::legal_task_codec::{MAX_ENCODED_LEGAL_TASK_SIZE, decode_legal_task, encode_legal_task};
 use crate::prepared_plan::{PreparedOperation, PreparedTask};
-use crate::{CurrencyAddress, LegalTask, Operation, PreparationError};
+use crate::{AddressRange, AddressRanges, CurrencyAddress, LegalTask, Operation, PreparationError};
 
 // Signed requests and their irreducible frozen choices share one bounded budget.
 pub(crate) const MAX_PREPARED_SOURCE_SIZE: usize = MAX_ENCODED_LEGAL_TASK_SIZE + 4;
 
 pub(crate) struct PreparedTaskSource {
     pub(crate) task: LegalTask,
-    pub(crate) selections: Vec<Vec<CurrencyAddress>>,
+    pub(crate) selections: Vec<AddressRanges>,
 }
 
 impl PreparedTaskSource {
@@ -24,17 +24,24 @@ impl PreparedTaskSource {
         let task = decode_legal_task(legal)?;
         let mut selections = Vec::new();
         for operation in task.payload().operations() {
-            let count = match operation {
-                Operation::Transfer { amount, .. } => usize::try_from(*amount).ok()?,
-                Operation::LeakRepair { leaked } => leaked.len(),
+            let required = match operation {
+                Operation::Transfer { amount, .. } => *amount,
+                Operation::LeakRepair { leaked } => leaked.len() as u64,
                 _ => continue,
             };
-            let size = count.checked_mul(8)?;
-            let (addresses, next) = remaining.split_at_checked(size)?;
-            let mut selected = Vec::new();
-            selected.try_reserve_exact(count).ok()?;
-            for address in addresses.as_chunks::<8>().0 {
-                selected.push(CurrencyAddress::new(u64::from_be_bytes(*address)));
+            let (count_bytes, rest) = remaining.split_at_checked(4)?;
+            let count = u32::from_be_bytes(count_bytes.try_into().ok()?) as usize;
+            let (encoded, next) = rest.split_at_checked(count.checked_mul(16)?)?;
+            let mut ranges = Vec::with_capacity(count);
+            for bytes in encoded.as_chunks::<16>().0 {
+                ranges.push(AddressRange::new(
+                    CurrencyAddress::new(u64::from_be_bytes(bytes[..8].try_into().ok()?)),
+                    u64::from_be_bytes(bytes[8..].try_into().ok()?),
+                )?);
+            }
+            let selected = AddressRanges::from_canonical(ranges)?;
+            if selected.len() != required {
+                return None;
             }
             selections.push(selected);
             remaining = next;
@@ -59,8 +66,10 @@ impl PreparedTask {
             length = length
                 .checked_add(
                     selection
+                        .ranges()
                         .len()
-                        .checked_mul(8)
+                        .checked_mul(16)
+                        .and_then(|length| length.checked_add(4))
                         .ok_or(PreparationError::LengthOverflow)?,
                 )
                 .ok_or(PreparationError::LengthOverflow)?;
@@ -81,8 +90,10 @@ impl PreparedTask {
                 PreparedOperation::LeakRepair { reserve, .. } => reserve,
                 _ => continue,
             };
-            for address in selection {
-                out.extend_from_slice(&address.value().to_be_bytes());
+            out.extend_from_slice(&(selection.ranges().len() as u32).to_be_bytes());
+            for range in selection.ranges() {
+                out.extend_from_slice(&range.start.value().to_be_bytes());
+                out.extend_from_slice(&range.len.to_be_bytes());
             }
         }
         Ok(out)

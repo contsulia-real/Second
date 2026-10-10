@@ -85,7 +85,9 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
     else {
         panic!("transfer fixture")
     };
-    *currencies = vec![CurrencyAddress::new(2)];
+    *currencies = vec![CurrencyAddress::new(2)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     let digest = alternative.plan_digest().unwrap();
     let bytes = alternative.encode_source().unwrap();
     let certify = |statement| {
@@ -120,7 +122,9 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
                 &a,
                 &validators,
                 digest,
-                &[vec![CurrencyAddress::new(2)]],
+                &[vec![CurrencyAddress::new(2)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>()],
             )
             .unwrap()
             .unwrap();
@@ -139,7 +143,9 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
             1,
             &validators,
             primary,
-            &[vec![CurrencyAddress::new(1)]],
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
         let cold = StateStore::new(&promoted_base).load().unwrap().unwrap();
@@ -221,7 +227,9 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
                 1,
                 &validators,
                 digest,
-                &[vec![CurrencyAddress::new(2)]]
+                &[vec![CurrencyAddress::new(2)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>()]
             ),
         Err(PreparationError::AlreadyPrepared(_))
     ));
@@ -247,7 +255,13 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
     assert!(committed.state.task_cancelled(b.task_id()));
     assert_eq!(committed.state.balance(bob), 1);
     assert_eq!(
-        committed.state.business.currencies[&CurrencyAddress::new(1)].owner,
+        committed
+            .state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(1))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(
@@ -268,7 +282,8 @@ async fn run_buffered_certificate_admission(owned_primary: bool) {
     );
     let mut changed_selection = bytes.clone();
     let end = changed_selection.len();
-    changed_selection[end - 8..].copy_from_slice(&CurrencyAddress::new(1).value().to_be_bytes());
+    changed_selection[end - 16..end - 8]
+        .copy_from_slice(&CurrencyAddress::new(1).value().to_be_bytes());
     assert!(
         runtime
             .install_fetched_prepared_task(1, &scope, digest, &changed_selection)

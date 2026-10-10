@@ -189,7 +189,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
         else {
             panic!("transfer fixture")
         };
-        *currencies = vec![crate::CurrencyAddress::new(number)];
+        *currencies = vec![crate::CurrencyAddress::new(number)]
+            .into_iter()
+            .collect::<crate::AddressRanges>();
         plan.plan_digest().unwrap()
     };
     let holder_digest = digest_for(holder.task_id(), 3);
@@ -199,7 +201,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
             &holder,
             &validators,
             holder_digest,
-            &[vec![crate::CurrencyAddress::new(3)]],
+            &[vec![crate::CurrencyAddress::new(3)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap()
         .is_none()
@@ -211,7 +215,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
             &waiting,
             &validators,
             waiting_digest,
-            &[vec![crate::CurrencyAddress::new(2)]],
+            &[vec![crate::CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap()
         .unwrap();
@@ -224,7 +230,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
             &waiting,
             &validators,
             conflicting_digest,
-            &[vec![crate::CurrencyAddress::new(3)]],
+            &[vec![crate::CurrencyAddress::new(3)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap()
         .unwrap();
@@ -390,7 +398,9 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
             &waiting,
             &validators,
             waiting_digest,
-            &[vec![crate::CurrencyAddress::new(2)]]
+            &[vec![crate::CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         )
         .unwrap()
         .is_none()
@@ -399,7 +409,12 @@ fn disjoint_certified_choices_wait_for_commit_to_release_retained_alternative_cl
         .unwrap();
     assert_eq!(state.balance(bob), 2);
     assert_eq!(
-        state.business.currencies[&crate::CurrencyAddress::new(1)].owner,
+        state
+            .business
+            .currencies
+            .get(&crate::CurrencyAddress::new(1))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(book.claimed_currency_count(), 0);

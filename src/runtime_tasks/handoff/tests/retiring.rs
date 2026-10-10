@@ -265,7 +265,10 @@ async fn recover_inherited_transfer(validator: u64) {
         Some(true),
         "certified old transfer remained stuck after retirement started"
     );
-    assert_eq!(cold.state.business.currencies[&currency].owner, Some(bob));
+    assert_eq!(
+        cold.state.business.currencies.get(&currency).unwrap().owner,
+        Some(bob)
+    );
     assert_eq!(
         cold.state.business.payment_addresses[&destination].status,
         PaymentAddressStatus::Retiring

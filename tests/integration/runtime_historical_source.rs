@@ -154,14 +154,11 @@ async fn retired_address_unusable_witnesses_converge_to_certified_abort_without_
         .collect();
     let completed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .state
-                    .task_cancelled(transfer.task_id())
-            }) {
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| snapshot.state.task_cancelled(transfer.task_id()))
+            {
                 break;
             }
             assert!(workers.iter().all(|worker| !worker.is_finished()));

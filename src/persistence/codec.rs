@@ -3,16 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use sha2::{Digest, Sha256};
 
 use crate::ConsensusScope;
-use crate::currency::Currency;
+use crate::currency_ledger::{CurrencyLedger, CurrencyRun};
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::prepared_plan::PreparedTask;
 use crate::state::{BusinessState, PrerequisiteState, ProtocolState, TaskBinding, TaskOutcome};
 use crate::{
-    AccountAddress, BftLocalState, CurrencyAddress, CurrencyRole,
-    MAX_PUBLIC_CURRENCY_DELTA_CHANGES, OperationClaimId, PaymentAddress, PaymentAddressStatus,
-    PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof, PublicCurrencyDelta,
-    SecondState, StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId, ValidatorId,
-    ValidatorRegistry, ValidatorSet, ValidatorSetTransitionProof,
+    AccountAddress, BftLocalState, CurrencyAddress, CurrencyRole, OperationClaimId, PaymentAddress,
+    PaymentAddressStatus, PersistedNodeState, PersistenceError, PublicCurrencyCheckpointProof,
+    PublicCurrencyDelta, SecondState, StateRecoveryCheckpointProof, StateRecoveryPayload, TaskId,
+    ValidatorId, ValidatorRegistry, ValidatorSet, ValidatorSetTransitionProof,
 };
 
 use super::RecoveryCheckpointFloor;
@@ -52,7 +51,7 @@ pub(super) struct SnapshotContents<'a> {
     pub(super) public_checkpoint_proof: Option<&'a PublicCurrencyCheckpointProof>,
     pub(super) public_checkpoint_baseline: Option<&'a PublicCurrencyCheckpointProof>,
     pub(super) latest_public_delta: Option<&'a PublicCurrencyDelta>,
-    pub(super) pending_public_changes: Option<&'a BTreeSet<CurrencyAddress>>,
+    pub(super) public_checkpoint_states: Option<&'a Vec<crate::PublicCurrencyState>>,
     pub(super) validator_transition_proofs: &'a BTreeMap<u64, ValidatorSetTransitionProof>,
     pub(super) recovery_checkpoint_proof: Option<&'a StateRecoveryCheckpointProof>,
     pub(super) checkpoint_floor_epoch: u64,
@@ -77,7 +76,7 @@ impl SnapshotContents<'_> {
             public_checkpoint_proof: self.public_checkpoint_proof.cloned(),
             public_checkpoint_baseline: self.public_checkpoint_baseline.cloned(),
             latest_public_delta: self.latest_public_delta.cloned(),
-            pending_public_changes: self.pending_public_changes.cloned(),
+            public_checkpoint_states: self.public_checkpoint_states.cloned(),
             validator_transition_proofs: self.validator_transition_proofs.clone(),
             recovery_checkpoint_proof: self.recovery_checkpoint_proof.cloned(),
             checkpoint_floor_epoch: self.checkpoint_floor_epoch,
@@ -102,7 +101,7 @@ struct DecodedSnapshotPayload {
     public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     public_checkpoint_baseline: Option<PublicCurrencyCheckpointProof>,
     latest_public_delta: Option<PublicCurrencyDelta>,
-    pending_public_changes: Option<BTreeSet<CurrencyAddress>>,
+    public_checkpoint_states: Option<Vec<crate::PublicCurrencyState>>,
     validator_transition_proofs: BTreeMap<u64, ValidatorSetTransitionProof>,
     recovery_checkpoint_proof: Option<StateRecoveryCheckpointProof>,
     checkpoint_floor_epoch: u64,
@@ -286,7 +285,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         &decoded.validator_set,
         decoded.public_checkpoint_baseline.as_ref(),
         decoded.latest_public_delta.as_ref(),
-        decoded.pending_public_changes.as_ref(),
+        decoded.public_checkpoint_states.as_ref(),
     )?;
     decoded
         .validator_registry
@@ -339,7 +338,7 @@ pub(super) fn decode_snapshot(bytes: &[u8]) -> Result<PersistedNodeState, Persis
         public_checkpoint_proof: decoded.public_checkpoint_proof,
         public_checkpoint_baseline: decoded.public_checkpoint_baseline,
         latest_public_delta: decoded.latest_public_delta,
-        pending_public_changes: decoded.pending_public_changes,
+        public_checkpoint_states: decoded.public_checkpoint_states,
         validator_transition_proofs: decoded.validator_transition_proofs,
         recovery_checkpoint_proof: decoded.recovery_checkpoint_proof,
         checkpoint_floor_epoch: decoded.checkpoint_floor_epoch,
@@ -368,7 +367,7 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
     let public_checkpoint_proof = contents.public_checkpoint_proof;
     let public_checkpoint_baseline = contents.public_checkpoint_baseline;
     let latest_public_delta = contents.latest_public_delta;
-    let pending_public_changes = contents.pending_public_changes;
+    let public_checkpoint_states = contents.public_checkpoint_states;
     let validator_transition_proofs = contents.validator_transition_proofs;
     let recovery_checkpoint_proof = contents.recovery_checkpoint_proof;
     let checkpoint_floor_epoch = contents.checkpoint_floor_epoch;
@@ -434,15 +433,12 @@ fn encode_payload(contents: &SnapshotContents<'_>) -> Result<Vec<u8>, Persistenc
         }
         None => out.push(0),
     }
-    match pending_public_changes {
-        Some(changes) => {
-            if changes.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES {
-                return Err(PersistenceError::InvalidSnapshot);
-            }
+    match public_checkpoint_states {
+        Some(states) => {
             out.push(1);
-            push_len(&mut out, changes.len())?;
-            for address in changes {
-                out.extend_from_slice(&address.value().to_be_bytes());
+            push_len(&mut out, states.len())?;
+            for state in states {
+                crate::public_state_codec::encode_public_currency_state(&mut out, state);
             }
         }
         None => out.push(0),
@@ -516,8 +512,8 @@ pub(super) fn encode_second_state(
     if state
         .business
         .currencies
-        .values()
-        .any(|currency| currency.address.value() >= state.protocol.next_currency_address)
+        .runs()
+        .any(|(start, run)| start.value() + run.len > state.protocol.next_currency_address)
     {
         return Err(PersistenceError::InvalidSnapshot);
     }
@@ -540,9 +536,10 @@ pub(super) fn encode_second_state(
         });
     }
 
-    push_len(out, state.business.currencies.len())?;
-    for currency in state.business.currencies.values() {
-        out.extend_from_slice(&currency.address.value().to_be_bytes());
+    push_len(out, state.business.currencies.run_count())?;
+    for (start, currency) in state.business.currencies.runs() {
+        out.extend_from_slice(&start.value().to_be_bytes());
+        out.extend_from_slice(&currency.len.to_be_bytes());
         out.push(match currency.role {
             CurrencyRole::Circulation => 1,
             CurrencyRole::Reserve => 2,
@@ -677,10 +674,16 @@ fn decode_second_state_inner(
     }
 
     let currency_count = decoder.read_len()?;
-    let mut currencies = BTreeMap::new();
+    let mut currencies = CurrencyLedger::new();
     for _ in 0..currency_count {
         let address = CurrencyAddress::new(decoder.read_u64()?);
-        if address.value() >= next_currency_address {
+        let len = decoder.read_u64()?;
+        if len == 0
+            || address
+                .value()
+                .checked_add(len)
+                .is_none_or(|end| end > next_currency_address)
+        {
             return Err(PersistenceError::InvalidSnapshot);
         }
 
@@ -706,19 +709,9 @@ fn decode_second_state_inner(
             return Err(PersistenceError::InvalidSnapshot);
         }
 
-        if currencies
-            .insert(
-                address,
-                Currency {
-                    address,
-                    role,
-                    owner,
-                },
-            )
-            .is_some()
-        {
-            return Err(PersistenceError::InvalidSnapshot);
-        }
+        currencies
+            .append_run(address, CurrencyRun { len, role, owner })
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
     }
 
     let task_count = decoder.read_len()?;
@@ -1005,20 +998,24 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         }
         _ => return Err(PersistenceError::InvalidSnapshot),
     };
-    let pending_public_changes = match decoder.read_u8()? {
+    let public_checkpoint_states = match decoder.read_u8()? {
         0 => None,
         1 => {
             let count = decoder.read_len()?;
-            if count > MAX_PUBLIC_CURRENCY_DELTA_CHANGES || count > decoder.remaining() / 8 {
+            let size = crate::public_state_codec::PUBLIC_CURRENCY_STATE_ENCODED_SIZE;
+            if count > decoder.remaining() / size {
                 return Err(PersistenceError::InvalidSnapshot);
             }
-            let mut changes = BTreeSet::new();
+            let mut states = Vec::with_capacity(count);
             for _ in 0..count {
-                if !changes.insert(CurrencyAddress::new(decoder.read_u64()?)) {
-                    return Err(PersistenceError::InvalidSnapshot);
-                }
+                states.push(
+                    crate::public_state_codec::decode_public_currency_state(
+                        decoder.read_exact(size)?,
+                    )
+                    .map_err(|_| PersistenceError::InvalidSnapshot)?,
+                );
             }
-            Some(changes)
+            Some(states)
         }
         _ => return Err(PersistenceError::InvalidSnapshot),
     };
@@ -1103,7 +1100,7 @@ fn decode_payload(payload: &[u8]) -> Result<DecodedSnapshotPayload, PersistenceE
         public_checkpoint_proof,
         public_checkpoint_baseline,
         latest_public_delta,
-        pending_public_changes,
+        public_checkpoint_states,
         validator_transition_proofs,
         recovery_checkpoint_proof,
         checkpoint_floor_epoch,
@@ -1155,10 +1152,15 @@ fn validate_public_sync_state(
     validator_set: &ValidatorSet,
     baseline: Option<&PublicCurrencyCheckpointProof>,
     latest_delta: Option<&PublicCurrencyDelta>,
-    pending_changes: Option<&BTreeSet<CurrencyAddress>>,
+    baseline_states: Option<&Vec<crate::PublicCurrencyState>>,
 ) -> Result<(), PersistenceError> {
-    if pending_changes.is_some_and(|changes| changes.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES) {
-        return Err(PersistenceError::InvalidSnapshot);
+    match (baseline, baseline_states) {
+        (Some(proof), Some(states)) => {
+            crate::PublicCurrencyView::new(proof.checkpoint().summary().clone(), states.clone())
+                .map_err(|_| PersistenceError::InvalidSnapshot)?;
+        }
+        (None, None) => {}
+        _ => return Err(PersistenceError::InvalidSnapshot),
     }
     let certified_baseline = baseline
         .map(|proof| {

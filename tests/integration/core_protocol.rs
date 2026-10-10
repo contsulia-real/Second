@@ -2,8 +2,8 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    AuthorizerSet, CURRENT_PROTOCOL_VERSION, CurrencyRole, ExecutionError, ExecutionOutcome,
-    LegalTaskPayload, Operation, SecondState, VerifiedLegalTask,
+    AuthorizerSet, CURRENT_PROTOCOL_VERSION, ExecutionError, ExecutionOutcome, LegalTaskPayload,
+    Operation, SecondState, VerifiedLegalTask,
 };
 use support::{key as test_key, payment_address, register_payment_addresses};
 
@@ -81,7 +81,8 @@ fn transfer_selects_currency_dynamically_and_moves_exact_amount() {
 
     assert_eq!(state.balance(alice), 2);
     assert_eq!(state.balance(bob), 2);
-    assert_eq!(state.public_currency_states().len(), 4);
+    assert_eq!(state.public_currency_states().len(), 1);
+    assert_eq!(state.public_currency_states()[0].len, 4);
 }
 
 #[test]
@@ -101,7 +102,7 @@ fn public_currency_state_exposes_occupancy_but_not_owner() {
 
     let public = state.public_currency_state(10.into()).unwrap();
     assert!(public.occupied);
-    assert_eq!(public.role, CurrencyRole::Circulation);
+    assert_eq!(public.len, 1);
 
     let rendered = format!("{public:?}");
     assert!(!rendered.contains("AccountAddress"));

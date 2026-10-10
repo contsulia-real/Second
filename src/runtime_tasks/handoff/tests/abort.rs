@@ -76,7 +76,9 @@ async fn inherited_abort_retries_waiting_business_with_or_without_local_body() {
             else {
                 panic!("transfer fixture")
             };
-            *currencies = vec![CurrencyAddress::new(2)];
+            *currencies = vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>();
             PreparedTaskBook::new(source.clone())
                 .unwrap()
                 .admit_frozen_variant(
@@ -84,7 +86,9 @@ async fn inherited_abort_retries_waiting_business_with_or_without_local_body() {
                     &holder,
                     &origin,
                     other.plan_digest().unwrap(),
-                    &[vec![CurrencyAddress::new(2)]],
+                    &[vec![CurrencyAddress::new(2)]
+                        .into_iter()
+                        .collect::<crate::AddressRanges>()],
                 )
                 .unwrap();
         }

@@ -1,4 +1,5 @@
 mod account;
+mod address_ranges;
 mod authorization;
 mod bft;
 mod bft_driver;
@@ -6,6 +7,7 @@ mod bft_proposal;
 mod claims;
 mod currency;
 mod currency_allocation;
+mod currency_ledger;
 mod error;
 mod executor;
 mod finality;
@@ -21,6 +23,7 @@ mod public_checkpoint;
 mod public_state;
 mod public_state_codec;
 mod public_sync;
+mod range_map;
 mod runtime;
 mod runtime_bft;
 mod runtime_bft_consensus;
@@ -47,6 +50,7 @@ mod validator_signer;
 mod validator_transition;
 mod validator_transition_source;
 
+pub use address_ranges::{AddressRange, AddressRanges};
 pub use authorization::{AccountSignature, AuthorizerSet, LegalTask, VerifiedLegalTask};
 pub use bft::{
     BftLocalState, BftPhase, BftQuorumCertificate, BftStatement, BftValue, BftVote, ConsensusScope,
@@ -69,7 +73,7 @@ pub use ids::{
     TaskId, TaskIdParseError, ValidatorId,
 };
 pub use network::{
-    AccountPaymentAddress, AccountTransfer, AccountView, BftNetworkMessage,
+    AccountCurrencyRange, AccountPaymentAddress, AccountTransfer, AccountView, BftNetworkMessage,
     CURRENT_NETWORK_PROTOCOL_VERSION, GovernanceRejection, LegalTaskStatusRejection,
     LegalTaskSubmissionRejection, MAX_ACCOUNT_QUERY_PAGE, MAX_DEPLOYED_VALIDATORS,
     MAX_LEGAL_TASK_SUBMISSION_SIZE, MAX_LOCAL_PEER_CANDIDATES, MAX_NETWORK_FRAME_SIZE,

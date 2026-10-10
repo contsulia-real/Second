@@ -43,8 +43,6 @@ impl CurrencyAllocation {
         if count == 0 || start.checked_add(count).is_none() {
             return Err(ExecutionError::CurrencySequenceSpaceExhausted);
         }
-        // Reject impossible materialization before the scope can acquire a lock.
-        crate::SecondState::reserve_address_buffer(count)?;
         Ok(Self {
             validator_set_version,
             start,

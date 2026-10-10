@@ -178,15 +178,13 @@ async fn stalled_first_validator_dial_does_not_keep_recovery_submission_busy() {
     let certified = if submission.is_ok() {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                if [0, 2, 3].into_iter().all(|index| {
-                    fixtures[index]
-                        .1
-                        .load()
-                        .unwrap()
-                        .unwrap()
-                        .recovery_checkpoint_proof
-                        .is_some()
-                }) {
+                if support::progress::snapshots(
+                    [0, 2, 3].into_iter().map(|index| fixtures[index].1.clone()),
+                )
+                .await
+                .iter()
+                .all(|snapshot| snapshot.recovery_checkpoint_proof.is_some())
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;

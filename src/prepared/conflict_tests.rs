@@ -111,7 +111,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(selection)]],
+            &[vec![CurrencyAddress::new(selection)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
     };
     let mut expected = holders
@@ -189,7 +191,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             &independent_certificate,
-            &[vec![CurrencyAddress::new(2)]],
+            &[vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
     assert!(certified.blockers.is_empty());
@@ -212,7 +216,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
                 1,
                 &validators,
                 &certify(statement),
-                &[vec![CurrencyAddress::new(2)]],
+                &[vec![CurrencyAddress::new(2)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>()],
             )
             .is_err()
         );
@@ -233,7 +239,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(1)]]
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::Claim(
             ClaimError::ExplicitCurrencyContention { .. }
@@ -246,7 +254,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(1)]],
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
     let losers = reloaded
@@ -281,7 +291,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(1)]],
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
     reloaded
@@ -335,7 +347,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(1)]]
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::Claim(_))
     ));
@@ -451,7 +465,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
             3,
             &validators,
             independent_digest,
-            &[vec![CurrencyAddress::new(2)]]
+            &[vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::Execution(ExecutionError::TaskExpired))
     ));
@@ -479,7 +495,9 @@ async fn frozen_conflict_validation_finds_all_actual_holders_without_mutating_or
                 3,
                 &validators,
                 digest,
-                &[vec![CurrencyAddress::new(1)]]
+                &[vec![CurrencyAddress::new(1)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>()]
             )
             .unwrap(),
         PreparationOutcome::Prepared

@@ -49,21 +49,16 @@ async fn rejected_allocation_does_not_poison_restart_or_later_issue() {
         .submit_legal_task(good.signed_task().clone())
         .unwrap();
     let worker = support::spawn_node_runtime(&runtime);
-    let completed = tokio::time::timeout(Duration::from_secs(5), async {
-        while store
-            .load()
-            .unwrap()
-            .unwrap()
-            .state
-            .task_succeeded(good.task_id())
-            != Some(true)
-        {
-            assert!(
-                !worker.is_finished(),
-                "rejected request killed the restarted node"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    let completed = support::progress::wait_for_progress(Duration::from_secs(5), || async {
+        assert!(
+            !worker.is_finished(),
+            "rejected request killed the restarted node"
+        );
+        let snapshot = support::progress::snapshot(&store).await;
+        (
+            snapshot.state.task_succeeded(good.task_id()) == Some(true),
+            snapshot.generation,
+        )
     })
     .await;
     worker.abort();
@@ -77,7 +72,7 @@ async fn rejected_allocation_does_not_poison_restart_or_later_issue() {
             [good.task_id()],
         );
     }
-    assert!(completed.is_ok());
+    assert!(completed.is_ok(), "{completed:?}");
     let generation = store.load().unwrap().unwrap().generation;
     assert_eq!(
         runtime
@@ -129,29 +124,29 @@ async fn exhausted_competing_allocation_rejects_without_stopping_other_business(
             account: support::account(93),
         }],
     );
-    let completed = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+    let completed = async {
+        support::progress::wait_for_progress(Duration::from_secs(5), || async {
             assert!(!worker.is_finished(), "exhausted candidate killed the node");
-            if store.load().unwrap().unwrap().state.next_currency_address() == u64::MAX {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+            let snapshot = support::progress::snapshot(&store).await;
+            (
+                snapshot.state.next_currency_address() == u64::MAX,
+                snapshot.generation,
+            )
+        })
+        .await?;
         runtime
             .submit_legal_task(ordinary.signed_task().clone())
             .unwrap();
-        while store
-            .load()
-            .unwrap()
-            .unwrap()
-            .state
-            .task_succeeded(ordinary.task_id())
-            != Some(true)
-        {
+        support::progress::wait_for_progress(Duration::from_secs(5), || async {
             assert!(!worker.is_finished());
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+            let snapshot = support::progress::snapshot(&store).await;
+            (
+                snapshot.state.task_succeeded(ordinary.task_id()) == Some(true),
+                snapshot.generation,
+            )
+        })
+        .await
+    }
     .await;
     worker.abort();
     let _ = worker.await;
@@ -167,7 +162,7 @@ async fn exhausted_competing_allocation_rejects_without_stopping_other_business(
                 .chain([ordinary.task_id()]),
         );
     }
-    assert!(completed.is_ok());
+    assert!(completed.is_ok(), "{completed:?}");
     let state = store.load().unwrap().unwrap().state;
     assert_eq!(state.balance(account), 2);
     assert_eq!(
@@ -198,26 +193,21 @@ async fn exhausted_competing_allocation_rejects_without_stopping_other_business(
         .submit_legal_task(after_restart.signed_task().clone())
         .unwrap();
     let worker = support::spawn_node_runtime(&runtime);
-    let completed = tokio::time::timeout(Duration::from_secs(5), async {
-        while store
-            .load()
-            .unwrap()
-            .unwrap()
-            .state
-            .task_succeeded(after_restart.task_id())
-            != Some(true)
-        {
-            assert!(
-                !worker.is_finished(),
-                "rejected candidate remained in restart queue"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    let completed = support::progress::wait_for_progress(Duration::from_secs(5), || async {
+        assert!(
+            !worker.is_finished(),
+            "rejected candidate remained in restart queue"
+        );
+        let snapshot = support::progress::snapshot(&store).await;
+        (
+            snapshot.state.task_succeeded(after_restart.task_id()) == Some(true),
+            snapshot.generation,
+        )
     })
     .await;
     worker.abort();
     let _ = worker.await;
-    assert!(completed.is_ok());
+    assert!(completed.is_ok(), "{completed:?}");
     drop(runtime);
     support::cleanup_node_runtime(store, base);
 }
@@ -274,18 +264,13 @@ async fn certified_ranges_resume_after_crash_and_failed_business_never_reallocat
     };
     let runtime = Arc::new(bind());
     let worker = support::spawn_node_runtime(&runtime);
-    let completed = tokio::time::timeout(Duration::from_secs(5), async {
-        while store
-            .load()
-            .unwrap()
-            .unwrap()
-            .state
-            .task_succeeded(good.task_id())
-            != Some(true)
-        {
-            assert!(!worker.is_finished());
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    let completed = support::progress::wait_for_progress(Duration::from_secs(5), || async {
+        assert!(!worker.is_finished());
+        let snapshot = support::progress::snapshot(&store).await;
+        (
+            snapshot.state.task_succeeded(good.task_id()) == Some(true),
+            snapshot.generation,
+        )
     })
     .await;
     worker.abort();
@@ -330,18 +315,13 @@ async fn certified_ranges_resume_after_crash_and_failed_business_never_reallocat
         .submit_legal_task(later.signed_task().clone())
         .unwrap();
     let worker = support::spawn_node_runtime(&runtime);
-    let completed = tokio::time::timeout(Duration::from_secs(5), async {
-        while store
-            .load()
-            .unwrap()
-            .unwrap()
-            .state
-            .task_succeeded(later.task_id())
-            != Some(true)
-        {
-            assert!(!worker.is_finished());
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    let completed = support::progress::wait_for_progress(Duration::from_secs(5), || async {
+        assert!(!worker.is_finished());
+        let snapshot = support::progress::snapshot(&store).await;
+        (
+            snapshot.state.task_succeeded(later.task_id()) == Some(true),
+            snapshot.generation,
+        )
     })
     .await;
     worker.abort();
@@ -429,11 +409,15 @@ async fn competing_allocations_converge_after_opposite_submission_order_and_rest
         .collect::<Vec<_>>();
     let complete = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                let state = store.load().unwrap().unwrap().state;
-                state.task_succeeded(a.task_id()) == Some(true)
-                    && state.task_succeeded(b.task_id()) == Some(true)
-            }) {
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| {
+                    let state = &snapshot.state;
+                    state.task_succeeded(a.task_id()) == Some(true)
+                        && state.task_succeeded(b.task_id()) == Some(true)
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -567,11 +551,13 @@ async fn membership_change_and_pending_issue_share_the_frontier_barrier() {
         let mut replanned = false;
         loop {
             if !replanned
-                && fixtures.iter().all(|(_, store, _)| {
-                    let snapshot = store.load().unwrap().unwrap();
-                    snapshot.validator_set.version() == 1
-                        && snapshot.state.task_succeeded(task.task_id()) == Some(true)
-                })
+                && support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                    .await
+                    .iter()
+                    .all(|snapshot| {
+                        snapshot.validator_set.version() == 1
+                            && snapshot.state.task_succeeded(task.task_id()) == Some(true)
+                    })
             {
                 // The allocation may win the first round while bootstrap connects.
                 // A transition tied to that old frontier must be rebuilt, never
@@ -593,12 +579,15 @@ async fn membership_change_and_pending_issue_share_the_frontier_barrier() {
                 }
                 replanned = true;
             }
-            if fixtures.iter().all(|(_, store, _)| {
-                let snapshot = store.load().unwrap().unwrap();
-                snapshot.validator_set.version() == 2
-                    && snapshot.state.task_succeeded(task.task_id()) == Some(true)
-                    && snapshot.state.task_succeeded(late.task_id()) == Some(true)
-            }) {
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| {
+                    snapshot.validator_set.version() == 2
+                        && snapshot.state.task_succeeded(task.task_id()) == Some(true)
+                        && snapshot.state.task_succeeded(late.task_id()) == Some(true)
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

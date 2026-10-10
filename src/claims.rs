@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::range_map::RangeMap;
 use crate::state::BusinessState;
 use crate::{AccountAddress, CurrencyAddress, CurrencyRole, SecondState, TaskId};
+use crate::{AddressRange, AddressRanges};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationClaimId {
@@ -76,8 +78,8 @@ enum ClaimKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClaimRecord {
     kind: ClaimKind,
-    claimed_currencies: Vec<CurrencyAddress>,
-    selected_currencies: Vec<CurrencyAddress>,
+    claimed_currencies: AddressRanges,
+    selected_currencies: AddressRanges,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,7 +91,7 @@ struct CurrencyClaimOwner {
 #[derive(Clone, Debug, Default)]
 pub struct CurrencyClaimBook {
     records: BTreeMap<OperationClaimId, ClaimRecord>,
-    claimed_by_currency: BTreeMap<CurrencyAddress, CurrencyClaimOwner>,
+    claimed_by_currency: RangeMap<CurrencyClaimOwner>,
 }
 
 impl CurrencyClaimBook {
@@ -103,7 +105,7 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         source: AccountAddress,
         amount: u64,
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         self.claim_transfer_in_business_state(&state.business, claim_id, source, amount)
     }
 
@@ -113,25 +115,20 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         source: AccountAddress,
         amount: u64,
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         let requested_kind = ClaimKind::Transfer { source, amount };
         if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
         }
 
-        let mut total_owned = 0_u64;
-        let mut available = Vec::new();
-
-        for (address, currency) in &business.currencies {
-            if currency.role != CurrencyRole::Circulation || currency.owner != Some(source) {
-                continue;
-            }
-
-            total_owned += 1;
-            if self.claimable_by_task(*address, claim_id.task_id()) {
-                available.push(*address);
+        let mut owned = AddressRanges::default();
+        for (start, run) in business.currencies.owned_runs(source) {
+            if run.role == CurrencyRole::Circulation {
+                owned.insert(AddressRange::new(start, run.len).unwrap());
             }
         }
+        let total_owned = owned.len();
+        let available = self.available(&owned, claim_id.task_id());
 
         if total_owned < amount {
             return Err(ClaimError::InsufficientBalance {
@@ -141,7 +138,7 @@ impl CurrencyClaimBook {
             });
         }
 
-        let available_unclaimed = available.len() as u64;
+        let available_unclaimed = available.len();
         if available_unclaimed < amount {
             return Err(ClaimError::CurrencyContention {
                 account: source,
@@ -151,7 +148,7 @@ impl CurrencyClaimBook {
             });
         }
 
-        let selected = Self::take_first_currencies(available, amount);
+        let selected = available.take(amount);
         self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
 
         Ok(selected)
@@ -162,7 +159,7 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         state: &SecondState,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         self.claim_reserve_in_business_state(claim_id, &state.business, count)
     }
 
@@ -171,7 +168,7 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         business: &BusinessState,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         let requested_kind = ClaimKind::Reserve { count };
         if let Some(existing) = self.existing_selection(&claim_id, &requested_kind)? {
             return Ok(existing);
@@ -186,7 +183,7 @@ impl CurrencyClaimBook {
         &mut self,
         claim_id: OperationClaimId,
         currencies: &[CurrencyAddress],
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         let requested_kind = ClaimKind::Explicit {
             currencies: currencies.to_vec(),
         };
@@ -196,7 +193,7 @@ impl CurrencyClaimBook {
 
         self.ensure_unique_explicit(currencies, &claim_id)?;
         self.ensure_claimable(currencies, claim_id.task_id())?;
-        let selected = currencies.to_vec();
+        let selected = currencies.iter().copied().collect::<AddressRanges>();
         self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
         Ok(selected)
     }
@@ -206,7 +203,7 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         business: &BusinessState,
         leaked: &[CurrencyAddress],
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
+    ) -> Result<AddressRanges, ClaimError> {
         let requested_kind = ClaimKind::LeakRepair {
             leaked: leaked.to_vec(),
             reserve_count: leaked.len() as u64,
@@ -219,8 +216,8 @@ impl CurrencyClaimBook {
         self.ensure_claimable(leaked, claim_id.task_id())?;
 
         let reserve = self.select_reserve(business, claim_id.task_id(), leaked.len() as u64)?;
-        let mut claimed = leaked.to_vec();
-        claimed.extend_from_slice(&reserve);
+        let mut claimed = leaked.iter().copied().collect::<AddressRanges>();
+        claimed.union_with(&reserve);
 
         self.insert_claim(claim_id, requested_kind, claimed, reserve.clone())?;
         Ok(reserve)
@@ -231,22 +228,14 @@ impl CurrencyClaimBook {
             return;
         };
 
-        for address in record.claimed_currencies {
-            let should_remove = if let Some(owner) = self.claimed_by_currency.get_mut(&address) {
+        for range in record.claimed_currencies.ranges() {
+            for (part, mut owner) in self.claimed_by_currency.overlapping(*range) {
                 if &owner.task_id != claim_id.task_id() {
-                    false
-                } else if owner.references > 1 {
-                    owner.references -= 1;
-                    false
-                } else {
-                    true
+                    continue;
                 }
-            } else {
-                false
-            };
-
-            if should_remove {
-                self.claimed_by_currency.remove(&address);
+                owner.references -= 1;
+                let value = (owner.references > 0).then_some(owner);
+                self.claimed_by_currency.set(part, value);
             }
         }
     }
@@ -264,41 +253,46 @@ impl CurrencyClaimBook {
         }
     }
 
-    pub fn claimed_currency_count(&self) -> usize {
-        self.claimed_by_currency.len()
+    pub fn claimed_currency_count(&self) -> u64 {
+        self.claimed_by_currency
+            .runs()
+            .map(|(range, _)| range.len)
+            .sum()
     }
-    pub(crate) fn claimed_addresses(&self) -> impl Iterator<Item = CurrencyAddress> + '_ {
-        self.claimed_by_currency.keys().copied()
+    pub(crate) fn claimed_ranges(&self) -> AddressRanges {
+        let mut ranges = AddressRanges::default();
+        for (range, _) in self.claimed_by_currency.runs() {
+            ranges.insert(range);
+        }
+        ranges
     }
-
     pub(crate) fn conflicting_tasks(&self, candidate: &Self) -> BTreeSet<TaskId> {
-        candidate
-            .claimed_by_currency
-            .iter()
-            .filter_map(|(address, candidate_owner)| {
-                self.claimed_by_currency.get(address).and_then(|owner| {
-                    (owner.task_id != candidate_owner.task_id).then(|| owner.task_id.clone())
-                })
-            })
-            .collect()
+        let mut tasks = BTreeSet::new();
+        for (range, candidate_owner) in candidate.claimed_by_currency.runs() {
+            for (_, owner) in self.claimed_by_currency.overlapping(range) {
+                if owner.task_id != candidate_owner.task_id {
+                    tasks.insert(owner.task_id);
+                }
+            }
+        }
+        tasks
     }
 
     pub(crate) fn restore_transfer(
         &mut self,
         claim_id: OperationClaimId,
         source: AccountAddress,
-        currencies: &[CurrencyAddress],
+        currencies: &AddressRanges,
     ) -> Result<(), ClaimError> {
-        self.ensure_unique_explicit(currencies, &claim_id)?;
-        self.ensure_claimable(currencies, claim_id.task_id())?;
+        self.ensure_ranges_claimable(currencies, claim_id.task_id())?;
         self.insert_claim(
             claim_id,
             ClaimKind::Transfer {
                 source,
-                amount: currencies.len() as u64,
+                amount: currencies.len(),
             },
-            currencies.to_vec(),
-            currencies.to_vec(),
+            currencies.clone(),
+            currencies.clone(),
         )
     }
 
@@ -314,8 +308,8 @@ impl CurrencyClaimBook {
             ClaimKind::Explicit {
                 currencies: currencies.to_vec(),
             },
-            currencies.to_vec(),
-            currencies.to_vec(),
+            currencies.iter().copied().collect(),
+            currencies.iter().copied().collect(),
         )
     }
 
@@ -323,20 +317,24 @@ impl CurrencyClaimBook {
         &mut self,
         claim_id: OperationClaimId,
         leaked: &[CurrencyAddress],
-        reserve: &[CurrencyAddress],
+        reserve: &AddressRanges,
     ) -> Result<(), ClaimError> {
-        let mut claimed = leaked.to_vec();
-        claimed.extend_from_slice(reserve);
-        self.ensure_unique_explicit(&claimed, &claim_id)?;
-        self.ensure_claimable(&claimed, claim_id.task_id())?;
+        self.ensure_unique_explicit(leaked, &claim_id)?;
+        let leaked_ranges = leaked.iter().copied().collect::<AddressRanges>();
+        if leaked_ranges.intersects(reserve) {
+            return Err(ClaimError::ClaimIdentityConflict(claim_id));
+        }
+        let mut claimed = leaked_ranges;
+        claimed.union_with(reserve);
+        self.ensure_ranges_claimable(&claimed, claim_id.task_id())?;
         self.insert_claim(
             claim_id,
             ClaimKind::LeakRepair {
                 leaked: leaked.to_vec(),
-                reserve_count: reserve.len() as u64,
+                reserve_count: reserve.len(),
             },
             claimed,
-            reserve.to_vec(),
+            reserve.clone(),
         )
     }
 
@@ -344,7 +342,7 @@ impl CurrencyClaimBook {
         &self,
         claim_id: &OperationClaimId,
         requested_kind: &ClaimKind,
-    ) -> Result<Option<Vec<CurrencyAddress>>, ClaimError> {
+    ) -> Result<Option<AddressRanges>, ClaimError> {
         let Some(existing) = self.records.get(claim_id) else {
             return Ok(None);
         };
@@ -361,20 +359,13 @@ impl CurrencyClaimBook {
         business: &BusinessState,
         task_id: &TaskId,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ClaimError> {
-        let mut total_reserve = 0_u64;
-        let mut available = Vec::new();
-
-        for (address, currency) in &business.currencies {
-            if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
-                continue;
-            }
-
-            total_reserve += 1;
-            if self.claimable_by_task(*address, task_id) {
-                available.push(*address);
-            }
+    ) -> Result<AddressRanges, ClaimError> {
+        let mut reserves = AddressRanges::default();
+        for (start, run) in business.currencies.reserve_runs() {
+            reserves.insert(AddressRange::new(start, run.len).unwrap());
         }
+        let total_reserve = reserves.len();
+        let available = self.available(&reserves, task_id);
 
         if total_reserve < count {
             return Err(ClaimError::ReserveUnavailable {
@@ -383,7 +374,7 @@ impl CurrencyClaimBook {
             });
         }
 
-        let available_unclaimed = available.len() as u64;
+        let available_unclaimed = available.len();
         if available_unclaimed < count {
             return Err(ClaimError::ReserveContention {
                 required: count,
@@ -392,22 +383,34 @@ impl CurrencyClaimBook {
             });
         }
 
-        Ok(Self::take_first_currencies(available, count))
+        Ok(available.take(count))
     }
 
-    fn take_first_currencies(currencies: Vec<CurrencyAddress>, count: u64) -> Vec<CurrencyAddress> {
-        let mut selected = Vec::new();
-        let mut remaining = count;
-
-        for currency in currencies {
-            if remaining == 0 {
-                break;
+    fn available(&self, ranges: &AddressRanges, task: &TaskId) -> AddressRanges {
+        let mut blocked = AddressRanges::default();
+        for (range, owner) in self.claimed_by_currency.runs() {
+            if &owner.task_id != task {
+                blocked.insert(range);
             }
-            selected.push(currency);
-            remaining -= 1;
         }
+        ranges.difference(&blocked)
+    }
 
-        selected
+    fn ensure_ranges_claimable(
+        &self,
+        ranges: &AddressRanges,
+        task: &TaskId,
+    ) -> Result<(), ClaimError> {
+        for range in ranges.ranges() {
+            for (part, owner) in self.claimed_by_currency.overlapping(*range) {
+                if &owner.task_id != task {
+                    return Err(ClaimError::ExplicitCurrencyContention {
+                        currency: part.start,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn ensure_claimable(
@@ -430,7 +433,7 @@ impl CurrencyClaimBook {
     ) -> Result<(), ClaimError> {
         let mut seen = BTreeSet::new();
         for address in currencies {
-            if !seen.insert(*address) {
+            if AddressRange::new(*address, 1).is_none() || !seen.insert(*address) {
                 return Err(ClaimError::ClaimIdentityConflict(claim_id.clone()));
             }
         }
@@ -439,7 +442,7 @@ impl CurrencyClaimBook {
 
     fn claimable_by_task(&self, address: CurrencyAddress, task_id: &TaskId) -> bool {
         self.claimed_by_currency
-            .get(&address)
+            .get(address)
             .is_none_or(|owner| &owner.task_id == task_id)
     }
 
@@ -447,29 +450,29 @@ impl CurrencyClaimBook {
         &mut self,
         claim_id: OperationClaimId,
         kind: ClaimKind,
-        claimed_currencies: Vec<CurrencyAddress>,
-        selected_currencies: Vec<CurrencyAddress>,
+        claimed_currencies: AddressRanges,
+        selected_currencies: AddressRanges,
     ) -> Result<(), ClaimError> {
-        for address in &claimed_currencies {
-            match self.claimed_by_currency.get_mut(address) {
-                Some(owner) if &owner.task_id == claim_id.task_id() => {
-                    owner.references = owner
-                        .references
-                        .checked_add(1)
-                        .ok_or(ClaimError::ClaimReferenceOverflow(*address))?;
+        self.ensure_ranges_claimable(&claimed_currencies, claim_id.task_id())?;
+        for range in claimed_currencies.ranges() {
+            for (part, owner) in self.claimed_by_currency.overlapping(*range) {
+                if owner.references == u32::MAX {
+                    return Err(ClaimError::ClaimReferenceOverflow(part.start));
                 }
-                Some(_) => {
-                    return Err(ClaimError::ExplicitCurrencyContention { currency: *address });
-                }
-                None => {
-                    self.claimed_by_currency.insert(
-                        *address,
-                        CurrencyClaimOwner {
-                            task_id: claim_id.task_id().clone(),
-                            references: 1,
-                        },
-                    );
-                }
+            }
+        }
+        for range in claimed_currencies.ranges() {
+            let existing = self.claimed_by_currency.overlapping(*range);
+            self.claimed_by_currency.set(
+                *range,
+                Some(CurrencyClaimOwner {
+                    task_id: claim_id.task_id().clone(),
+                    references: 1,
+                }),
+            );
+            for (part, mut owner) in existing {
+                owner.references += 1;
+                self.claimed_by_currency.set(part, Some(owner));
             }
         }
 
@@ -484,3 +487,6 @@ impl CurrencyClaimBook {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -33,6 +33,7 @@ mod peer_discovery;
 mod peer_manager;
 mod persistence;
 mod prepared_tasks;
+mod progress_deadlines;
 mod public_checkpoint;
 mod public_state_summary;
 mod public_state_sync;

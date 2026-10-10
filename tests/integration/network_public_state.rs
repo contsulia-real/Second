@@ -2,14 +2,14 @@ use crate::support;
 use support::FinalizedExecute as _;
 
 use second::{
-    CurrencyAddress, CurrencyRole, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage,
-    Operation, PublicCurrencyState, SecondState, client_public_currency_page,
+    CurrencyAddress, MAX_PUBLIC_CURRENCY_PAGE, NetworkError, NetworkMessage, Operation,
+    PublicCurrencyState, SecondState, client_public_currency_page,
     serve_public_currency_connection,
 };
 use support::{payment_address, register_payment_addresses, verified_task};
 
 #[tokio::test]
-async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
+async fn real_quic_query_returns_live_ranges_without_owner_or_role() {
     let alice = support::account(987654);
     let mut state = SecondState::genesis([alice], 1).with_reserve(2).unwrap();
     let issue = verified_task(
@@ -41,15 +41,14 @@ async fn real_quic_query_returns_public_occupancy_and_role_without_owner() {
         .unwrap();
 
     assert_eq!(page.remote_node_id, server_node_id);
-    assert_eq!(page.states.len(), 4);
-    assert_eq!(page.states[0].role, CurrencyRole::Reserve);
-    assert!(!page.states[0].occupied);
-    assert_eq!(page.states[2].role, CurrencyRole::Circulation);
-    assert!(page.states[2].occupied);
+    assert_eq!(page.states.len(), 1);
+    assert_eq!(page.states[0].len, 4);
+    assert!(page.states[0].occupied);
     assert_eq!(page.next_start, None);
 
     let rendered = format!("{:?}", page.states);
     assert!(!rendered.contains("AccountAddress"));
+    assert!(!rendered.contains("role"));
     assert!(!rendered.contains("987654"));
 
     peer.close();
@@ -75,14 +74,14 @@ async fn direct_page_query_rejects_peer_response_exceeding_requested_limit() {
             .respond(&NetworkMessage::PublicCurrencies {
                 states: vec![
                     PublicCurrencyState {
-                        address: CurrencyAddress::new(10),
+                        len: 1,
+                        start: CurrencyAddress::new(10),
                         occupied: false,
-                        role: CurrencyRole::Reserve,
                     },
                     PublicCurrencyState {
-                        address: CurrencyAddress::new(11),
+                        len: 1,
+                        start: CurrencyAddress::new(11),
                         occupied: false,
-                        role: CurrencyRole::Reserve,
                     },
                 ],
                 next_start: None,
@@ -139,7 +138,7 @@ fn address_gaps_are_skipped_without_empty_pages() {
         .public_currency_page(CurrencyAddress::new(1), 1)
         .unwrap();
     assert_eq!(page.states.len(), 1);
-    assert_eq!(page.states[0].address, CurrencyAddress::new(3));
+    assert_eq!(page.states[0].start, CurrencyAddress::new(3));
     assert_eq!(page.next_start, None);
 }
 
@@ -179,9 +178,9 @@ fn public_currency_page_limit_counts_existing_currencies_not_empty_addresses() {
         .public_currency_page(CurrencyAddress::new(1), 2)
         .unwrap();
 
-    assert_eq!(page.states.len(), 2);
-    assert_eq!(page.states[0].address, CurrencyAddress::new(10_001));
-    assert_eq!(page.states[1].address, CurrencyAddress::new(10_002));
+    assert_eq!(page.states.len(), 1);
+    assert_eq!(page.states[0].start, CurrencyAddress::new(10_001));
+    assert_eq!(page.states[0].len, 2);
     assert_eq!(page.next_start, None);
 }
 

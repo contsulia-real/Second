@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::currency::Currency;
+use crate::AddressRanges;
+use crate::currency_ledger::CurrencyLedger;
 use crate::payment::{PaymentAddressRecord, PaymentExecution};
 use crate::{
     AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError, FinalityStatement, NetworkError,
@@ -54,7 +55,7 @@ pub(crate) struct PrerequisiteState {
 pub(crate) struct BusinessState {
     pub(crate) accounts: BTreeSet<AccountAddress>,
     pub(crate) payment_addresses: BTreeMap<PaymentAddress, PaymentAddressRecord>,
-    pub(crate) currencies: BTreeMap<CurrencyAddress, Currency>,
+    pub(crate) currencies: CurrencyLedger,
     pub(crate) payment_history: BTreeMap<OperationClaimId, PaymentExecution>,
 }
 
@@ -86,7 +87,7 @@ impl SecondState {
             business: BusinessState {
                 accounts: accounts.into_iter().collect(),
                 payment_addresses: BTreeMap::new(),
-                currencies: BTreeMap::new(),
+                currencies: CurrencyLedger::new(),
                 payment_history: BTreeMap::new(),
             },
         }
@@ -94,15 +95,10 @@ impl SecondState {
 
     pub fn with_reserve(mut self, count: u64) -> Result<Self, ExecutionError> {
         let range = self.allocate_currency_range(count)?;
-        for address in range {
-            self.business.currencies.insert(
-                address,
-                Currency {
-                    address,
-                    role: CurrencyRole::Reserve,
-                    owner: None,
-                },
-            );
+        for part in range.ranges() {
+            self.business
+                .currencies
+                .set_range(*part, CurrencyRole::Reserve, None);
         }
         Ok(self)
     }
@@ -110,21 +106,21 @@ impl SecondState {
     pub fn balance(&self, account: AccountAddress) -> u64 {
         self.business
             .currencies
-            .values()
-            .filter(|currency| currency.owner == Some(account))
-            .count() as u64
+            .owned_runs(account)
+            .map(|(_, run)| run.len)
+            .sum()
     }
 
     pub fn current_supply(&self) -> u64 {
-        self.business.currencies.len() as u64
+        self.business.currencies.len()
     }
 
     pub fn reserve_count(&self) -> u64 {
         self.business
             .currencies
-            .values()
-            .filter(|currency| currency.role == CurrencyRole::Reserve && currency.owner.is_none())
-            .count() as u64
+            .reserve_runs()
+            .map(|(_, run)| run.len)
+            .sum()
     }
 
     pub const fn next_currency_address(&self) -> u64 {
@@ -139,7 +135,7 @@ impl SecondState {
         self.business
             .currencies
             .get(&address)
-            .map(Currency::public_state)
+            .map(|currency| currency.public_state())
     }
 
     pub fn public_currency_summary(&self) -> crate::PublicCurrencySummary {
@@ -147,29 +143,19 @@ impl SecondState {
     }
 
     pub fn public_currency_states(&self) -> Vec<PublicCurrencyState> {
-        self.business
-            .currencies
-            .values()
-            .map(Currency::public_state)
-            .collect()
+        crate::public_state::public_states(self)
     }
-
     pub fn public_currency_page(
         &self,
         start: CurrencyAddress,
         limit: u16,
     ) -> Result<PublicCurrencyPage, NetworkError> {
         crate::network::validate_public_currency_limit(limit)?;
-
-        let mut currencies = self.business.currencies.range(start..);
-        let states = currencies
-            .by_ref()
-            .take(usize::from(limit))
-            .map(|(_, currency)| currency.public_state())
-            .collect::<Vec<_>>();
-        let next_start = currencies.next().map(|(address, _)| *address);
-
-        Ok(PublicCurrencyPage { states, next_start })
+        Ok(crate::public_state::page(
+            &self.public_currency_states(),
+            start,
+            limit,
+        ))
     }
 
     pub(crate) fn bind_task(&mut self, task: &VerifiedLegalTask) -> Result<bool, ExecutionError> {
@@ -237,9 +223,9 @@ impl SecondState {
     pub(crate) fn allocate_currency_range(
         &mut self,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
+    ) -> Result<AddressRanges, ExecutionError> {
         if count == 0 {
-            return Ok(Vec::new());
+            return Ok(AddressRanges::default());
         }
 
         let start = self.protocol.next_currency_address;
@@ -254,25 +240,9 @@ impl SecondState {
     pub(crate) fn materialize_addresses(
         start: u64,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
-        let end_exclusive = start
-            .checked_add(count)
-            .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)?;
-        let mut addresses = Self::reserve_address_buffer(count)?;
-        addresses.extend((start..end_exclusive).map(CurrencyAddress::new));
-        Ok(addresses)
-    }
-
-    pub(crate) fn reserve_address_buffer(
-        count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
-        let capacity = usize::try_from(count)
-            .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
-        let mut addresses = Vec::new();
-        addresses
-            .try_reserve_exact(capacity)
-            .map_err(|_| ExecutionError::CurrencyAllocationFailed { requested: count })?;
-        Ok(addresses)
+    ) -> Result<AddressRanges, ExecutionError> {
+        AddressRanges::single(CurrencyAddress::new(start), count)
+            .ok_or(ExecutionError::CurrencySequenceSpaceExhausted)
     }
 
     pub(crate) fn allocated_task_addresses(
@@ -280,7 +250,7 @@ impl SecondState {
         task: &VerifiedLegalTask,
         offset: u64,
         count: u64,
-    ) -> Result<Vec<CurrencyAddress>, ExecutionError> {
+    ) -> Result<AddressRanges, ExecutionError> {
         let (start, total) = self
             .protocol
             .task_bindings

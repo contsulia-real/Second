@@ -200,15 +200,11 @@ async fn restarted_finality_voters_finish_without_hidden_byzantine_vote() {
         .collect::<Vec<_>>();
     let result = tokio::time::timeout(Duration::from_secs(12), async {
         loop {
-            if honest.iter().all(|(_, store)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .state
-                    .task_succeeded(task.task_id())
-                    == Some(true)
-            }) {
+            if support::progress::snapshots(honest.iter().map(|(_, store)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| snapshot.state.task_succeeded(task.task_id()) == Some(true))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

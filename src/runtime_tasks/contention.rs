@@ -7,7 +7,7 @@ impl NodeRuntime {
         version: u64,
         digest: [u8; 32],
         task: &crate::VerifiedLegalTask,
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
         snapshot: &crate::PersistedNodeState,
     ) -> Result<bool, BftConsensusRuntimeError> {
         let Some(plan) = snapshot.prepared_tasks.get(&task.task_id()) else {

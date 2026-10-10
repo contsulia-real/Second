@@ -136,7 +136,7 @@ impl NodeRuntime {
         validator_set_version: u64,
         expected_plan_digest: [u8; 32],
         verified: &VerifiedLegalTask,
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
         mut persisted: std::sync::Arc<PersistedNodeState>,
     ) -> Result<(), BftConsensusRuntimeError> {
         const MAX_STALE_RETRIES: usize = 3;
@@ -202,7 +202,7 @@ impl NodeRuntime {
         validator_set_version: u64,
         expected_plan_digest: [u8; 32],
         verified: &VerifiedLegalTask,
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
         persisted: &PersistedNodeState,
     ) -> Result<(), BftConsensusRuntimeError> {
         let validator_set = if persisted.validator_set.version() == validator_set_version {

@@ -1,7 +1,7 @@
 use super::projection::push_bounded;
 use super::*;
-use crate::CurrencyAddress;
 use crate::network::session::{PublicNetworkServices, serve_public_network_connection};
+use crate::{AddressRange, CurrencyAddress};
 use crate::{CurrencyRole, QuicClient, QuicServer, QuicTransportIdentity, SecondState, StateStore};
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -12,15 +12,23 @@ struct Fixture {
 }
 impl Fixture {
     fn new(count: u64) -> Self {
-        let (store, _) = crate::prepared::tests::temp_store();
         let account = crate::test_helpers::account(7);
         let mut state = SecondState::genesis([account], 1)
-            .with_reserve(count)
+            .with_reserve(count * 2)
             .unwrap();
-        for currency in state.business.currencies.values_mut() {
-            currency.owner = Some(account);
-            currency.role = CurrencyRole::Circulation;
+        // Separate owned runs retain the pagination and range-budget coverage.
+        for value in (1..count * 2).step_by(2) {
+            let address = CurrencyAddress::new(value);
+            state.business.currencies.set_range(
+                AddressRange::new(address, 1).unwrap(),
+                CurrencyRole::Circulation,
+                Some(account),
+            );
         }
+        Self::from_state(state)
+    }
+    fn from_state(state: SecondState) -> Self {
+        let (store, _) = crate::prepared::tests::temp_store();
         store
             .initialize(&state, &crate::prepared::tests::validator_set())
             .unwrap();
@@ -39,6 +47,38 @@ impl Fixture {
                 .map_err(|e| NetworkError::Transport(format!("{e:?}")))?
                 .ok_or_else(|| denied("unavailable"))
         })
+    }
+}
+
+#[tokio::test]
+async fn billion_owned_units_use_one_asset_row_and_the_same_balance() {
+    let _serial = TEST_LOCK.lock().await;
+    let account = crate::test_helpers::account(7);
+    let mut state = SecondState::genesis([account], 1);
+    state.business.currencies.set_range(
+        AddressRange::new(CurrencyAddress::new(1), 1_000_000_000).unwrap(),
+        CurrencyRole::Circulation,
+        Some(account),
+    );
+    state.protocol.next_currency_address = 1_000_000_001;
+    let fixture = Fixture::from_state(state);
+    for kind in [1, 4] {
+        let (_client, peer, worker) = connection(&fixture, ACCOUNT_QUERY_LIFETIME, true).await;
+        let view = client_account_view(&peer, &crate::test_helpers::key(7), kind)
+            .await
+            .unwrap();
+        assert_eq!(view.balance, 1_000_000_000);
+        if kind == 4 {
+            assert_eq!(view.total, 1);
+            assert_eq!(
+                view.currencies,
+                vec![AccountCurrencyRange {
+                    start: CurrencyAddress::new(1).to_string(),
+                    len: 1_000_000_000
+                }]
+            );
+        }
+        worker.await.unwrap().unwrap();
     }
 }
 impl Drop for Fixture {

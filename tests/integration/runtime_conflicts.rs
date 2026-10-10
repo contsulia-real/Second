@@ -287,8 +287,12 @@ async fn run_resource_conflicts(protected: bool) {
         // quorum must recover it using only its final certificates.
         tokio::time::timeout(Duration::from_secs(90), async {
             loop {
-                if fixtures.iter().skip(1).all(|(_, store, _)| {
-                    let snapshot = store.load().unwrap().unwrap();
+                if support::progress::snapshots(
+                    fixtures.iter().skip(1).map(|(_, store, _)| store.clone()),
+                )
+                .await
+                .iter()
+                .all(|snapshot| {
                     pairs.iter().all(|pair| {
                         snapshot.state.task_succeeded(pair[1].task_id()) == Some(true)
                             && snapshot.state.task_cancelled(pair[0].task_id())
@@ -316,19 +320,22 @@ async fn run_resource_conflicts(protected: bool) {
     // rotation for Abort, followed by the newly unblocked Commit rotation.
     let ready = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                let snapshot = store.load().unwrap().unwrap();
-                snapshot.state.task_succeeded(independent.task_id()) == Some(true)
-                    && pairs.iter().all(|pair| {
-                        snapshot
-                            .state
-                            .task_succeeded(pair[usize::from(protected)].task_id())
-                            == Some(true)
-                            && snapshot
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| {
+                    snapshot.state.task_succeeded(independent.task_id()) == Some(true)
+                        && pairs.iter().all(|pair| {
+                            snapshot
                                 .state
-                                .task_cancelled(pair[usize::from(!protected)].task_id())
-                    })
-            }) {
+                                .task_succeeded(pair[usize::from(protected)].task_id())
+                                == Some(true)
+                                && snapshot
+                                    .state
+                                    .task_cancelled(pair[usize::from(!protected)].task_id())
+                        })
+                })
+            {
                 break;
             }
             assert!(workers.iter().all(|worker| !worker.is_finished()));

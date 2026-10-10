@@ -156,7 +156,7 @@ fn real_cli_public_init_starts_public_node_and_serves_certified_state() {
     assert!(client_stdout.contains(&format!("peer={public_node_id}")));
     assert!(client_stdout.contains("epoch=91"));
     assert!(client_stdout.contains("validator_set=7"));
-    assert!(client_stdout.contains("count=4"));
+    assert!(client_stdout.contains("count=1"));
     assert!(client_stdout.contains("reserve=4"));
     assert!(client_stdout.contains("next_currency=54"));
 
@@ -177,7 +177,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     let server_store = StateStore::new(&server_base);
     let trust_store = StateStore::new(&trust_base);
 
-    let state = SecondState::genesis([], 10).with_reserve(300).unwrap();
+    let state = support::fragmented_public_state(300);
     let set = validators();
     let proof = checkpoint_proof(&state, &set, 77);
 
@@ -229,11 +229,11 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
     assert!(client_stdout.contains("epoch=77"));
     assert!(client_stdout.contains("validator_set=7"));
     assert!(client_stdout.contains("votes=3"));
-    assert!(client_stdout.contains("count=300"));
-    assert!(client_stdout.contains("supply=300"));
+    assert!(client_stdout.contains("count=301"));
+    assert!(client_stdout.contains("supply=900"));
     assert!(client_stdout.contains("reserve=300"));
-    assert!(client_stdout.contains("occupied=0"));
-    assert!(client_stdout.contains("next_currency=310"));
+    assert!(client_stdout.contains("occupied=900"));
+    assert!(client_stdout.contains("next_currency=1210"));
 
     let advanced_trust = trust_store.load().unwrap().unwrap();
     assert_eq!(advanced_trust.checkpoint_floor_epoch, 77);
@@ -256,7 +256,7 @@ fn real_process_certified_sync_uses_independent_local_validator_trust() {
 fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     let base = temp_base("sync");
     let store = StateStore::new(&base);
-    let state = SecondState::genesis([], 10).with_reserve(600).unwrap();
+    let state = support::fragmented_public_state(600);
     store.initialize(&state, &validators()).unwrap();
 
     let executable = env!("CARGO_BIN_EXE_second");
@@ -291,11 +291,11 @@ fn real_process_sync_rebuilds_multi_page_public_view_from_snapshot() {
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("SYNCED "));
     assert!(client_stdout.contains(&format!("peer={server_node_id}")));
-    assert!(client_stdout.contains("count=600"));
-    assert!(client_stdout.contains("supply=600"));
+    assert!(client_stdout.contains("count=601"));
+    assert!(client_stdout.contains("supply=1800"));
     assert!(client_stdout.contains("reserve=600"));
-    assert!(client_stdout.contains("occupied=0"));
-    assert!(client_stdout.contains("next_currency=610"));
+    assert!(client_stdout.contains("occupied=1800"));
+    assert!(client_stdout.contains("next_currency=2410"));
 
     let lower = client_stdout.to_ascii_lowercase();
     assert!(!lower.contains("owner"));
@@ -359,10 +359,9 @@ fn long_lived_node_serves_multiple_client_connections_from_snapshot() {
     let client_stdout = String::from_utf8(client.stdout).unwrap();
     assert!(client_stdout.contains("PUBLIC "));
     assert!(client_stdout.contains(&format!("peer={server_node_id}")));
-    assert!(client_stdout.contains("count=3"));
-    assert!(client_stdout.contains("address=1 occupied=false role=reserve"));
-    assert!(client_stdout.contains("address=2 occupied=true role=circulation"));
-    assert!(client_stdout.contains("address=3 occupied=true role=circulation"));
+    assert!(client_stdout.contains("count=1"));
+    assert!(client_stdout.contains("start=1 len=3 occupied=true"));
+    assert!(!client_stdout.contains("role="));
 
     let lower = client_stdout.to_ascii_lowercase();
     assert!(!lower.contains("owner"));

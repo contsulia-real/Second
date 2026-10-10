@@ -1,8 +1,8 @@
 pub(crate) mod account_query;
 mod bft;
 pub use account_query::{
-    AccountPaymentAddress, AccountTransfer, AccountView, MAX_ACCOUNT_QUERY_PAGE,
-    client_account_query, client_account_view,
+    AccountCurrencyRange, AccountPaymentAddress, AccountTransfer, AccountView,
+    MAX_ACCOUNT_QUERY_PAGE, client_account_query, client_account_view,
 };
 mod bft_codec;
 mod codec;
@@ -371,7 +371,6 @@ pub enum NetworkError {
         actual: usize,
     },
     InvalidCheckpointProof,
-    InvalidCurrencyRole(u8),
     InvalidBoolean(u8),
     InvalidCursorFlag(u8),
     InvalidPeerRecord,

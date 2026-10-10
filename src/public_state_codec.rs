@@ -1,13 +1,13 @@
-use crate::{CurrencyAddress, CurrencyRole, PublicCurrencyState, PublicCurrencySummary};
+use crate::{CurrencyAddress, PublicCurrencyState, PublicCurrencySummary};
 
 pub(crate) const PUBLIC_CURRENCY_SUMMARY_ENCODED_SIZE: usize = 64;
-pub(crate) const PUBLIC_CURRENCY_STATE_ENCODED_SIZE: usize = 10;
+pub(crate) const PUBLIC_CURRENCY_STATE_ENCODED_SIZE: usize = 17;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PublicStateCodecError {
     Length,
     Boolean(u8),
-    CurrencyRole(u8),
+    InvalidRange,
 }
 
 pub(crate) fn encode_public_currency_summary(out: &mut Vec<u8>, summary: &PublicCurrencySummary) {
@@ -36,12 +36,9 @@ pub(crate) fn decode_public_currency_summary(
 }
 
 pub(crate) fn encode_public_currency_state(out: &mut Vec<u8>, state: &PublicCurrencyState) {
-    out.extend_from_slice(&state.address.value().to_be_bytes());
+    out.extend_from_slice(&state.start.value().to_be_bytes());
+    out.extend_from_slice(&state.len.to_be_bytes());
     out.push(u8::from(state.occupied));
-    out.push(match state.role {
-        CurrencyRole::Circulation => 1,
-        CurrencyRole::Reserve => 2,
-    });
 }
 
 pub(crate) fn decode_public_currency_state(
@@ -50,20 +47,18 @@ pub(crate) fn decode_public_currency_state(
     if bytes.len() != PUBLIC_CURRENCY_STATE_ENCODED_SIZE {
         return Err(PublicStateCodecError::Length);
     }
-    let occupied = match bytes[8] {
+    let occupied = match bytes[16] {
         0 => false,
         1 => true,
         value => return Err(PublicStateCodecError::Boolean(value)),
     };
-    let role = match bytes[9] {
-        1 => CurrencyRole::Circulation,
-        2 => CurrencyRole::Reserve,
-        value => return Err(PublicStateCodecError::CurrencyRole(value)),
-    };
+    let start = CurrencyAddress::new(read_u64(&bytes[0..8])?);
+    let len = read_u64(&bytes[8..16])?;
+    crate::AddressRange::new(start, len).ok_or(PublicStateCodecError::InvalidRange)?;
     Ok(PublicCurrencyState {
-        address: CurrencyAddress::new(read_u64(&bytes[0..8])?),
+        start,
+        len,
         occupied,
-        role,
     })
 }
 

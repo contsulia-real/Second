@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -70,7 +70,7 @@ impl StateStore {
         let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
-        let pending_public_changes = BTreeSet::new();
+        let public_checkpoint_states = None;
         let validator_transition_proofs = BTreeMap::new();
 
         self.write_next_unlocked(
@@ -84,7 +84,7 @@ impl StateStore {
                 public_checkpoint_proof: None,
                 public_checkpoint_baseline: None,
                 latest_public_delta: None,
-                pending_public_changes: Some(&pending_public_changes),
+                public_checkpoint_states: public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,
@@ -119,7 +119,7 @@ impl StateStore {
         let bft_local_states = BTreeMap::new();
         let retained_validator_sets = BTreeMap::new();
         let recovery_checkpoint_floors = BTreeMap::new();
-        let pending_public_changes = BTreeSet::new();
+        let public_checkpoint_states = None;
         let validator_transition_proofs = BTreeMap::new();
 
         self.write_next_unlocked(
@@ -133,7 +133,7 @@ impl StateStore {
                 public_checkpoint_proof: None,
                 public_checkpoint_baseline: None,
                 latest_public_delta: None,
-                pending_public_changes: Some(&pending_public_changes),
+                public_checkpoint_states: public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: 0,

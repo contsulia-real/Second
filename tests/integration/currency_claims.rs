@@ -42,8 +42,8 @@ fn select_does_not_claim_until_claim_book_accepts_the_operation() {
         .unwrap();
 
     assert_eq!(first.len(), 2);
-    assert_eq!(first[0].value(), 1);
-    assert_eq!(first[1].value(), 2);
+    assert_eq!(first.addresses().next().unwrap().value(), 1);
+    assert_eq!(first.addresses().nth(1).unwrap().value(), 2);
 
     let second = claims.claim_transfer(
         &state,

@@ -169,7 +169,7 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
         expected_plan_digest: [u8; 32],
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<PreparationOutcome, PreparationError> {
         self.prepare_inner(
             state,
@@ -188,7 +188,7 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
         expected_plan_digest: Option<[u8; 32]>,
-        selections: Option<&[Vec<crate::CurrencyAddress>]>,
+        selections: Option<&[crate::AddressRanges]>,
     ) -> Result<PreparationOutcome, PreparationError> {
         if let Some(existing) = self.tasks.get(&task.task_id())
             && !existing.commit_authorized
@@ -518,7 +518,7 @@ impl PreparedTaskBook {
             .count()
     }
 
-    pub fn claimed_currency_count(&self) -> usize {
+    pub fn claimed_currency_count(&self) -> u64 {
         self.claims.claimed_currency_count()
     }
 
@@ -546,7 +546,7 @@ impl PreparedTaskBook {
         task: &VerifiedLegalTask,
         now: u64,
         validator_set_version: u64,
-        selections: Option<&[Vec<crate::CurrencyAddress>]>,
+        selections: Option<&[crate::AddressRanges]>,
     ) -> Result<BuildOutcome, PreparationError> {
         state.authorize_task(task)?;
         if state.bind_task(task)? {
@@ -580,7 +580,7 @@ impl PreparedTaskBook {
         state: &mut SecondState,
         task: &VerifiedLegalTask,
         working: &mut BusinessState,
-        selections: Option<&[Vec<crate::CurrencyAddress>]>,
+        selections: Option<&[crate::AddressRanges]>,
     ) -> Result<Vec<PreparedOperation>, PreparationError> {
         let mut prepared = Vec::with_capacity(task.operations().len());
         let mut simulated_prerequisite = state.prerequisite.clone();
@@ -636,7 +636,7 @@ impl PreparedTaskBook {
                             .get(selection_index)
                             .ok_or(PreparationError::InvalidPreparedPlan)?;
                         selection_index += 1;
-                        if u64::try_from(currencies.len()).ok() != Some(*amount) {
+                        if currencies.len() != *amount {
                             return Err(PreparationError::InvalidPreparedPlan);
                         }
                         self.claims.restore_transfer(
@@ -685,7 +685,7 @@ impl PreparedTaskBook {
                             .get(selection_index)
                             .ok_or(PreparationError::InvalidPreparedPlan)?;
                         selection_index += 1;
-                        if reserve.len() != leaked.len() {
+                        if reserve.len() != leaked.len() as u64 {
                             return Err(PreparationError::InvalidPreparedPlan);
                         }
                         self.claims.restore_leak_repair(claim_id, leaked, reserve)?;

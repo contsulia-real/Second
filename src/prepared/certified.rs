@@ -112,10 +112,8 @@ impl PreparedTaskBook {
         retry.retain(|task| !component.contains_key(task));
         let mut state = snapshot.state.clone();
         let mut remaining = snapshot.prepared_tasks.clone();
-        let mut public_changes = BTreeSet::new();
         for (task_id, plan) in &component {
             Self::commit_inner(&mut state, plan)?;
-            public_changes.extend(plan.public_currency_change_addresses());
             remaining.remove(task_id);
         }
         store.commit_prepared_state(
@@ -123,7 +121,6 @@ impl PreparedTaskBook {
             &state,
             &snapshot.prepared_tasks,
             &remaining,
-            &public_changes,
         )?;
         Ok(CertifiedCommitOutcome {
             completed: component.into_keys().collect(),

@@ -62,7 +62,7 @@ fn checkpoint_proof_round_trips_as_unverified_network_data() {
 #[tokio::test]
 async fn real_quic_sync_returns_certified_view_only_after_local_quorum_verification() {
     let validators = validators();
-    let state = SecondState::genesis([], 10).with_reserve(300).unwrap();
+    let state = support::fragmented_public_state(300);
     let proof = checkpoint_proof(&state, &validators, 12);
     let (server, certificate) = support::quic_server();
     let address = server.local_addr().unwrap();
@@ -84,7 +84,7 @@ async fn real_quic_sync_returns_certified_view_only_after_local_quorum_verificat
         .unwrap();
 
     assert_eq!(synced.remote_node_id, server_node_id);
-    assert_eq!(synced.view.states.len(), 300);
+    assert_eq!(synced.view.states.len(), 301);
     assert_eq!(synced.checkpoint.checkpoint().epoch(), 12);
     assert_eq!(synced.checkpoint.certificate().vote_count(), 3);
     assert_eq!(

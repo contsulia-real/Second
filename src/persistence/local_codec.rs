@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use crate::ConsensusScope;
 use crate::legal_task_codec::{decode_legal_task, encode_legal_task};
 use crate::payment::EstablishedTransfer;
 use crate::prepared_plan::{PreparedOperation, PreparedTask, PreparedTaskPhase};
@@ -8,6 +7,7 @@ use crate::{
     AccountAddress, BftLocalState, BftValue, CurrencyAddress, PaymentAddress, PersistenceError,
     TaskId, ValidatorId,
 };
+use crate::{AddressRange, AddressRanges, ConsensusScope};
 
 use super::codec::{Decoder, push_len, push_task_id};
 
@@ -209,7 +209,7 @@ fn encode_prepared_operation(
         PreparedOperation::Issue { account, addresses } => {
             out.push(1);
             out.extend_from_slice(&account.bytes());
-            encode_addresses(out, addresses)?;
+            encode_ranges(out, addresses)?;
         }
         PreparedOperation::Transfer {
             transfer,
@@ -221,7 +221,7 @@ fn encode_prepared_operation(
             out.extend_from_slice(&transfer.source_account.bytes());
             out.extend_from_slice(&transfer.destination_account.bytes());
             out.extend_from_slice(&transfer.amount.to_be_bytes());
-            encode_addresses(out, currencies)?;
+            encode_ranges(out, currencies)?;
         }
         PreparedOperation::Destroy { currencies } => {
             out.push(3);
@@ -239,8 +239,8 @@ fn encode_prepared_operation(
             for owner in leaked_owners {
                 out.extend_from_slice(&owner.bytes());
             }
-            encode_addresses(out, reserve)?;
-            encode_addresses(out, replacement_reserve)?;
+            encode_ranges(out, reserve)?;
+            encode_ranges(out, replacement_reserve)?;
         }
         PreparedOperation::RegisterPaymentAddress { address, account } => {
             out.push(5);
@@ -268,7 +268,7 @@ fn decode_prepared_operation(
         }),
         1 => Ok(PreparedOperation::Issue {
             account: AccountAddress::from_bytes(decoder.read_array_32()?),
-            addresses: decode_addresses(decoder)?,
+            addresses: decode_ranges(decoder)?,
         }),
         2 => Ok(PreparedOperation::Transfer {
             transfer: EstablishedTransfer {
@@ -278,7 +278,7 @@ fn decode_prepared_operation(
                 destination_account: AccountAddress::from_bytes(decoder.read_array_32()?),
                 amount: decoder.read_u64()?,
             },
-            currencies: decode_addresses(decoder)?,
+            currencies: decode_ranges(decoder)?,
         }),
         3 => Ok(PreparedOperation::Destroy {
             currencies: decode_addresses(decoder)?,
@@ -297,8 +297,8 @@ fn decode_prepared_operation(
             Ok(PreparedOperation::LeakRepair {
                 leaked,
                 leaked_owners,
-                reserve: decode_addresses(decoder)?,
-                replacement_reserve: decode_addresses(decoder)?,
+                reserve: decode_ranges(decoder)?,
+                replacement_reserve: decode_ranges(decoder)?,
             })
         }
         5 => Ok(PreparedOperation::RegisterPaymentAddress {
@@ -555,4 +555,30 @@ pub(super) fn encode_prepared_task(
         }
     }
     Ok(())
+}
+
+fn encode_ranges(out: &mut Vec<u8>, ranges: &AddressRanges) -> Result<(), PersistenceError> {
+    push_len(out, ranges.ranges().len())?;
+    for range in ranges.ranges() {
+        out.extend_from_slice(&range.start.value().to_be_bytes());
+        out.extend_from_slice(&range.len.to_be_bytes());
+    }
+    Ok(())
+}
+fn decode_ranges(decoder: &mut Decoder<'_>) -> Result<AddressRanges, PersistenceError> {
+    let count = decoder.read_len()?;
+    if count > decoder.remaining() / 16 {
+        return Err(PersistenceError::InvalidSnapshot);
+    }
+    let mut ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        ranges.push(
+            AddressRange::new(
+                CurrencyAddress::new(decoder.read_u64()?),
+                decoder.read_u64()?,
+            )
+            .ok_or(PersistenceError::InvalidSnapshot)?,
+        );
+    }
+    AddressRanges::from_canonical(ranges).ok_or(PersistenceError::InvalidSnapshot)
 }

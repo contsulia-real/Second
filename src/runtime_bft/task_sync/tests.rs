@@ -68,14 +68,18 @@ async fn source_request_does_not_stop_announcements_to_later_proposers() {
     else {
         panic!("transfer fixture")
     };
-    *currencies = vec![crate::CurrencyAddress::new(2)];
+    *currencies = vec![crate::CurrencyAddress::new(2)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     assert!(
         book.admit_frozen_variant(
             &mut state,
             &task,
             &validators,
             second.plan_digest().unwrap(),
-            &[vec![crate::CurrencyAddress::new(2)]]
+            &[vec![crate::CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         )
         .unwrap()
         .is_none()

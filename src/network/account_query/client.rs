@@ -3,7 +3,7 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use super::*;
 use crate::network::QuicPeer;
-use crate::{AccountAddress, CurrencyAddress, PaymentAddress, TaskId};
+use crate::{AccountAddress, PaymentAddress, TaskId};
 
 pub async fn client_account_query(
     peer: &QuicPeer,
@@ -72,7 +72,9 @@ pub async fn client_account_view(
                 None => {
                     let view = combined.unwrap();
                     let rows = view.addresses.len() + view.transfers.len() + view.currencies.len();
-                    if rows as u64 != view.total || (kind == 4 && rows as u64 != view.balance) {
+                    if rows as u64 != view.total
+                        || (kind == 4 && currency_units(&view.currencies)? != view.balance)
+                    {
                         return Err(NetworkError::InvalidAccountQuery);
                     }
                     return Ok(view);
@@ -111,7 +113,7 @@ pub(super) fn validate_page(view: &AccountView) -> Result<(), NetworkError> {
         || end > view.total
         || (rows == 0 && (view.cursor != 0 || view.total != 0))
         || (view.kind == 1 && (view.cursor != 0 || view.total != 0))
-        || (view.kind == 4 && view.total != view.balance)
+        || (view.kind == 4 && view.total > view.balance)
         || (!view.exists && (view.balance != 0 || view.total != 0 || view.next.is_some()))
         || if end < view.total {
             rows != usize::from(MAX_ACCOUNT_QUERY_PAGE) || view.next != Some(end)
@@ -147,11 +149,19 @@ pub(super) fn validate_page(view: &AccountView) -> Result<(), NetworkError> {
     }
     let mut last_currency = None;
     for row in &view.currencies {
-        let address = CurrencyAddress::parse(row).map_err(|_| invalid())?;
-        if last_currency.is_some_and(|last| address <= last) {
+        let range = row.range().ok_or_else(invalid)?;
+        if last_currency.is_some_and(|end| range.start.value() <= end) {
             return Err(invalid());
         }
-        last_currency = Some(address);
+        last_currency = Some(range.end());
+    }
+    if view.kind == 4 {
+        let units = currency_units(&view.currencies)?;
+        if units > view.balance
+            || (view.cursor == 0 && view.next.is_none() && units != view.balance)
+        {
+            return Err(invalid());
+        }
     }
     Ok(())
 }
@@ -188,9 +198,7 @@ pub(super) fn append_page(view: &mut AccountView, page: AccountView) -> Result<(
             .currencies
             .last()
             .zip(page.currencies.first())
-            .is_none_or(|(a, b)| {
-                CurrencyAddress::parse(a).unwrap() < CurrencyAddress::parse(b).unwrap()
-            }),
+            .is_none_or(|(a, b)| a.range().unwrap().end() < b.range().unwrap().start.value()),
         _ => false,
     };
     if !ordered {
@@ -201,4 +209,12 @@ pub(super) fn append_page(view: &mut AccountView, page: AccountView) -> Result<(
     view.currencies.extend(page.currencies);
     view.next = page.next;
     Ok(())
+}
+
+fn currency_units(ranges: &[AccountCurrencyRange]) -> Result<u64, NetworkError> {
+    ranges.iter().try_fold(0_u64, |total, range| {
+        total
+            .checked_add(range.len)
+            .ok_or(NetworkError::InvalidAccountQuery)
+    })
 }

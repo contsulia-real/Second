@@ -66,10 +66,8 @@ async fn admitted_recovery_survives_restart_before_votes_and_after_serial_lock()
         let worker = support::spawn_node_runtime(&runtime);
         let completed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(proof) = restarted_store
-                    .load()
-                    .unwrap()
-                    .unwrap()
+                if let Some(proof) = support::progress::snapshot(&restarted_store)
+                    .await
                     .recovery_checkpoint_proof
                 {
                     let certified = proof.verify_checkpoint(&validators).unwrap();
@@ -124,10 +122,8 @@ async fn admitted_membership_source_survives_restart_before_first_vote() {
     let worker = support::spawn_node_runtime(&runtime);
     let completed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if restarted_store
-                .load()
-                .unwrap()
-                .unwrap()
+            if support::progress::snapshot(&restarted_store)
+                .await
                 .validator_set
                 .version()
                 == 2
@@ -205,14 +201,14 @@ async fn changed_business_state_converges_after_restart_without_rebinding_signed
         let worker = support::spawn_node_runtime(&runtime);
         let completed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let snapshot = restarted_store.load().unwrap().unwrap();
+                let snapshot = support::progress::snapshot(&restarted_store).await;
                 if let Some(proof) = snapshot.recovery_checkpoint_proof {
                     let certified = proof.verify_checkpoint(&validators).unwrap();
                     assert_eq!(certified.checkpoint().serial(), if signed { 2 } else { 1 });
                     certified
                         .verify_payload(
                             &StateRecoveryPayload::from_persisted(
-                                &restarted_store.load().unwrap().unwrap(),
+                                &support::progress::snapshot(&restarted_store).await,
                             )
                             .unwrap(),
                             &validators,
@@ -343,17 +339,18 @@ async fn recovery_candidate_changes_and_historical_qc_catchup_converge_across_fo
             .collect::<Vec<_>>();
         let completed = tokio::time::timeout(Duration::from_secs(55), async {
             loop {
-                if fixtures.iter().all(|(_, store, _)| {
-                    store
-                        .load()
-                        .unwrap()
-                        .unwrap()
-                        .recovery_checkpoint_proof
-                        .as_ref()
-                        .is_some_and(|proof| {
-                            proof.checkpoint().serial() == if signed { 2 } else { 1 }
-                        })
-                }) {
+                if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                    .await
+                    .iter()
+                    .all(|snapshot| {
+                        snapshot
+                            .recovery_checkpoint_proof
+                            .as_ref()
+                            .is_some_and(|proof| {
+                                proof.checkpoint().serial() == if signed { 2 } else { 1 }
+                            })
+                    })
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;

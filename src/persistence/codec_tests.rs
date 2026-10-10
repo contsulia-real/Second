@@ -91,7 +91,9 @@ fn prepared_snapshot_links_reject_tampered_identity_or_transfer_state() {
             1,
             vec![PreparedOperation::Transfer {
                 transfer,
-                currencies: vec![CurrencyAddress::new(1)],
+                currencies: vec![CurrencyAddress::new(1)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>(),
             }],
         ),
     )]);
@@ -172,7 +174,9 @@ fn prepared_snapshot_links_reject_vote_lock_for_a_different_plan_digest() {
         1,
         vec![PreparedOperation::Issue {
             account,
-            addresses: vec![CurrencyAddress::new(1)],
+            addresses: vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>(),
         }],
     );
     prepared_task.advance_phase(PreparedTaskPhase::Voting);
@@ -312,7 +316,9 @@ fn prepared_transfer_rejects_currency_count_different_from_frozen_amount() {
                 destination_account,
                 amount: 2,
             },
-            currencies: vec![CurrencyAddress::new(1)],
+            currencies: vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>(),
         }],
     );
     let mut state = SecondState::genesis([source_account, destination_account], 10);
@@ -338,7 +344,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
             1,
             vec![PreparedOperation::Issue {
                 account,
-                addresses: vec![CurrencyAddress::new(9)],
+                addresses: vec![CurrencyAddress::new(9)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>(),
             }],
         ),
     )]);
@@ -356,7 +364,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
             1,
             vec![PreparedOperation::Issue {
                 account,
-                addresses: vec![CurrencyAddress::new(10)],
+                addresses: vec![CurrencyAddress::new(10)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>(),
             }],
         ),
     )]);
@@ -377,7 +387,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
                 1,
                 vec![PreparedOperation::Issue {
                     account,
-                    addresses: vec![CurrencyAddress::new(8)],
+                    addresses: vec![CurrencyAddress::new(8)]
+                        .into_iter()
+                        .collect::<crate::AddressRanges>(),
                 }],
             ),
         ),
@@ -390,7 +402,9 @@ fn restored_preallocated_currency_plans_must_fit_frontier_and_be_globally_unique
                 1,
                 vec![PreparedOperation::Issue {
                     account,
-                    addresses: vec![CurrencyAddress::new(8)],
+                    addresses: vec![CurrencyAddress::new(8)]
+                        .into_iter()
+                        .collect::<crate::AddressRanges>(),
                 }],
             ),
         ),
@@ -465,7 +479,9 @@ fn active_prepared_vote_lock_requires_member_of_bound_validator_set() {
         1,
         vec![PreparedOperation::Issue {
             account: crate::test_helpers::account(3),
-            addresses: vec![CurrencyAddress::new(1)],
+            addresses: vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>(),
         }],
     );
     prepared_task.advance_phase(PreparedTaskPhase::Voting);

@@ -504,7 +504,7 @@ impl StateStore {
                 public_checkpoint_proof: latest.public_checkpoint_proof.as_ref(),
                 public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
                 latest_public_delta: latest.latest_public_delta.as_ref(),
-                pending_public_changes: latest.pending_public_changes.as_ref(),
+                public_checkpoint_states: latest.public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,

@@ -166,20 +166,18 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
         })
         .collect::<Vec<_>>();
 
-    let connection_result = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            // This verifies BFT certification. Public discovery has its own
-            // tests and is not a prerequisite for dedicated consensus traffic.
-            let ready = fixtures
+    let connection_result =
+        support::progress::wait_for_progress(Duration::from_secs(15), || async {
+            let connections = fixtures
                 .iter()
-                .all(|(runtime, _, _)| runtime.connected_validator_ids().len() == 3);
-            if ready {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
+                .map(|(runtime, _, _)| runtime.connected_validator_ids())
+                .collect::<Vec<_>>();
+            (
+                connections.iter().all(|connected| connected.len() == 3),
+                connections,
+            )
+        })
+        .await;
     if connection_result.is_err() {
         let connections = fixtures
             .iter()
@@ -197,7 +195,7 @@ async fn four_validator_runtimes_drive_consensus_to_certified_public_checkpoint(
             })
             .collect::<Vec<_>>();
         panic!(
-            "all validator runtimes must establish dedicated BFT connections; connections={connections:?}"
+            "all validator runtimes must establish dedicated BFT connections; {connection_result:?}; connections={connections:?}"
         );
     }
 

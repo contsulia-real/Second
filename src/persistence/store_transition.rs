@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use super::PendingValidatorSafetyRecovery;
 use super::bft_store::retain_bft_states_for_validator_transition;
 use super::codec::SnapshotContents;
@@ -103,7 +101,7 @@ impl StateStore {
         {
             return Err(PersistenceError::InvalidSnapshot);
         }
-        let pending_public_changes = BTreeSet::new();
+        let public_checkpoint_states = None;
 
         let pending_validator_safety_recovery = if latest.validator_safety_ready {
             None
@@ -141,7 +139,7 @@ impl StateStore {
                 public_checkpoint_proof: None,
                 public_checkpoint_baseline: None,
                 latest_public_delta: None,
-                pending_public_changes: Some(&pending_public_changes),
+                public_checkpoint_states: public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &validator_transition_proofs,
                 recovery_checkpoint_proof: None,
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,

@@ -67,7 +67,9 @@ async fn certified_resource_ring_survives_partial_evidence_and_commits_atomicall
         let PreparedOperation::Transfer { currencies, .. } = &mut candidate.operations[0] else {
             panic!("transfer fixture")
         };
-        *currencies = vec![crate::CurrencyAddress::new(number)];
+        *currencies = vec![crate::CurrencyAddress::new(number)]
+            .into_iter()
+            .collect::<crate::AddressRanges>();
         let digest = candidate.plan_digest().unwrap();
         let contention = book
             .admit_frozen_variant(
@@ -75,7 +77,9 @@ async fn certified_resource_ring_survives_partial_evidence_and_commits_atomicall
                 task,
                 &validators,
                 digest,
-                &[vec![crate::CurrencyAddress::new(number)]],
+                &[vec![crate::CurrencyAddress::new(number)]
+                    .into_iter()
+                    .collect::<crate::AddressRanges>()],
             )
             .unwrap()
             .unwrap();

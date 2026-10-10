@@ -32,7 +32,7 @@ impl PreparedTaskBook {
         task: &VerifiedLegalTask,
         validators: &ValidatorSet,
         digest: [u8; 32],
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<bool, PreparationError> {
         let Some(existing) = self.tasks.get(&task.task_id()) else {
             return Ok(false);
@@ -102,7 +102,7 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
         expected_plan_digest: [u8; 32],
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<Vec<crate::TaskId>, PreparationError> {
         self.verify_contention(
             state,
@@ -122,7 +122,7 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
         expected_plan_digest: [u8; 32],
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<VerifiedContention, PreparationError> {
         self.verify_contention_inner(
             state,
@@ -153,7 +153,7 @@ impl PreparedTaskBook {
         now: u64,
         validators: &ValidatorSet,
         certificate: &crate::FinalityCertificate,
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<VerifiedContention, PreparationError> {
         certificate
             .verify(validators)
@@ -179,7 +179,7 @@ impl PreparedTaskBook {
         now: u64,
         validator_set: &ValidatorSet,
         expected_plan_digest: Option<[u8; 32]>,
-        selections: Option<&[Vec<crate::CurrencyAddress>]>,
+        selections: Option<&[crate::AddressRanges]>,
     ) -> Result<VerifiedContention, PreparationError> {
         if let Some(handoff) = &state.protocol.task_handoff {
             handoff.validate_task_origin(state, &task.task_id(), validator_set.version())?;

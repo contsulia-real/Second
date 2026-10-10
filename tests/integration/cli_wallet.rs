@@ -287,6 +287,8 @@ fn two_real_wallets_transfer_without_authorizer_and_reject_tampering() {
     let assets: Value = serde_json::from_str(&assets[..json_end]).unwrap();
     assert_eq!(assets["total"], 1);
     assert_eq!(assets["currencies"].as_array().unwrap().len(), 1);
+    assert!(assets["currencies"][0]["start"].is_string());
+    assert_eq!(assets["currencies"][0]["len"], 1);
     assert_eq!(assets["next"], Value::Null);
     let history = checked(wallet(exe, "history", &bob_dir, &pass, &[]));
     let json_end = history.find("\nSOURCE ").unwrap();

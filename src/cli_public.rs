@@ -1,10 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use second::{
-    CurrencyAddress, CurrencyRole, DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError,
-    PublicCurrencyView, PublicStateStore, RemoteCertifiedPublicCurrencyView, StateStore,
-    client_public_currency_page, client_sync_certified_public_currency_view,
-    client_sync_public_currency_view,
+    CurrencyAddress, DEFAULT_ACTIVE_PEER_TARGET, NodeRuntime, NodeRuntimeError, PublicCurrencyView,
+    PublicStateStore, RemoteCertifiedPublicCurrencyView, StateStore, client_public_currency_page,
+    client_sync_certified_public_currency_view, client_sync_public_currency_view,
 };
 
 use crate::{bootstrap_config, hex_digest, parse_socket_address, quic_client};
@@ -215,16 +214,11 @@ pub(crate) async fn query_public(
     );
 
     for state in page.states {
-        let role = match state.role {
-            CurrencyRole::Circulation => "circulation",
-            CurrencyRole::Reserve => "reserve",
-        };
-
         println!(
-            "CURRENCY address={} occupied={} role={}",
-            state.address.value(),
-            state.occupied,
-            role
+            "CURRENCY start={} len={} occupied={}",
+            state.start.value(),
+            state.len,
+            state.occupied
         );
     }
 

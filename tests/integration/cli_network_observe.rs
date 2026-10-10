@@ -100,10 +100,10 @@ fn real_process_observes_certified_public_state_via_bootstrap_without_mutating_s
     assert!(stdout.contains("epoch=44"));
     assert!(stdout.contains("validator_set=1"));
     assert!(stdout.contains("votes=3"));
-    assert!(stdout.contains("count=5"));
+    assert!(stdout.contains("count=1"));
     assert!(stdout.contains("supply=5"));
     assert!(stdout.contains("reserve=5"));
-    assert!(stdout.contains("occupied=0"));
+    assert!(stdout.contains("occupied=5"));
     assert!(stdout.contains("next_currency=15"));
 
     let persisted = observer_store.load().unwrap().unwrap();

@@ -1,9 +1,7 @@
 //! Bounded query data derived once from one immutable private snapshot.
 use super::*;
 use crate::payment::PaymentExecution;
-use crate::{
-    AccountAddress, CurrencyAddress, OperationClaimId, PaymentAddress, PaymentAddressStatus,
-};
+use crate::{AccountAddress, AddressRange, OperationClaimId, PaymentAddress, PaymentAddressStatus};
 
 struct TransferRow {
     id: OperationClaimId,
@@ -15,7 +13,7 @@ enum Rows {
     Balance,
     Addresses(Vec<(PaymentAddress, PaymentAddressStatus)>),
     Transfers(Vec<TransferRow>),
-    Currencies(Vec<CurrencyAddress>),
+    Currencies(Vec<AddressRange>),
 }
 pub(super) struct Projection {
     account: AccountAddress,
@@ -90,14 +88,21 @@ impl Projection {
             _ => return Err(denied("invalid_query")),
         };
         let mut balance = 0;
-        for (index, (currency, record)) in state.business.currencies.iter().enumerate() {
+        for (index, (start, record)) in state.business.currencies.runs().enumerate() {
             if index.is_multiple_of(4096) {
                 check_work(deadline, cancelled)?;
             }
             if record.owner == Some(address) {
-                balance += 1;
+                balance += record.len;
                 if let Rows::Currencies(values) = &mut rows {
-                    push_bounded(values, *currency, 0)?;
+                    push_bounded(
+                        values,
+                        AddressRange {
+                            start,
+                            len: record.len,
+                        },
+                        0,
+                    )?;
                 }
             }
         }
@@ -229,7 +234,13 @@ impl Projection {
                     .collect()
             }
             Rows::Currencies(rows) => {
-                view.currencies = rows[start..end].iter().map(ToString::to_string).collect()
+                view.currencies = rows[start..end]
+                    .iter()
+                    .map(|range| AccountCurrencyRange {
+                        start: range.start.to_string(),
+                        len: range.len,
+                    })
+                    .collect()
             }
         }
         self.cursor = end as u64;

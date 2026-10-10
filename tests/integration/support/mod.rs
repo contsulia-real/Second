@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod allocation_diagnostics;
+pub mod progress;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -572,7 +573,7 @@ impl FinalityHarness {
     pub fn cancel(&mut self, task_id: TaskId) -> Result<(), PreparationError> {
         self.book.cancel(task_id)
     }
-    pub fn claimed_currency_count(&self) -> usize {
+    pub fn claimed_currency_count(&self) -> u64 {
         self.book.claimed_currency_count()
     }
 
@@ -856,3 +857,32 @@ pub fn validator_runtime_fixture_with_timeouts(
     (runtime, store, base)
 }
 pub mod ports;
+
+pub fn fragmented_public_state(count: u64) -> SecondState {
+    let owner = account(1);
+    let mut state = SecondState::genesis([owner], 10)
+        .with_reserve(count)
+        .unwrap();
+    state
+        .execute_finalized(
+            &verified_task(
+                80001,
+                vec![second::Operation::Issue {
+                    account: owner,
+                    count: count * 2,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+    let leaked = (0..count)
+        .map(|index| second::CurrencyAddress::new(10 + count + index * 2))
+        .collect();
+    state
+        .execute_finalized(
+            &verified_task(80002, vec![second::Operation::LeakRepair { leaked }]),
+            1,
+        )
+        .unwrap();
+    state
+}

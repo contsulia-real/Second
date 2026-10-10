@@ -265,7 +265,7 @@ pub(super) fn validate_prepared_plans_against_state(
 ) -> Result<(), PersistenceError> {
     let mut claims = CurrencyClaimBook::new();
     let mut lifecycle_claims = crate::prepared::lifecycle::LifecycleClaimBook::default();
-    let mut preallocated = BTreeSet::new();
+    let mut preallocated = crate::AddressRanges::default();
 
     for prepared in prepared_tasks.values() {
         prepared
@@ -277,11 +277,11 @@ pub(super) fn validate_prepared_plans_against_state(
 
         for operation in &prepared.operations {
             let addresses = match operation {
-                PreparedOperation::Issue { addresses, .. } => Some(addresses.as_slice()),
+                PreparedOperation::Issue { addresses, .. } => Some(addresses),
                 PreparedOperation::LeakRepair {
                     replacement_reserve,
                     ..
-                } => Some(replacement_reserve.as_slice()),
+                } => Some(replacement_reserve),
                 PreparedOperation::Transfer { .. }
                 | PreparedOperation::RegisterAccount { .. }
                 | PreparedOperation::Destroy { .. }
@@ -291,11 +291,10 @@ pub(super) fn validate_prepared_plans_against_state(
             };
 
             if let Some(addresses) = addresses {
-                for address in addresses {
-                    if !preallocated.insert(*address) {
-                        return Err(PersistenceError::InvalidSnapshot);
-                    }
+                if preallocated.intersects(addresses) {
+                    return Err(PersistenceError::InvalidSnapshot);
                 }
+                preallocated.union_with(addresses);
             }
         }
 

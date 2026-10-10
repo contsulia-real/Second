@@ -232,7 +232,7 @@ impl SecondState {
         prerequisite: &mut PrerequisiteState,
         claim_id: OperationClaimId,
         transfer: EstablishedTransfer,
-        currencies: &[crate::CurrencyAddress],
+        currencies: &crate::AddressRanges,
     ) -> Result<(), ExecutionError> {
         let execution = prerequisite
             .payment_executions

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::currency::Currency;
+use crate::AddressRanges;
 use crate::state::{BusinessState, SecondState};
 use crate::{AccountAddress, CurrencyAddress, CurrencyRole, ExecutionError};
 
@@ -10,28 +10,35 @@ impl SecondState {
         working: &mut BusinessState,
         source: AccountAddress,
         destination: AccountAddress,
-        candidates: &[CurrencyAddress],
+        candidates: &AddressRanges,
     ) -> Result<(), ExecutionError> {
-        for address in candidates {
-            let currency = working
+        for range in candidates.ranges() {
+            let mut cursor = range.start.value();
+            for (part, currency) in working.currencies.scan(*range) {
+                if part.start.value() != cursor {
+                    return Err(ExecutionError::CurrencyNotFound(CurrencyAddress::new(
+                        cursor,
+                    )));
+                }
+                if currency.role != CurrencyRole::Circulation {
+                    return Err(ExecutionError::CurrencyNotCirculation(part.start));
+                }
+                if currency.owner != Some(source) {
+                    return Err(ExecutionError::CurrencyNotOwned(part.start));
+                }
+                cursor = part.end();
+            }
+            if cursor != range.end() {
+                return Err(ExecutionError::CurrencyNotFound(CurrencyAddress::new(
+                    cursor,
+                )));
+            }
+        }
+        for range in candidates.ranges() {
+            working
                 .currencies
-                .get(address)
-                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
-
-            if currency.role != CurrencyRole::Circulation {
-                return Err(ExecutionError::CurrencyNotCirculation(*address));
-            }
-            if currency.owner != Some(source) {
-                return Err(ExecutionError::CurrencyNotOwned(*address));
-            }
+                .set_range(*range, CurrencyRole::Circulation, Some(destination));
         }
-
-        for address in candidates {
-            if let Some(currency) = working.currencies.get_mut(address) {
-                currency.owner = Some(destination);
-            }
-        }
-
         Ok(())
     }
 
@@ -100,22 +107,20 @@ impl SecondState {
         working: &mut BusinessState,
         leaked: &[CurrencyAddress],
         leaked_owners: &[AccountAddress],
-        reserve: &[CurrencyAddress],
-        replacement_reserve: &[CurrencyAddress],
+        reserve: &AddressRanges,
+        replacement_reserve: &AddressRanges,
     ) -> Result<(), ExecutionError> {
         if leaked.len() != leaked_owners.len()
-            || leaked.len() != reserve.len()
-            || leaked.len() != replacement_reserve.len()
+            || leaked.len() as u64 != reserve.len()
+            || leaked.len() as u64 != replacement_reserve.len()
         {
             return Err(ExecutionError::ReserveUnavailable {
                 required: leaked.len() as u64,
-                available: reserve.len() as u64,
+                available: reserve.len(),
             });
         }
 
         self.require_unique_currency_list(leaked)?;
-        self.require_unique_currency_list(reserve)?;
-        self.require_unique_currency_list(replacement_reserve)?;
 
         for (address, expected_owner) in leaked.iter().zip(leaked_owners) {
             let currency = working
@@ -130,44 +135,37 @@ impl SecondState {
             }
         }
 
-        for address in reserve {
+        for address in reserve.addresses() {
             let currency = working
                 .currencies
-                .get(address)
-                .ok_or(ExecutionError::CurrencyNotFound(*address))?;
+                .get(&address)
+                .ok_or(ExecutionError::CurrencyNotFound(address))?;
             if currency.role != CurrencyRole::Reserve || currency.owner.is_some() {
-                return Err(ExecutionError::CurrencyNotCirculation(*address));
+                return Err(ExecutionError::CurrencyNotCirculation(address));
             }
         }
 
-        for address in replacement_reserve {
-            if working.currencies.contains_key(address) {
-                return Err(ExecutionError::DuplicateCurrency(*address));
+        for range in replacement_reserve.ranges() {
+            if let Some((part, _)) = working.currencies.scan(*range).next() {
+                return Err(ExecutionError::DuplicateCurrency(part.start));
             }
         }
 
         for ((leaked_address, reserve_address), owner) in
-            leaked.iter().zip(reserve.iter()).zip(leaked_owners)
+            leaked.iter().zip(reserve.addresses()).zip(leaked_owners)
         {
             working.currencies.remove(leaked_address);
 
-            let reserve_currency = working
+            working
                 .currencies
-                .get_mut(reserve_address)
-                .ok_or(ExecutionError::CurrencyNotFound(*reserve_address))?;
-            reserve_currency.role = CurrencyRole::Circulation;
-            reserve_currency.owner = Some(*owner);
+                .set_role(reserve_address, CurrencyRole::Circulation);
+            working.currencies.set_owner(reserve_address, Some(*owner));
         }
 
-        for address in replacement_reserve {
-            working.currencies.insert(
-                *address,
-                Currency {
-                    address: *address,
-                    role: CurrencyRole::Reserve,
-                    owner: None,
-                },
-            );
+        for range in replacement_reserve.ranges() {
+            working
+                .currencies
+                .set_range(*range, CurrencyRole::Reserve, None);
         }
 
         Ok(())
@@ -177,28 +175,19 @@ impl SecondState {
         &self,
         working: &mut BusinessState,
         account: AccountAddress,
-        addresses: &[CurrencyAddress],
+        addresses: &AddressRanges,
     ) -> Result<(), ExecutionError> {
         self.require_account(working, account)?;
-        self.require_unique_currency_list(addresses)?;
-
-        for address in addresses {
-            if working.currencies.contains_key(address) {
-                return Err(ExecutionError::DuplicateCurrency(*address));
+        for range in addresses.ranges() {
+            if let Some((part, _)) = working.currencies.scan(*range).next() {
+                return Err(ExecutionError::DuplicateCurrency(part.start));
             }
         }
-
-        for address in addresses {
-            working.currencies.insert(
-                *address,
-                Currency {
-                    address: *address,
-                    role: CurrencyRole::Circulation,
-                    owner: Some(account),
-                },
-            );
+        for range in addresses.ranges() {
+            working
+                .currencies
+                .set_range(*range, CurrencyRole::Circulation, Some(account));
         }
-
         Ok(())
     }
 

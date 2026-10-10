@@ -143,7 +143,7 @@ async fn runtime_sync_selects_highest_valid_certified_public_checkpoint_without_
     assert_eq!(synced.remote_node_id, fresh.node_id());
     assert_eq!(synced.checkpoint.checkpoint().epoch(), 20);
     assert_eq!(synced.view.summary, fresh_state.public_currency_summary());
-    assert_eq!(synced.view.states.len(), 5);
+    assert_eq!(synced.view.states.len(), 1);
 
     let persisted_local = local_store.load().unwrap().unwrap();
     assert_eq!(persisted_local.state.next_currency_address(), 902);

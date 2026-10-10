@@ -456,9 +456,7 @@ fn decode_public_currency_page(payload: &[u8]) -> Result<NetworkMessage, Network
         let state =
             decode_public_currency_state(&payload[offset..end]).map_err(|error| match error {
                 PublicStateCodecError::Boolean(value) => NetworkError::InvalidBoolean(value),
-                PublicStateCodecError::CurrencyRole(value) => {
-                    NetworkError::InvalidCurrencyRole(value)
-                }
+                PublicStateCodecError::InvalidRange => NetworkError::InvalidPublicCurrencyPage,
                 PublicStateCodecError::Length => NetworkError::InvalidMessageLength {
                     message_type: 5,
                     expected: base_len,

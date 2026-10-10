@@ -97,9 +97,15 @@ async fn chunked_handoff_merges_missing_bodies_without_importing_claims_and_reje
     else {
         panic!("transfer fixture")
     };
-    *currencies = vec![CurrencyAddress::new(2)];
+    *currencies = vec![CurrencyAddress::new(2)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     let alternative_digest = alternative.plan_digest().unwrap();
-    let selections = vec![vec![CurrencyAddress::new(2)]];
+    let selections = vec![
+        vec![CurrencyAddress::new(2)]
+            .into_iter()
+            .collect::<crate::AddressRanges>(),
+    ];
     assert!(
         book.admit_frozen_variant(
             &mut state,

@@ -37,6 +37,19 @@ pub struct AccountTransfer {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AccountCurrencyRange {
+    pub start: String,
+    pub len: u64,
+}
+
+impl AccountCurrencyRange {
+    fn range(&self) -> Option<crate::AddressRange> {
+        crate::AddressRange::new(crate::CurrencyAddress::parse(&self.start).ok()?, self.len)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountView {
     pub account: String,
     pub kind: u8,
@@ -48,7 +61,7 @@ pub struct AccountView {
     pub total: u64,
     pub addresses: Vec<AccountPaymentAddress>,
     pub transfers: Vec<AccountTransfer>,
-    pub currencies: Vec<String>,
+    pub currencies: Vec<AccountCurrencyRange>,
     pub next: Option<u64>,
     pub nonce: Vec<u8>,
 }

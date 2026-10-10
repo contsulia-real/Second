@@ -15,6 +15,8 @@ mod governance;
 #[cfg(test)]
 mod handoff_baseline_tests;
 mod local_codec;
+#[cfg(test)]
+mod public_interval_tests;
 mod public_store;
 mod read_cache;
 pub(crate) mod recovery_payload_codec;
@@ -49,14 +51,14 @@ pub(crate) fn validate_transition_vote(
     bft_store::governance_subject(snapshot, target).map(|_| ())
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::ConsensusScope;
 use crate::prepared_plan::PreparedTask;
 use crate::{
-    BftLocalState, CurrencyAddress, PublicCurrencyCheckpointProof, PublicCurrencyDelta,
-    SecondState, StateRecoveryCheckpointProof, TaskId, ValidatorId, ValidatorRegistry,
-    ValidatorSet, ValidatorSetTransitionProof,
+    BftLocalState, PublicCurrencyCheckpointProof, PublicCurrencyDelta, SecondState,
+    StateRecoveryCheckpointProof, TaskId, ValidatorId, ValidatorRegistry, ValidatorSet,
+    ValidatorSetTransitionProof,
 };
 
 #[derive(Clone)]
@@ -69,7 +71,7 @@ pub struct PersistedNodeState {
     pub public_checkpoint_proof: Option<PublicCurrencyCheckpointProof>,
     pub public_checkpoint_baseline: Option<PublicCurrencyCheckpointProof>,
     pub latest_public_delta: Option<PublicCurrencyDelta>,
-    pub(crate) pending_public_changes: Option<BTreeSet<CurrencyAddress>>,
+    pub(crate) public_checkpoint_states: Option<Vec<crate::PublicCurrencyState>>,
     pub(crate) validator_transition_proofs: BTreeMap<u64, ValidatorSetTransitionProof>,
     pub recovery_checkpoint_proof: Option<StateRecoveryCheckpointProof>,
     pub checkpoint_floor_epoch: u64,

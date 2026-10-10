@@ -253,39 +253,14 @@ async fn sync_public_currency_view_for_summary(
     summary: crate::PublicCurrencySummary,
 ) -> Result<PublicCurrencyView, NetworkError> {
     let maximum = max_public_sync_states();
-    if summary.current_supply > maximum {
-        return Err(NetworkError::PublicCurrencySyncTooLarge {
-            announced: summary.current_supply,
-            maximum,
-        });
-    }
-
-    let requested = usize::try_from(summary.current_supply).map_err(|_| {
-        NetworkError::PublicCurrencySyncTooLarge {
-            announced: summary.current_supply,
-            maximum,
-        }
-    })?;
     let mut states = Vec::new();
-    states.try_reserve_exact(requested).map_err(|_| {
-        NetworkError::PublicCurrencySyncAllocationFailed {
-            requested: summary.current_supply,
-        }
-    })?;
-
+    let mut live = 0_u64;
     if summary.current_supply > 0 {
         let mut start = CurrencyAddress::new(0);
-
         loop {
-            let remaining = summary.current_supply.saturating_sub(states.len() as u64);
-            if remaining == 0 {
-                return Err(NetworkError::InvalidPublicCurrencyPage);
-            }
-
-            let limit = remaining.min(u64::from(MAX_PUBLIC_CURRENCY_PAGE)) as u16;
+            let limit = MAX_PUBLIC_CURRENCY_PAGE;
             let (page_states, next_start) =
                 request_public_currency_page(peer, start, limit).await?;
-
             validate_synced_page(
                 start,
                 limit,
@@ -293,19 +268,21 @@ async fn sync_public_currency_view_for_summary(
                 &page_states,
                 next_start,
             )?;
-
-            states.extend(page_states);
-            let actual = states.len() as u64;
-            if actual > summary.current_supply {
+            for state in &page_states {
+                live = live
+                    .checked_add(state.len)
+                    .ok_or(NetworkError::InvalidPublicCurrencyPage)?;
+            }
+            if live > summary.current_supply {
                 return Err(NetworkError::SynchronizedCurrencyCountExceeded {
                     claimed: summary.current_supply,
-                    actual,
+                    actual: live,
                 });
             }
-
+            append_synced_page(&mut states, page_states, maximum)?;
             match next_start {
                 Some(next) => {
-                    if actual >= summary.current_supply {
+                    if live >= summary.current_supply {
                         return Err(NetworkError::InvalidPublicCurrencyPage);
                     }
                     start = next;
@@ -314,7 +291,6 @@ async fn sync_public_currency_view_for_summary(
             }
         }
     }
-
     PublicCurrencyView::new(summary, states).map_err(NetworkError::PublicState)
 }
 
@@ -673,19 +649,23 @@ fn validate_public_currency_page(
         return Err(NetworkError::InvalidPublicCurrencyPage);
     }
 
-    let mut previous = None;
+    let mut previous: Option<&PublicCurrencyState> = None;
     for state in states {
-        if state.address < start {
+        let range = state
+            .range()
+            .ok_or(NetworkError::InvalidPublicCurrencyPage)?;
+        if state.start < start {
             return Err(NetworkError::InvalidPublicCurrencyPage);
         }
-
-        if let Some(previous_address) = previous
-            && state.address <= previous_address
-        {
-            return Err(NetworkError::InvalidPublicCurrencyPage);
+        if let Some(old) = previous {
+            let end = old.start.value() + old.len;
+            if end > range.start.value()
+                || (end == range.start.value() && old.occupied == state.occupied)
+            {
+                return Err(NetworkError::InvalidPublicCurrencyPage);
+            }
         }
-
-        previous = Some(state.address);
+        previous = Some(state);
     }
 
     if let Some(next) = next_start {
@@ -693,8 +673,12 @@ fn validate_public_currency_page(
             return Err(NetworkError::InvalidPublicCurrencyPage);
         }
 
-        let current = states.last().map(|state| state.address).unwrap_or(start);
-        if next <= current {
+        let current = states.last().map(|state| state.start).unwrap_or(start);
+        if states
+            .last()
+            .is_some_and(|state| next.value() < state.start.value() + state.len)
+            || next <= current
+        {
             return Err(NetworkError::InvalidPublicCurrencyCursor { current, next });
         }
     }
@@ -714,7 +698,7 @@ fn validate_synced_page(
     if let Some(next) = next_start
         && next.value() >= frontier
     {
-        let current = states.last().map(|state| state.address).unwrap_or(start);
+        let current = states.last().map(|state| state.start).unwrap_or(start);
         return Err(NetworkError::InvalidPublicCurrencyCursor { current, next });
     }
 
@@ -727,11 +711,36 @@ fn public_currency_page_response(
     limit: u16,
 ) -> Result<NetworkMessage, NetworkError> {
     validate_public_currency_limit(limit)?;
-    let start_index = view.states.partition_point(|state| state.address < start);
-    let end_index = start_index
-        .saturating_add(usize::from(limit))
-        .min(view.states.len());
-    let states = view.states[start_index..end_index].to_vec();
-    let next_start = view.states.get(end_index).map(|state| state.address);
-    Ok(NetworkMessage::PublicCurrencies { states, next_start })
+    let page = crate::public_state::page(&view.states, start, limit);
+    Ok(NetworkMessage::PublicCurrencies {
+        states: page.states,
+        next_start: page.next_start,
+    })
 }
+
+fn append_synced_page(
+    states: &mut Vec<PublicCurrencyState>,
+    page: Vec<PublicCurrencyState>,
+    maximum: u64,
+) -> Result<(), NetworkError> {
+    let requested = states
+        .len()
+        .checked_add(page.len())
+        .ok_or(NetworkError::InvalidPublicCurrencyPage)?;
+    if requested as u64 > maximum {
+        return Err(NetworkError::PublicCurrencySyncTooLarge {
+            announced: requested as u64,
+            maximum,
+        });
+    }
+    states.try_reserve_exact(page.len()).map_err(|_| {
+        NetworkError::PublicCurrencySyncAllocationFailed {
+            requested: requested as u64,
+        }
+    })?;
+    states.extend(page);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

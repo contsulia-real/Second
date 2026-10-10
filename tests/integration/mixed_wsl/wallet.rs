@@ -2,6 +2,57 @@
 use super::*;
 use second::AccountView;
 
+pub(super) fn business_operations() -> (Vec<Operation>, Value) {
+    let alice = account(7101);
+    let bob = account(7102);
+    let separator = account(7104);
+    let source = payment(7101);
+    let destination = payment(7102);
+    let mut operations = vec![
+        Operation::RegisterAccount { account: alice },
+        Operation::RegisterAccount { account: bob },
+        Operation::RegisterAccount { account: separator },
+        Operation::RegisterPaymentAddress {
+            address: source,
+            account: alice,
+        },
+        Operation::RegisterPaymentAddress {
+            address: destination,
+            account: bob,
+        },
+    ];
+    let mut request = vec![
+        json!({"type":"register_account","account":alice.to_string()}),
+        json!({"type":"register_account","account":bob.to_string()}),
+        json!({"type":"register_account","account":separator.to_string()}),
+        json!({"type":"register_payment_address","address":source.to_string(),"account":alice.to_string()}),
+        json!({"type":"register_payment_address","address":destination.to_string(),"account":bob.to_string()}),
+    ];
+    // Keep three native wallet pages after assets switch from individual units to ranges.
+    for index in 0..M0_ACCOUNT_ASSETS {
+        let count = if index == 0 { 2 } else { 1 };
+        operations.push(Operation::Issue {
+            account: alice,
+            count,
+        });
+        request.push(json!({"type":"issue","recipient":alice.to_string(),"amount":count}));
+        if index + 1 < M0_ACCOUNT_ASSETS {
+            operations.push(Operation::Issue {
+                account: separator,
+                count: 1,
+            });
+            request.push(json!({"type":"issue","recipient":separator.to_string(),"amount":1}));
+        }
+    }
+    operations.push(Operation::Transfer {
+        source,
+        destination,
+        amount: 1,
+    });
+    request.push(json!({"type":"transfer","source":source.to_string(),"destination":destination.to_string(),"amount":1}));
+    (operations, Value::Array(request))
+}
+
 pub(super) fn check(
     worker: &mut LinuxWorker,
     root: &Path,
@@ -59,7 +110,7 @@ pub(super) fn check(
     assert_eq!(windows[2].addresses, linux[2].addresses);
     assert_eq!(windows[3].transfers, linux[3].transfers);
     println!(
-        "MIXED-PASS M0 native wallets query the other OS: balance, 257 assets over three pages, addresses, history"
+        "MIXED-PASS M0 native wallets query the other OS: balance, 257 asset ranges over three pages, addresses, history"
     );
 }
 
@@ -115,6 +166,14 @@ fn query_wallet(
     assert!(views[0].currencies.is_empty());
     assert_eq!(views[1].total, M0_ACCOUNT_ASSETS);
     assert_eq!(views[1].currencies.len() as u64, M0_ACCOUNT_ASSETS);
+    assert_eq!(
+        views[1]
+            .currencies
+            .iter()
+            .map(|range| range.len)
+            .sum::<u64>(),
+        M0_ACCOUNT_ASSETS
+    );
     assert_eq!(views[2].addresses.len(), 1);
     assert_eq!(views[2].addresses[0].address, payment(7101).to_string());
     assert_eq!(views[3].transfers.len(), 1);

@@ -254,7 +254,7 @@ impl PreparedTaskBook {
         task: &VerifiedLegalTask,
         validators: &ValidatorSet,
         digest: [u8; 32],
-        selections: &[Vec<crate::CurrencyAddress>],
+        selections: &[crate::AddressRanges],
     ) -> Result<Option<super::conflict::VerifiedContention>, PreparationError> {
         let existing = self
             .tasks

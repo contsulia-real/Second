@@ -61,7 +61,9 @@ fn collection_persists_every_frozen_variant_beyond_the_message_window() {
         else {
             panic!("transfer fixture")
         };
-        *currencies = vec![CurrencyAddress::new(value)];
+        *currencies = vec![CurrencyAddress::new(value)]
+            .into_iter()
+            .collect::<crate::AddressRanges>();
         handoff.insert(candidate).unwrap();
     }
     let handoff = crate::persistence::TaskHandoff::decode(&handoff.encode().unwrap()).unwrap();
@@ -104,14 +106,16 @@ fn collection_persists_every_frozen_variant_beyond_the_message_window() {
     // unvoted ownership, without erasing its exact frozen witness.
     let second = collected.handoff.as_ref().unwrap().plans.values().find(|candidate| {
         matches!(&candidate.operations[0], crate::prepared_plan::PreparedOperation::Transfer { currencies, .. }
-            if currencies == &[CurrencyAddress::new(2)])
+            if currencies == &crate::AddressRanges::single(CurrencyAddress::new(2), 1).unwrap())
     }).unwrap().clone();
     book.admit_frozen_variant(
         &mut state,
         &task,
         &validators,
         second.plan_digest().unwrap(),
-        &[vec![CurrencyAddress::new(2)]],
+        &[vec![CurrencyAddress::new(2)]
+            .into_iter()
+            .collect::<crate::AddressRanges>()],
     )
     .unwrap();
     assert_eq!(book.claimed_currency_count(), 2);

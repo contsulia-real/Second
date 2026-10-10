@@ -174,7 +174,9 @@ async fn handoff_collection_unions_local_obligations_and_keeps_expiry_and_atomic
     else {
         panic!("transfer fixture")
     };
-    *currencies = vec![CurrencyAddress::new(2)];
+    *currencies = vec![CurrencyAddress::new(2)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     let digest = alternative.plan_digest().unwrap();
     provider_book
         .admit_frozen_variant(
@@ -182,7 +184,9 @@ async fn handoff_collection_unions_local_obligations_and_keeps_expiry_and_atomic
             &transfer,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(2)]],
+            &[vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
     let queued = sign(
@@ -359,7 +363,9 @@ async fn handoff_collection_unions_local_obligations_and_keeps_expiry_and_atomic
             &transfer,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(2)]],
+            &[vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         ),
         Err(PreparationError::Persistence(
             PersistenceError::TaskAdmissionClosed { .. }

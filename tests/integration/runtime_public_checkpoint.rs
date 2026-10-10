@@ -93,19 +93,16 @@ async fn one_operator_publishes_quorum_proofs_and_running_public_node_tracks_cha
         assert_eq!(first.epoch, 1);
         stage = "first proof propagation";
         loop {
-            if fixtures.iter().take(3).all(|(_, store, _)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .public_checkpoint_proof
+            if support::progress::snapshots(
+                fixtures.iter().take(3).map(|(_, store, _)| store.clone()),
+            )
+            .await
+            .iter()
+            .all(|snapshot| snapshot.public_checkpoint_proof.is_some())
+                && support::progress::public_snapshot(&public_store)
+                    .await
+                    .checkpoint_proof
                     .is_some()
-            }) && public_store
-                .load()
-                .unwrap()
-                .unwrap()
-                .checkpoint_proof
-                .is_some()
             {
                 break;
             }
@@ -122,11 +119,8 @@ async fn one_operator_publishes_quorum_proofs_and_running_public_node_tracks_cha
         stage = "late validator proof catchup";
         // The authenticated connection itself must catch up durable evidence;
         // another operator publication is not a recovery trigger.
-        while fixtures[3]
-            .1
-            .load()
-            .unwrap()
-            .unwrap()
+        while support::progress::snapshot(&fixtures[3].1)
+            .await
             .public_checkpoint_proof
             .is_none()
         {
@@ -165,15 +159,11 @@ async fn one_operator_publishes_quorum_proofs_and_running_public_node_tracks_cha
             .submit_legal_task(task.signed_task().clone())
             .unwrap();
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .state
-                    .task_succeeded(task.task_id())
-                    == Some(true)
-            }) {
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| snapshot.state.task_succeeded(task.task_id()) == Some(true))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -184,28 +174,27 @@ async fn one_operator_publishes_quorum_proofs_and_running_public_node_tracks_cha
         assert_ne!(second.checkpoint_digest, first.checkpoint_digest);
         stage = "second proof propagation";
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .public_checkpoint_proof
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| {
+                    snapshot
+                        .public_checkpoint_proof
+                        .as_ref()
+                        .is_some_and(|proof| proof.checkpoint().epoch() == 2)
+                })
+                && support::progress::public_snapshot(&public_store)
+                    .await
+                    .checkpoint_proof
                     .as_ref()
                     .is_some_and(|proof| proof.checkpoint().epoch() == 2)
-            }) && public_store
-                .load()
-                .unwrap()
-                .unwrap()
-                .checkpoint_proof
-                .as_ref()
-                .is_some_and(|proof| proof.checkpoint().epoch() == 2)
             {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         for (_, store, _) in &fixtures {
-            let state = store.load().unwrap().unwrap();
+            let state = support::progress::snapshot(store).await;
             let certified = state
                 .public_checkpoint_proof
                 .unwrap()
@@ -218,10 +207,8 @@ async fn one_operator_publishes_quorum_proofs_and_running_public_node_tracks_cha
             assert!(state.latest_public_delta.is_some());
         }
         assert_eq!(
-            public_store
-                .load()
-                .unwrap()
-                .unwrap()
+            support::progress::public_snapshot(&public_store)
+                .await
                 .view
                 .unwrap()
                 .summary
@@ -318,7 +305,10 @@ async fn restart_resumes_the_signed_public_epoch_without_rebinding_its_digest() 
     let worker = support::spawn_node_runtime(&runtime);
     let complete = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(proof) = store.load().unwrap().unwrap().public_checkpoint_proof {
+            if let Some(proof) = support::progress::snapshot(&store)
+                .await
+                .public_checkpoint_proof
+            {
                 let certified = proof.verify_checkpoint(&validators).unwrap();
                 assert_eq!(certified.checkpoint(), &checkpoint);
                 break;

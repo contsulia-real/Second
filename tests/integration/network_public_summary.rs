@@ -27,7 +27,7 @@ async fn real_quic_summary_matches_local_public_state_and_contains_no_owner_data
     assert_eq!(response.summary, expected);
     assert_eq!(response.summary.current_supply, 3);
     assert_eq!(response.summary.reserve_count, 3);
-    assert_eq!(response.summary.occupied_count, 0);
+    assert_eq!(response.summary.occupied_count, 3);
     assert_eq!(response.summary.next_currency_address, 13);
 
     let rendered = format!("{response:?}");

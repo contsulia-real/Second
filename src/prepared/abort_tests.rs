@@ -158,7 +158,10 @@ fn certified_abort_releases_all_resources_atomically_retains_ranges_and_survives
     assert_eq!(book.claimed_currency_count(), 0);
     assert!(state.task_cancelled(task.task_id()));
     assert_eq!(state.next_currency_address(), 3);
-    assert_eq!(state.business.currencies[&currency].owner, Some(alice));
+    assert_eq!(
+        state.business.currencies.get(&currency).unwrap().owner,
+        Some(alice)
+    );
     assert!(!state.business.accounts.contains(&account));
     assert_eq!(
         state.business.payment_addresses[&retiring].status,
@@ -276,7 +279,10 @@ fn certified_abort_releases_all_resources_atomically_retains_ranges_and_survives
         &FinalityCertificate::new(statement, votes(&statement), &next).unwrap(),
     )
     .unwrap();
-    assert_eq!(state.business.currencies[&currency].owner, Some(bob));
+    assert_eq!(
+        state.business.currencies.get(&currency).unwrap().owner,
+        Some(bob)
+    );
     assert_eq!(state.next_currency_address(), 3);
     for (store, base) in [(store, base), (recovered, recovered_base)] {
         store.remove_files().unwrap();

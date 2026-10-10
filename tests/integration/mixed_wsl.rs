@@ -309,38 +309,13 @@ fn mixed_windows_linux_validators_pay_and_recover_into_required_quorum() {
     let source = payment(7101);
     let destination = payment(7102);
     let request = root.join("business.json");
+    let (operations, json_operations) = wallet::business_operations();
     let task = write_transaction_request_in_network(
         &request,
         7101,
         &authorizer,
-        vec![
-            Operation::RegisterAccount { account: alice },
-            Operation::RegisterAccount { account: bob },
-            Operation::RegisterPaymentAddress {
-                address: source,
-                account: alice,
-            },
-            Operation::RegisterPaymentAddress {
-                address: destination,
-                account: bob,
-            },
-            Operation::Issue {
-                account: alice,
-                count: M0_ACCOUNT_ASSETS + 1,
-            },
-            Operation::Transfer {
-                source,
-                destination,
-                amount: 1,
-            },
-        ],
-        json!([
-            {"type":"register_account","account":alice.to_string()}, {"type":"register_account","account":bob.to_string()},
-            {"type":"register_payment_address","address":source.to_string(),"account":alice.to_string()},
-            {"type":"register_payment_address","address":destination.to_string(),"account":bob.to_string()},
-            {"type":"issue","recipient":alice.to_string(),"amount":M0_ACCOUNT_ASSETS + 1},
-            {"type":"transfer","source":source.to_string(),"destination":destination.to_string(),"amount":1}
-        ]),
+        operations,
+        json_operations,
         network_id,
     );
     cli(&[

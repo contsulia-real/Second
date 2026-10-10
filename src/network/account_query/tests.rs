@@ -16,7 +16,10 @@ fn page(cursor: u64, total: u64) -> AccountView {
         addresses: Vec::new(),
         transfers: Vec::new(),
         currencies: (cursor..end)
-            .map(|i| CurrencyAddress::new(i + 1).to_string())
+            .map(|i| AccountCurrencyRange {
+                start: CurrencyAddress::new(i * 2 + 1).to_string(),
+                len: 1,
+            })
             .collect(),
         next: (end < total).then_some(end),
         nonce: vec![1; 32],
@@ -30,13 +33,16 @@ fn pages_reject_omission_duplicates_wrong_shape_and_invalid_boundaries() {
     let corruptions: &[fn(&mut AccountView)] = &[
         |p| p.currencies[1] = p.currencies[0].clone(),
         |p| p.currencies.swap(0, 1),
-        |p| p.currencies[0] = "invalid".into(),
+        |p| p.currencies[0].start = "invalid".into(),
+        |p| p.currencies[0].len = 0,
+        |p| p.currencies[0].len = u64::MAX,
+        |p| p.currencies[0].len = 2,
         |p| p.next = None,
         |p| p.next = Some(127),
         |p| p.cursor = 1,
         |p| p.currencies.clear(),
         |p| p.kind = 1,
-        |p| p.balance += 1,
+        |p| p.balance = 0,
         |p| p.total = MAX_ACCOUNT_QUERY_ROWS as u64 + 1,
         |p| p.exists = false,
         |p| p.nonce.clear(),
@@ -49,9 +55,10 @@ fn pages_reject_omission_duplicates_wrong_shape_and_invalid_boundaries() {
     }
     let tail = page(128, 129);
     for mutate in [
-        (|p: &mut AccountView| p.currencies[0] = CurrencyAddress::new(128).to_string())
+        (|p: &mut AccountView| p.currencies[0].start = CurrencyAddress::new(255).to_string())
             as fn(&mut AccountView),
-        |p| p.currencies[0] = CurrencyAddress::new(1).to_string(),
+        |p| p.currencies[0].start = CurrencyAddress::new(256).to_string(),
+        |p| p.currencies[0].start = CurrencyAddress::new(1).to_string(),
         |p| p.generation += 1,
         |p| p.validator_set_version += 1,
         |p| p.account = AccountAddress::from_bytes([8; 32]).to_string(),
@@ -73,6 +80,12 @@ fn pages_reject_omission_duplicates_wrong_shape_and_invalid_boundaries() {
     balance.kind = 1;
     balance.balance = u64::MAX;
     validate_page(&balance).unwrap();
+    let mut compact = page(0, 1);
+    compact.balance = 1_000_000_000;
+    compact.currencies[0].len = compact.balance;
+    validate_page(&compact).unwrap();
+    compact.balance -= 1;
+    assert!(validate_page(&compact).is_err());
 }
 
 #[test]
@@ -125,7 +138,7 @@ fn account_codec_rejects_invalid_requests_and_roundtrips_failure_reasons() {
 #[tokio::test]
 async fn full_client_rejects_cross_page_duplicates_and_message_mixups_over_quic() {
     use crate::{QuicClient, QuicServer, QuicTransportIdentity};
-    for variant in 0..3 {
+    for variant in 0..4 {
         let identity = QuicTransportIdentity::generate().unwrap();
         let server = QuicServer::bind("127.0.0.1:0".parse().unwrap(), &identity).unwrap();
         let client = QuicClient::new(
@@ -156,7 +169,12 @@ async fn full_client_rejects_cross_page_duplicates_and_message_mixups_over_quic(
                     view.next = None;
                 }
                 if cursor == 128 {
-                    view.currencies[0] = CurrencyAddress::new(128).to_string();
+                    if variant == 3 {
+                        // Correct row count but incorrect total units must fail at completion.
+                        view.currencies[0].len = 2;
+                    } else {
+                        view.currencies[0].start = CurrencyAddress::new(255).to_string();
+                    }
                 }
                 request
                     .respond(&NetworkMessage::AccountQueryResult { view })

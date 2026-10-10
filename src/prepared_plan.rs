@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use crate::AddressRanges;
 
 use sha2::{Digest, Sha256};
 
@@ -20,11 +20,11 @@ pub(crate) enum PreparedOperation {
     },
     Issue {
         account: AccountAddress,
-        addresses: Vec<CurrencyAddress>,
+        addresses: AddressRanges,
     },
     Transfer {
         transfer: EstablishedTransfer,
-        currencies: Vec<CurrencyAddress>,
+        currencies: AddressRanges,
     },
     Destroy {
         currencies: Vec<CurrencyAddress>,
@@ -32,8 +32,8 @@ pub(crate) enum PreparedOperation {
     LeakRepair {
         leaked: Vec<CurrencyAddress>,
         leaked_owners: Vec<AccountAddress>,
-        reserve: Vec<CurrencyAddress>,
-        replacement_reserve: Vec<CurrencyAddress>,
+        reserve: AddressRanges,
+        replacement_reserve: AddressRanges,
     },
     RegisterPaymentAddress {
         address: PaymentAddress,
@@ -67,12 +67,10 @@ impl PreparedOperation {
                 transfer,
                 currencies,
             } => {
-                let actual = u64::try_from(currencies.len())
-                    .map_err(|_| PreparationError::LengthOverflow)?;
+                let actual = currencies.len();
                 if transfer.amount == 0 || actual != transfer.amount {
                     return Err(PreparationError::InvalidPreparedPlan);
                 }
-                state.require_unique_currency_list(currencies)?;
                 state.apply_established_transfer(
                     working,
                     prerequisite,
@@ -96,8 +94,8 @@ impl PreparedOperation {
             } => {
                 if leaked.is_empty()
                     || leaked.len() != leaked_owners.len()
-                    || leaked.len() != reserve.len()
-                    || leaked.len() != replacement_reserve.len()
+                    || leaked.len() as u64 != reserve.len()
+                    || leaked.len() as u64 != replacement_reserve.len()
                 {
                     return Err(PreparationError::InvalidPreparedPlan);
                 }
@@ -253,36 +251,6 @@ impl PreparedTask {
         )))
     }
 
-    pub(crate) fn public_currency_change_addresses(&self) -> BTreeSet<CurrencyAddress> {
-        let mut addresses = BTreeSet::new();
-        for operation in &self.operations {
-            match operation {
-                PreparedOperation::Issue {
-                    addresses: issued, ..
-                } => addresses.extend(issued.iter().copied()),
-                PreparedOperation::Transfer { currencies, .. }
-                | PreparedOperation::Destroy { currencies } => {
-                    addresses.extend(currencies.iter().copied());
-                }
-                PreparedOperation::LeakRepair {
-                    leaked,
-                    reserve,
-                    replacement_reserve,
-                    ..
-                } => {
-                    addresses.extend(leaked.iter().copied());
-                    addresses.extend(reserve.iter().copied());
-                    addresses.extend(replacement_reserve.iter().copied());
-                }
-                PreparedOperation::RegisterPaymentAddress { .. }
-                | PreparedOperation::RegisterAccount { .. }
-                | PreparedOperation::RetirePaymentAddress { .. }
-                | PreparedOperation::FinalizePaymentAddressRetirement { .. } => {}
-            }
-        }
-        addresses
-    }
-
     pub(crate) fn finalize_with_votes(&mut self, votes: Vec<ValidatorVote>) {
         self.phase = PreparedTaskPhase::Finalized;
         self.finality_votes = Some(votes);
@@ -322,7 +290,7 @@ impl PreparedTask {
                 PreparedOperation::Issue { account, addresses } => {
                     hasher.update([1]);
                     hasher.update(account.bytes());
-                    hash_addresses(&mut hasher, addresses)?;
+                    hash_ranges(&mut hasher, addresses)?;
                 }
                 PreparedOperation::Transfer {
                     transfer,
@@ -334,7 +302,7 @@ impl PreparedTask {
                     hasher.update(transfer.source_account.bytes());
                     hasher.update(transfer.destination_account.bytes());
                     hasher.update(transfer.amount.to_be_bytes());
-                    hash_addresses(&mut hasher, currencies)?;
+                    hash_ranges(&mut hasher, currencies)?;
                 }
                 PreparedOperation::Destroy { currencies } => {
                     hasher.update([3]);
@@ -352,8 +320,8 @@ impl PreparedTask {
                     for owner in leaked_owners {
                         hasher.update(owner.bytes());
                     }
-                    hash_addresses(&mut hasher, reserve)?;
-                    hash_addresses(&mut hasher, replacement_reserve)?;
+                    hash_ranges(&mut hasher, reserve)?;
+                    hash_ranges(&mut hasher, replacement_reserve)?;
                 }
                 PreparedOperation::RegisterPaymentAddress { address, account } => {
                     hasher.update([5]);
@@ -469,12 +437,13 @@ impl PreparedTask {
 
 fn validate_preallocated_addresses(
     state: &SecondState,
-    addresses: &[CurrencyAddress],
+    addresses: &AddressRanges,
 ) -> Result<(), PreparationError> {
     if addresses.is_empty()
         || addresses
+            .ranges()
             .iter()
-            .any(|address| address.value() >= state.next_currency_address())
+            .any(|range| range.end() > state.next_currency_address())
     {
         return Err(PreparationError::InvalidPreparedPlan);
     }
@@ -496,5 +465,14 @@ fn hash_addresses(
 fn hash_len(hasher: &mut Sha256, len: usize) -> Result<(), PreparationError> {
     let len = u64::try_from(len).map_err(|_| PreparationError::LengthOverflow)?;
     hasher.update(len.to_be_bytes());
+    Ok(())
+}
+
+fn hash_ranges(hasher: &mut Sha256, addresses: &AddressRanges) -> Result<(), PreparationError> {
+    hash_len(hasher, addresses.ranges().len())?;
+    for range in addresses.ranges() {
+        hasher.update(range.start.value().to_be_bytes());
+        hasher.update(range.len.to_be_bytes());
+    }
     Ok(())
 }

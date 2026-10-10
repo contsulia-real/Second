@@ -465,15 +465,11 @@ async fn wait_success(
 ) {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if fixtures.iter().all(|(_, store, _)| {
-                store
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .state
-                    .task_succeeded(task_id(id))
-                    == Some(true)
-            }) {
+            if support::progress::snapshots(fixtures.iter().map(|(_, store, _)| store.clone()))
+                .await
+                .iter()
+                .all(|snapshot| snapshot.state.task_succeeded(task_id(id)) == Some(true))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

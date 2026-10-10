@@ -1,12 +1,10 @@
 use super::PersistedNodeState;
 use super::codec::SnapshotContents;
 use super::store::StateStore;
-use std::collections::BTreeSet;
 
 use crate::{
-    CertifiedPublicCurrencyCheckpoint, MAX_PUBLIC_CURRENCY_DELTA_CHANGES, PersistenceError,
-    PublicCurrencyCheckpointProof, PublicCurrencyDelta, PublicCurrencyDeltaChange, SecondState,
-    ValidatorSet,
+    CertifiedPublicCurrencyCheckpoint, PersistenceError, PublicCurrencyCheckpointProof,
+    PublicCurrencyDelta, SecondState, ValidatorSet,
 };
 
 impl StateStore {
@@ -90,7 +88,7 @@ impl StateStore {
                 public_checkpoint_proof,
                 public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
                 latest_public_delta: latest.latest_public_delta.as_ref(),
-                pending_public_changes: latest.pending_public_changes.as_ref(),
+                public_checkpoint_states: latest.public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch: latest.checkpoint_floor_epoch,
@@ -135,7 +133,7 @@ impl StateStore {
             return Ok(latest.generation);
         }
         let latest_public_delta = public_delta_for_checkpoint(&latest, &proof)?;
-        let pending_public_changes = BTreeSet::new();
+        let public_checkpoint_states = latest.state.public_currency_states();
 
         self.write_next_unlocked(
             Some(latest.generation),
@@ -148,7 +146,7 @@ impl StateStore {
                 public_checkpoint_proof: Some(&proof),
                 public_checkpoint_baseline: Some(&proof),
                 latest_public_delta: latest_public_delta.as_ref(),
-                pending_public_changes: Some(&pending_public_changes),
+                public_checkpoint_states: Some(&public_checkpoint_states),
                 validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
@@ -218,7 +216,7 @@ impl StateStore {
                 public_checkpoint_proof: attached,
                 public_checkpoint_baseline: latest.public_checkpoint_baseline.as_ref(),
                 latest_public_delta: latest.latest_public_delta.as_ref(),
-                pending_public_changes: latest.pending_public_changes.as_ref(),
+                public_checkpoint_states: latest.public_checkpoint_states.as_ref(),
                 validator_transition_proofs: &latest.validator_transition_proofs,
                 recovery_checkpoint_proof: latest.recovery_checkpoint_proof.as_ref(),
                 checkpoint_floor_epoch,
@@ -254,28 +252,26 @@ fn public_delta_for_checkpoint(
     if to_epoch <= from_epoch {
         return Ok(None);
     }
-    let Some(addresses) = latest.pending_public_changes.as_ref() else {
+    let Some(states) = &latest.public_checkpoint_states else {
         return Ok(None);
     };
-    if addresses.len() > MAX_PUBLIC_CURRENCY_DELTA_CHANGES {
-        return Ok(None);
-    }
-    let mut changes = Vec::with_capacity(addresses.len());
-    for address in addresses {
-        match latest.state.public_currency_state(*address) {
-            Some(state) => changes.push(PublicCurrencyDeltaChange::Upsert(state)),
-            None => changes.push(PublicCurrencyDeltaChange::Remove(*address)),
-        }
-    }
-    PublicCurrencyDelta::new(
-        from_epoch,
-        base.checkpoint().summary().state_digest,
-        to_epoch,
+    let base_view =
+        crate::PublicCurrencyView::new(base.checkpoint().summary().clone(), states.clone())
+            .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    let target = crate::PublicCurrencyView::new(
         proof.checkpoint().summary().clone(),
-        changes,
+        latest.state.public_currency_states(),
     )
-    .map(Some)
-    .map_err(|_| PersistenceError::InvalidSnapshot)
+    .map_err(|_| PersistenceError::InvalidSnapshot)?;
+    match PublicCurrencyDelta::between(from_epoch, &base_view, to_epoch, &target) {
+        Ok(delta) => match delta.encode_bytes() {
+            Ok(_) => Ok(Some(delta)),
+            Err(crate::PublicCurrencyDeltaError::TooLarge) => Ok(None),
+            Err(_) => Err(PersistenceError::InvalidSnapshot),
+        },
+        Err(crate::PublicCurrencyDeltaError::TooManyChanges { .. }) => Ok(None),
+        Err(_) => Err(PersistenceError::InvalidSnapshot),
+    }
 }
 
 fn validate_certified_checkpoint_for_state(

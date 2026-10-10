@@ -89,7 +89,7 @@ fn transfer_between_owners_does_not_change_public_currency_digest() {
 }
 
 #[test]
-fn public_summary_changes_when_occupancy_or_role_changes() {
+fn reserve_and_owned_circulation_have_identical_public_state_digest() {
     let alice = support::account(1);
 
     let reserve_only = SecondState::genesis([alice], 1).with_reserve(1).unwrap();
@@ -111,12 +111,16 @@ fn public_summary_changes_when_occupancy_or_role_changes() {
     let reserve_summary = reserve_only.public_currency_summary();
     let circulation_summary = circulation.public_currency_summary();
 
-    assert_ne!(
+    assert_eq!(
+        reserve_only.public_currency_states(),
+        circulation.public_currency_states()
+    );
+    assert_eq!(
         reserve_summary.state_digest,
         circulation_summary.state_digest
     );
     assert_eq!(reserve_summary.reserve_count, 1);
-    assert_eq!(reserve_summary.occupied_count, 0);
+    assert_eq!(reserve_summary.occupied_count, 1);
     assert_eq!(circulation_summary.reserve_count, 0);
     assert_eq!(circulation_summary.occupied_count, 1);
 }

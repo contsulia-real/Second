@@ -63,7 +63,9 @@ async fn certified_handoff_recovers_another_frozen_variant_without_old_votes() {
     else {
         panic!("transfer fixture");
     };
-    *currencies = vec![CurrencyAddress::new(2)];
+    *currencies = vec![CurrencyAddress::new(2)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     let second_digest = second.plan_digest().unwrap();
     let mut unlisted = first.clone();
     let crate::prepared_plan::PreparedOperation::Transfer { currencies, .. } =
@@ -71,14 +73,18 @@ async fn certified_handoff_recovers_another_frozen_variant_without_old_votes() {
     else {
         panic!("transfer fixture");
     };
-    *currencies = vec![CurrencyAddress::new(3)];
+    *currencies = vec![CurrencyAddress::new(3)]
+        .into_iter()
+        .collect::<crate::AddressRanges>();
     assert!(
         book.admit_frozen_variant(
             &mut state,
             &task,
             &origin,
             second_digest,
-            &[vec![CurrencyAddress::new(2)]],
+            &[vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap()
         .is_none()
@@ -177,7 +183,9 @@ async fn certified_handoff_recovers_another_frozen_variant_without_old_votes() {
             3,
             &origin,
             first_digest,
-            &[vec![CurrencyAddress::new(1)]],
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()],
         )
         .unwrap();
     let before = target.load().unwrap().unwrap();
@@ -288,16 +296,31 @@ async fn certified_handoff_recovers_another_frozen_variant_without_old_votes() {
         node.drain_bft_consensus_events().unwrap()
     );
     assert_eq!(
-        cold.state.business.currencies[&CurrencyAddress::new(1)].owner,
+        cold.state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(1))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(
-        cold.state.business.currencies[&CurrencyAddress::new(2)].owner,
+        cold.state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(2))
+            .unwrap()
+            .owner,
         Some(bob)
     );
     assert!(cold.state.business.accounts.contains(&later_account));
     assert_eq!(
-        cold.state.business.currencies[&CurrencyAddress::new(3)].owner,
+        cold.state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(3))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(

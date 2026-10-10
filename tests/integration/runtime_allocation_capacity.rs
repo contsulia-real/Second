@@ -71,7 +71,7 @@ async fn allocation_backlog_beyond_candidate_window_survives_restart_and_drains(
                 !worker.is_finished(),
                 "bounded admission killed restart recovery"
             );
-            let state = store.load().unwrap().unwrap().state;
+            let state = support::progress::snapshot(&store).await.state;
             if tasks
                 .iter()
                 .all(|task| state.task_succeeded(task.task_id()) == Some(true))

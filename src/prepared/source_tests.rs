@@ -104,7 +104,14 @@ fn run_frozen_source(blocked: bool, protected: bool, finality: bool) {
     let bytes = prepared.encode_source().unwrap();
     let decoded = PreparedTaskSource::decode(&bytes).unwrap();
     assert_eq!(decoded.task, *transfer.signed_task());
-    assert_eq!(decoded.selections, vec![vec![CurrencyAddress::new(2)]]);
+    assert_eq!(
+        decoded.selections,
+        vec![
+            vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()
+        ]
+    );
     assert!(PreparedTaskSource::decode(&bytes[..bytes.len() - 1]).is_none());
     let mut trailing = bytes.clone();
     trailing.push(0);
@@ -121,7 +128,9 @@ fn run_frozen_source(blocked: bool, protected: bool, finality: bool) {
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(1)]]
+            &[vec![CurrencyAddress::new(1)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::PreparedPlanDigestMismatch { .. })
     ));
@@ -132,7 +141,9 @@ fn run_frozen_source(blocked: bool, protected: bool, finality: bool) {
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(3)]]
+            &[vec![CurrencyAddress::new(3)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::Execution(
             ExecutionError::CurrencyNotOwned(_)
@@ -354,11 +365,21 @@ fn run_frozen_source(blocked: bool, protected: bool, finality: bool) {
     assert_eq!(state.balance(alice), 1);
     assert_eq!(state.balance(bob), 2);
     assert_eq!(
-        state.business.currencies[&CurrencyAddress::new(1)].owner,
+        state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(1))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(
-        state.business.currencies[&CurrencyAddress::new(2)].owner,
+        state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(2))
+            .unwrap()
+            .owner,
         Some(bob)
     );
     for (store, base) in [(remote, remote_base), (local, local_base)] {
@@ -450,7 +471,14 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
         .unwrap();
     let digest = prepared.plan_digest().unwrap();
     let decoded = PreparedTaskSource::decode(&prepared.encode_source().unwrap()).unwrap();
-    assert_eq!(decoded.selections, vec![vec![CurrencyAddress::new(2)]]);
+    assert_eq!(
+        decoded.selections,
+        vec![
+            vec![CurrencyAddress::new(2)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()
+        ]
+    );
     let mut state = initial;
     let mut book = PreparedTaskBook::new(local.clone()).unwrap();
     let generation = local.load().unwrap().unwrap().generation;
@@ -461,7 +489,9 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
             1,
             &validators,
             digest,
-            &[vec![CurrencyAddress::new(3)]]
+            &[vec![CurrencyAddress::new(3)]
+                .into_iter()
+                .collect::<crate::AddressRanges>()]
         ),
         Err(PreparationError::Execution(
             ExecutionError::CurrencyNotCirculation(_)
@@ -496,15 +526,30 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
     .unwrap();
     assert!(!state.currency_exists(CurrencyAddress::new(4)));
     assert_eq!(
-        state.business.currencies[&CurrencyAddress::new(1)].role,
+        state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(1))
+            .unwrap()
+            .role,
         CurrencyRole::Reserve
     );
     assert_eq!(
-        state.business.currencies[&CurrencyAddress::new(2)].owner,
+        state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(2))
+            .unwrap()
+            .owner,
         Some(alice)
     );
     assert_eq!(
-        state.business.currencies[&CurrencyAddress::new(6)].role,
+        state
+            .business
+            .currencies
+            .get(&CurrencyAddress::new(6))
+            .unwrap()
+            .role,
         CurrencyRole::Reserve
     );
     assert_eq!(state.next_currency_address(), 7);

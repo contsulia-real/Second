@@ -104,17 +104,13 @@ async fn thirty_four_validators_restore_candidates_and_finalize_private_business
         .unwrap();
     let committed = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
-            if std::iter::once(&store)
-                .chain(nodes.iter().map(|(_, store, _)| store))
-                .all(|store| {
-                    store
-                        .load()
-                        .unwrap()
-                        .unwrap()
-                        .state
-                        .task_succeeded(task.task_id())
-                        == Some(true)
-                })
+            if support::progress::snapshots(
+                std::iter::once(store.clone())
+                    .chain(nodes.iter().map(|(_, store, _)| store.clone())),
+            )
+            .await
+            .iter()
+            .all(|snapshot| snapshot.state.task_succeeded(task.task_id()) == Some(true))
             {
                 break;
             }

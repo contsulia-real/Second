@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use crate::range_map::RangeMap;
+use crate::{AddressRange, AddressRanges};
 
 use crate::public_state_codec::{
     PUBLIC_CURRENCY_STATE_ENCODED_SIZE, PUBLIC_CURRENCY_SUMMARY_ENCODED_SIZE,
@@ -18,7 +19,7 @@ const DELTA_FIXED_SIZE: usize = 4 + 8 + 32 + 8 + PUBLIC_CURRENCY_SUMMARY_ENCODED
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicCurrencyDeltaChange {
     Upsert(PublicCurrencyState),
-    Remove(CurrencyAddress),
+    Retire(AddressRange),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,15 +63,18 @@ impl PublicCurrencyDelta {
                 maximum: MAX_PUBLIC_CURRENCY_DELTA_CHANGES,
             });
         }
-        let mut seen = BTreeMap::new();
+        let mut end = None;
         for change in &changes {
-            let address = match change {
-                PublicCurrencyDeltaChange::Upsert(state) => state.address,
-                PublicCurrencyDeltaChange::Remove(address) => *address,
-            };
-            if seen.insert(address, ()).is_some() {
-                return Err(PublicCurrencyDeltaError::DuplicateAddress(address));
+            let range = change
+                .range()
+                .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?;
+            if range.end() > summary.next_currency_address {
+                return Err(PublicCurrencyDeltaError::InvalidEncoding);
             }
+            if end.is_some_and(|end| end > range.start.value()) {
+                return Err(PublicCurrencyDeltaError::DuplicateAddress(range.start));
+            }
+            end = Some(range.end());
         }
         Ok(Self {
             from_epoch,
@@ -116,32 +120,102 @@ impl PublicCurrencyDelta {
             return Err(PublicCurrencyDeltaError::WrongBaseDigest);
         }
 
-        let mut states = base
-            .states
-            .iter()
-            .cloned()
-            .map(|state| (state.address, state))
-            .collect::<BTreeMap<_, _>>();
-
+        if self.summary.next_currency_address < base.summary.next_currency_address {
+            return Err(PublicCurrencyDeltaError::InvalidEncoding);
+        }
+        let mut states = RangeMap::default();
+        for state in &base.states {
+            states
+                .append(
+                    state
+                        .range()
+                        .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?,
+                    state.occupied,
+                )
+                .map_err(|_| PublicCurrencyDeltaError::InvalidEncoding)?;
+        }
         for change in &self.changes {
             match change {
-                PublicCurrencyDeltaChange::Upsert(state) => {
-                    states.insert(state.address, state.clone());
-                }
-                PublicCurrencyDeltaChange::Remove(address) => {
-                    states.remove(address);
-                }
+                PublicCurrencyDeltaChange::Upsert(state) => states.set(
+                    state
+                        .range()
+                        .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?,
+                    Some(state.occupied),
+                ),
+                PublicCurrencyDeltaChange::Retire(range) => states.set(*range, None),
             }
         }
+        PublicCurrencyView::new(
+            self.summary.clone(),
+            states
+                .runs()
+                .map(|(range, occupied)| PublicCurrencyState {
+                    start: range.start,
+                    len: range.len,
+                    occupied: *occupied,
+                })
+                .collect(),
+        )
+        .map_err(PublicCurrencyDeltaError::InvalidView)
+    }
 
-        PublicCurrencyView::new(self.summary.clone(), states.into_values().collect())
-            .map_err(PublicCurrencyDeltaError::InvalidView)
+    pub(crate) fn between(
+        from_epoch: u64,
+        base: &PublicCurrencyView,
+        to_epoch: u64,
+        target: &PublicCurrencyView,
+    ) -> Result<Self, PublicCurrencyDeltaError> {
+        let mut old = RangeMap::default();
+        let mut old_live = AddressRanges::default();
+        let mut new_live = AddressRanges::default();
+        for state in &base.states {
+            let range = state
+                .range()
+                .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?;
+            old.append(range, state.occupied)
+                .map_err(|_| PublicCurrencyDeltaError::InvalidEncoding)?;
+            old_live.insert(range);
+        }
+        let mut changes = Vec::new();
+        for state in &target.states {
+            let range = state
+                .range()
+                .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?;
+            new_live.insert(range);
+            let mut unchanged = AddressRanges::default();
+            for (part, occupied) in old.overlapping(range) {
+                if occupied == state.occupied {
+                    unchanged.insert(part);
+                }
+            }
+            let changed = AddressRanges::single(range.start, range.len)
+                .unwrap()
+                .difference(&unchanged);
+            for part in changed.ranges() {
+                changes.push(PublicCurrencyDeltaChange::Upsert(PublicCurrencyState {
+                    start: part.start,
+                    len: part.len,
+                    occupied: state.occupied,
+                }));
+            }
+        }
+        for range in old_live.difference(&new_live).ranges() {
+            changes.push(PublicCurrencyDeltaChange::Retire(*range));
+        }
+        changes.sort_by_key(|change| change.range().unwrap().start);
+        Self::new(
+            from_epoch,
+            base.summary.state_digest,
+            to_epoch,
+            target.summary.clone(),
+            changes,
+        )
     }
 
     pub fn encode_bytes(&self) -> Result<Vec<u8>, PublicCurrencyDeltaError> {
         let change_count =
             u32::try_from(self.changes.len()).map_err(|_| PublicCurrencyDeltaError::TooLarge)?;
-        let mut out = Vec::with_capacity(DELTA_FIXED_SIZE + self.changes.len() * 11);
+        let mut out = Vec::with_capacity(DELTA_FIXED_SIZE + self.changes.len() * 18);
         out.extend_from_slice(&DELTA_VERSION.to_be_bytes());
         out.extend_from_slice(&self.from_epoch.to_be_bytes());
         out.extend_from_slice(&self.from_state_digest);
@@ -154,9 +228,10 @@ impl PublicCurrencyDelta {
                     out.push(1);
                     encode_public_currency_state(&mut out, state);
                 }
-                PublicCurrencyDeltaChange::Remove(address) => {
+                PublicCurrencyDeltaChange::Retire(range) => {
                     out.push(2);
-                    out.extend_from_slice(&address.value().to_be_bytes());
+                    out.extend_from_slice(&range.start.value().to_be_bytes());
+                    out.extend_from_slice(&range.len.to_be_bytes());
                 }
             }
         }
@@ -196,9 +271,10 @@ impl PublicCurrencyDelta {
                     decode_public_currency_state(decoder.take(PUBLIC_CURRENCY_STATE_ENCODED_SIZE)?)
                         .map_err(|_| PublicCurrencyDeltaError::InvalidEncoding)?,
                 )),
-                2 => changes.push(PublicCurrencyDeltaChange::Remove(CurrencyAddress::new(
-                    decoder.u64()?,
-                ))),
+                2 => changes.push(PublicCurrencyDeltaChange::Retire(
+                    AddressRange::new(CurrencyAddress::new(decoder.u64()?), decoder.u64()?)
+                        .ok_or(PublicCurrencyDeltaError::InvalidEncoding)?,
+                )),
                 _ => return Err(PublicCurrencyDeltaError::InvalidEncoding),
             }
         }
@@ -260,5 +336,14 @@ impl<'a> Decoder<'a> {
 
     const fn finished(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+}
+
+impl PublicCurrencyDeltaChange {
+    fn range(&self) -> Option<AddressRange> {
+        match self {
+            Self::Upsert(state) => state.range(),
+            Self::Retire(range) => AddressRange::new(range.start, range.len),
+        }
     }
 }

@@ -73,15 +73,17 @@ Second 使用相互独立的标识和密钥职责。
 
 一个 Currency 包含 `address`、`role`、`owner`。角色有 `Circulation` 和 `Reserve`。`owner` 为账户地址或空值。每个存在的 Currency 对象具有独立身份。
 
-资产归属的权威事实是 `BusinessState.currencies` 中的 `Currency.owner`。`SecondState::balance(account)` 统计 owner 等于目标账户的 Currency 个数，得到该账户的 Secoin 数量。账户存在性由 `has_account` 单独判定。
+资产归属的权威事实是 `BusinessState.currencies` 中的 owner。`SecondState::balance(account)` 累加 owner 等于目标账户的区间长度，得到该账户的 Secoin 数量。账户存在性由 `has_account` 单独判定。
 
 ~~~text
-balance(A) = count(Currency where owner = A)
+balance(A) = sum(run.len where run.owner = A)
 ~~~
 
 `current_supply` 统计当前存在的 Currency；`reserve_count` 统计未被占有的 Reserve 对象。由 `CurrencyAllocation` 确认的地址区间以及 `next_currency_address` 遵守身份单调消费规则；销毁或后续业务失败均不能重新使用已经消费的身份。
 
-当前实现以一单位 Secoin 对应一个 Currency 对象。完整状态节点维护 `BTreeMap<CurrencyAddress, Currency>`，余额计算和账户资产列举通过遍历 Currency 状态得到。
+逻辑上每单位 Secoin 仍是独立 Currency。完整状态节点使用 `CurrencyLedger` 保存 `{start, len, role, owner}` 区间；不重叠，相邻且 role/owner 相同的区间自动合并。单地址修改拆分并合并，余额和 Reserve 数量由区间长度求和，不另存余额真值。私有快照保存规范区间，解码拒绝空、溢出、重叠和可合并相邻区间；当前格式版本保持 1，无旧格式读取。
+
+账本差分验证以测试专用的逐地址表为参考，混合单地址修改、随机跨度 `set_range` 和 `append_run`，逐步比对内容与规范形；同时比较随机范围 `scan` 的裁剪结果、规范追加恢复与逆序插入恢复。地址窗口覆盖零附近及 `u64::MAX` 前沿附近，单位规模另由十亿单位的分配预算测试验证。
 
 ### 3.2 账户与支付地址
 
@@ -118,13 +120,13 @@ Active → Retiring → Retired
 
 ### 4.1 Transfer 的冻结选择
 
-Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户，并建立具有 `OperationClaimId` 的执行前置事实。准备器核对源账户签名、支付地址状态和资金条件，从可用的流通 Currency 中选取确切的 `amount` 个对象，并将货币地址列表、源目标账户和执行数据写入 `PreparedTask`。
+Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户，并建立具有 `OperationClaimId` 的执行前置事实。准备器核对源账户签名、支付地址状态和资金条件，从可用的流通 Currency 中选取确切的 `amount` 个对象，并将规范货币地址区间、源目标账户和执行数据写入 `PreparedTask`。
 
-冻结阶段维护资源占用，业务最终提交时逐个更改 Currency.owner。支付历史同业务结果一起持久化。同一请求的多个合法冻结变体具有各自的规范计划摘要，证据处理必须保持原冻结选择和对应签票约束。
+冻结阶段维护区间资源占用，业务最终提交时按区间更改 Currency.owner。支付历史同业务结果一起持久化。同一请求的多个合法冻结变体具有各自的规范计划摘要，证据处理必须保持原冻结选择和对应签票约束。
 
 ### 4.2 发行、销毁与修复
 
-`Issue` 使用认证地址区间物化新对象。`Destroy` 只能删除 owner 为空的 Circulation 对象。`LeakRepair` 验证每个被修复对象的角色、owner 和授权，从空闲 Reserve 中取出相同数量的对象，将其调整为原账户拥有的 Circulation，同时销毁旧对象，并用新分配地址补充同数量 Reserve。
+`Issue` 使用认证地址区间创建新对象，分配、冻结和提交均不展开单位地址缓冲。`Destroy` 只能删除 owner 为空的 Circulation 对象。`LeakRepair` 验证每个被修复对象的角色、owner 和授权，从空闲 Reserve 中取出相同数量的对象，将其调整为原账户拥有的 Circulation，同时销毁旧对象，并用新分配地址补充同数量 Reserve。
 
 每项操作的 Currency 选择、需要的地址区间和资源冲突均纳入认证任务上下文。
 
@@ -176,7 +178,7 @@ Issue 与 LeakRepair 需要新的 CurrencyAddress。`CurrencyAllocation` 以当�
 
 ### 6.4 PreparedTask
 
-`PreparedTaskBook` 按操作顺序模拟业务变化，恢复或建立 `CurrencyClaimBook` 和生命周期资源占用，生成冻结的 `PreparedTask`，保存原签名请求、原委员会版本、业务操作及具体选币列表。
+`PreparedTaskBook` 按操作顺序模拟业务变化，恢复或建立 `CurrencyClaimBook` 和生命周期资源占用，生成冻结的 `PreparedTask`，保存原签名请求、原委员会版本、业务操作及规范选币区间。`AddressRanges` 有序、不相交、不相邻；计划摘要及冻结见证编码使用起点与长度。Transfer 仍选择最低的可用 amount 个身份，按区间跳过其他任务占用；claim 引用计数、资源 fence 和私有持久化均按区间工作。Destroy/LeakRepair 的原签名地址列表及 LeakRepair 对应关系不变。
 
 `PreparedTaskPhase` 为 Prepared、Voting、Finalized。持久化共识证据和签票权限决定可执行阶段转换。最终证书持久化后再执行资源依赖闭包的业务提交。`PreparedTaskBook::commit_certified_component` 基于已验证最终性和资源阻塞形成完整认证组件，复验计划，在同一 StateStore 业务写入中完成状态变化、移除准备项和触发等待者恢复。
 
@@ -286,17 +288,25 @@ quorum_threshold(n) = n - floor((n - 1) / 3)
 
 `NodeRuntime` 负责监听、连接、公开查询、BFT 会话、任务提交、同步、治理和恢复。`Validator` 是具备完整状态及相应密钥与准入权限的节点能力。使用 `PublicStateStore` 的节点提供公开状态服务。完整状态节点可以在缺少 Validator 签票能力时提供其被授权的非签票服务。
 
-BFT 会话在传输身份之外验证 ValidatorId、委员会及会话角色。消息发送与接收按具体版本、scope 和签名分别校验。网络具有连接、帧、分块、并发和候选预算；共识及最终性消息使用各自的排队容量。阻塞式存储工作经线程池或对应工作任务执行，保持网络 executor 可推进。
+BFT 会话在传输身份之外验证 ValidatorId、委员会及会话角色。消息发送与接收按具体版本、scope 和签名分别校验。网络具有连接、帧、分块、并发和候选预算；共识及最终性消息使用各自的排队容量。共识循环、入站业务/治理/账户查询、BFT 权限刷新和成员追赶的阻塞式存储工作经线程池执行。公开同步及若干 CLI 启动/运维入口仍直接调用同步快照读写，会阻塞其所在 executor；完整快照写入的成本与当前状态大小有关。
 
 节点启动期间对 snapshot base 持有排他运行锁。同一 Validator 的私钥和身份须保持唯一活动实例。
 
+本地分配/重启与 BFT 检查点集成测试按可观察进度判断停滞，避免把整个多阶段流程的 CPU 排队、存储同步及连接重试压进同一个 5 秒期限。第一次观察即开始空闲计时；分配测试观察持久 generation，连续 5 秒不变即失败（包括从未有进展）；连接测试观察各验证者的实际连接集合，连续 15 秒不变即失败（涵盖 5 秒传输、5 秒认证及 2 秒重试间隔）。每次等待另有 60 秒整体硬期限且不会续期，持续换轮或连接抖动不能无限等待。测试中的快照轮询在阻塞池执行，避免阻塞当前线程的网络 executor；这些预算只用于测试，不改变协议运行时期限。其他快照轮询同样将读取放到阻塞池；多节点收敛、故障恢复和容量场景保留原有端到端总预算，不能用其他任务的 generation 变化无限延长目标场景。
+
 ## 12. 公开 Currency 状态
 
-`PublicCurrencyState` 包含 CurrencyAddress、occupied 和 role。`PublicCurrencySummary` 由公开 Currency 状态派生，计算数量、地址前沿和确定性摘要。`PublicCurrencyCheckpoint` 通过对应委员会范围认证检查点；`PublicCurrencyDelta` 提供检查点间的有界公开变化。
+`PublicCurrencyState` 仅保存存活区间 `{start, len, occupied}`。occupied 为 `owner.is_some() || role == Reserve`；Reserve 与有主的 Circulation 在公开投影中相同。不保存 owner 或 role，且相邻同 occupied 的区间必须合并，不泄露内部边界。低于地址前沿但不存活的地址视为已废弃，无需另存废弃区间；身份不复用。Destroy 与 LeakRepair 的旧地址在公开投影中都只表现为存活转废弃。
 
-公开节点通过验证检查点、历史成员证据和状态变化维护公开视图。公开视图中的 occupied 表示对象是否被占有，公开内容隐藏 Currency.owner、账户集合与支付地址绑定。
+`PublicCurrencySummary` 的 current_supply、occupied_count 是单位数；state_digest 对地址前沿、可重算计数和规范公开存活区间求哈希，不包含无法公开重算的 reserve_count。reserve_count 由委员会认证检查点对完整摘要的签名背书；`PublicCurrencyView::new` 只验证 `reserve_count <= occupied_count <= current_supply` 等可检查关系，不能独立证明其精确值。未认证的 summary 不具有此证书保证。
 
-完整状态节点保有业务 owner 信息。需要分析隐私时区分公开观察者、账户查询应答者与完整私有状态持有者的可见信息。
+公开分页、同步内存预算和 `PublicCurrencyDelta` 的数量上限按区间计。完整节点保存上次认证检查点的规范公开区间作为历史基线（不是当前资产的第二份真值），直接比较基线与新投影生成 `Upsert(存活区间)` / `Retire(地址范围)`。周期内被触碰但公开状态没变的地址不出现在增量中；应用增量后重新归并为规范视图并核验 digest。超出增量区间或字节预算时走已有全量公开同步。
+
+正常 Issue、Transfer、LeakRepair 均不会产生空 owner 的 Circulation。内部状态格式仍允许这种状态并由 Destroy 处理，公开 occupied 因此继续保留；当前任务没有缩减此内部语义。
+
+Destroy 与 LeakRepair 使用相同的 Retire 编码，不携带业务类型；完整公开历史仍可区分它们：Destroy 仅删除此前 occupied=false 的空 owner Circulation，而 LeakRepair 仅替换此前 occupied=true 的有主 Circulation。保留 occupied 和内部操作语义时，这条残余信息无法消除，不能把相同的废弃表示解释为完整历史不可区分。
+
+完整状态节点仍持有 owner 和 role；公开观察者与完整私有节点的可见范围不同。
 
 ## 13. 私有账户查询
 
@@ -307,11 +317,11 @@ BFT 会话在传输身份之外验证 ValidatorId、委员会及会话角色。�
 | 1 | 账户存在性与余额 |
 | 2 | 账户支付地址和生命周期状态 |
 | 3 | 账户收付款历史 |
-| 4 | 该账户拥有的 CurrencyAddress |
+| 4 | 该账户拥有的规范地址区间 `{start, len}` |
 
-服务端从单次 `StateStore::load_shared` 的已验证快照派生短期投影。同一分页查询的余额、行、委员会版本与 generation 来自该快照。生成投影时扫描 Currency；后续分页只切片读取。
+服务端从单次 `StateStore::load_shared` 的已验证快照派生短期投影。同一分页查询的余额、行、委员会版本与 generation 来自该快照。投影扫描 CurrencyLedger 区间，balance 按 owner 区间长度求和，kind 4 按区间保存与分页；不展开单位地址。后续分页只切片读取。
 
-当前限制：每页至多 128 行，每次列举至多 100,000 行，投影和并发查询有内存预算，完整查询连接最长 30 秒。超出预算时报告错误。客户端逐页验证来源 generation、游标、总数和终页完整性。
+当前限制：每页至多 128 行，每次列举至多 100,000 行，kind 4 的行数、total 和 cursor 均按区间计，不限制区间内单位数量。投影和并发查询有内存预算，完整查询连接最长 30 秒。超出预算时报告错误。客户端逐页验证来源 generation、游标、总数、区间非空与不溢出、不重叠不相邻（包括跨页边界），并在完整列举后验证区间长度总和等于 balance。
 
 ### 13.1 账户余额的可信范围
 
@@ -359,7 +369,7 @@ second wallet restore <backup-file> <dir>
 
 ### 14.2 钱包余额与同步
 
-`balance`、`assets`、`address list` 和 `history` 当前为按需签名查询。`sync` 通过钱包普通节点同步认证的公开 Currency 视图。个人余额尚未实现持续推送更新、跨离线期可认证的账户变更追赶、抗恶意节点遗漏与全网最新性判定。
+`balance`、`assets`、`address list` 和 `history` 当前为按需签名查询。`assets` 输出 `{start, len}` 资产区间，balance 为长度之和，不枚举单位身份。`sync` 通过钱包普通节点同步认证的公开 Currency 视图。个人余额尚未实现持续推送更新、跨离线期可认证的账户变更追赶、抗恶意节点遗漏与全网最新性判定。
 
 交互式 `open` 提供会话内命令操作。当前用户界面为 CLI，个人资产信息的可信范围以 `AccountQuery` 实际返回的来源标记为准。
 
@@ -395,20 +405,21 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 8. **提交前认证**：资产归属变化须由准确的 Commit 最终性及满足依赖闭包的持久提交驱动。
 9. **崩溃恢复安全**：快照 commit reference、持久票锁和 signing fence 共同禁止旧状态引发不一致签票。
 10. **验证者签名隔离**：共享状态恢复和新成员安装后需独立取得合法的当前签名资格。
-11. **公开隐私边界**：公开 Currency 记录只携带地址、occupied、role 及认证摘要。
+11. **公开隐私边界**：公开记录只携带地址区间、occupied 与认证摘要，不携带 owner 与 role。
 12. **资源有界**：网络、快照、账户查询、分块传输和候选集合使用明确的容量限制。
 
 ## 17. 当前架构边界
 
 | 子系统 | 源码实现的范围 |
 | --- | --- |
-| 业务状态 | 每单位 Currency 单独保存，完整私有状态在相应节点维护 |
+| 业务状态 | 独立 Currency 身份，私有规范区间保存，完整私有状态在相应节点维护 |
 | 委员会 | 有准入的 ValidatorSet 和认证成员切换 |
 | 共识 | 四类 ConsensusScope 与固定委员会法定票数 |
 | 提交 | 冻结计划、认证终态、依赖闭包与单次业务原子写入 |
 | 磁盘 | 完整快照编码与双槽提交，载荷上限 512 MiB |
-| 公开同步 | 公开 Currency 状态及委员会认证检查点 |
-| 钱包账户查询 | 对单个完整状态节点本地已提交快照的签名读取 |
+| 公开同步 | 规范公开存活区间、基线差异增量及委员会认证检查点 |
+| 残余公开泄露 | 周期内废弃数量与前沿新增数量相等可提示修复，单凭数量也可能是等量销毁与发行；保存此前 occupied 可进一步识别有主对象的修复。规范增量不列出 Reserve 接替者；Reserve 选取规则本身的可关联性未处理 |
+| 钱包账户查询 | 对单个完整状态节点本地已提交快照的签名读取；资产区间分页、余额按长度求和，成本取决于区间数 |
 | 账户数据完整性 | 目前缺少跨节点独立验证的全部资产覆盖证据 |
 | 余额新鲜度 | 当前接口没有全网最新性与线性化读取保证 |
 | 自动更新 | 钱包当前采用按需查询，缺少持续资产订阅与完整离线追赶 |
@@ -421,7 +432,8 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/ids.rs`、`src/account.rs`、`src/currency.rs`、`src/payment.rs`、`src/state.rs` | 身份、账户、支付、资产与唯一业务状态 |
+| `src/ids.rs`、`src/account.rs`、`src/currency.rs`、`src/currency_ledger.rs`、`src/payment.rs`、`src/state.rs` | 身份、账户、支付、资产与唯一业务状态 |
+| `src/address_ranges.rs`、`src/range_map.rs` | 规范地址集合，以及账本、claim 和公开增量共用的区间拆分与合并 |
 | `src/task.rs`、`src/authorization.rs`、`src/transaction.rs` | LegalTask、交易输入、签名与授权 |
 | `src/currency_allocation.rs`、`src/claims.rs`、`src/prepared.rs`、`src/prepared_plan.rs`、`src/prepared/` | 地址分配、冻结准备、冲突与业务提交 |
 | `src/bft.rs`、`src/bft_driver.rs`、`src/finality.rs`、`src/validator_signer.rs` | BFT、投票安全与最终性 |
