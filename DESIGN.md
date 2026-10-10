@@ -132,6 +132,18 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 
 每项操作的 Currency 选择、需要的地址区间和资源冲突均纳入认证任务上下文。
 
+默认 LeakRepair 以 `K = SHA256(b"SECOND_RESERVE_SAMPLING_V1\0" || request_digest || operation_index_BE)` 抽取空闲 Reserve。候选集合仍来自当前工作状态中未占有的 Reserve，排除其他任务的 claim，保留本任务自己的 claim；先验证泄露对象和账户授权，再区分 `ReserveUnavailable` 与 `ReserveContention`，不重抽、不缩减数量、不使用 Circulation 替代。
+
+抽样使用固定的 64 位地址二叉树，节点由深度和对齐到节点下界的地址前缀定位，与候选集合的形状无关。每次从根到叶，按左右子树可用单位数 L、R 加权；非空两侧使用 `U = u64_BE(SHA256(K || draw_index_BE || depth_u8 || prefix_u64_BE)[0..8])`，当且仅当 `U × (L+R) < L × 2^64` 时取左侧，全程使用整数及 u128 乘法。单侧为空直接进入另一侧，随机量按节点独立定位，空分支不会使随机流错位。每次抽中后从本次候选计数中扣除，继续不放回抽取，结果保存为排序后的规范 AddressRanges。
+
+本次选择临时建立区间长度前缀和，另用排序的已选地址扣除子树计数；不持久化索引，不展开 Reserve 单位。区间数为 r、所选数为 q 时，计数和查找为 `O(r + 64q(log(r+1)+log(q+1)))`，当前排序数组插入另外有 `O(q²)` 最坏移动成本；q 受任务总量 16,384 限制，成本不随池内单位数增长。每项操作将选中地址按 `SHA256(K || b"pair" || address_u64_BE)` 升序排列（哈希相同时按地址排序），与请求顺序的 leaked 逐一配对。Prepare 预执行、提交、重启和冻结来源恢复共用该配对函数，不增加存储字段。
+
+在请求摘要无法被观察者获得或猜出的威胁假设下，单地址修复的候选匿名集为全部可用 Reserve，池规模是隐私参数。加权树以每个可用单位等权为目标；规定的 64 位阈值在每个分叉处有小于 `2^-64` 的离散舍入误差，严格数学概率可能与 1/N 有极小差异。账户持有人、Authorizer 和验证者拥有原请求，可以重算种子与选择；恶意验证者或完整请求/摘要泄露后，选取不再保密。冻结来源继续恢复既定选择并验证计划摘要，不要求其等于默认抽样结果；完整私有验证者本就可见 owner 映射，默认抽样不能约束其隐私行为。CertifiedResourceFence 和现有交接接纳条件不变。
+
+随机接替会增加修复后账户资产的区间碎片，这是此隐私机制的代价，也会增加后续 Transfer 的冻结来源长度，与第 17 节的 Transfer 碎片化来源超限边界相互影响。
+
+最大规模 q = 16,384 的 Reserve 选取性能门禁仅在 release 构建下断言，需单独运行 `cargo test --release --lib reserve_sampling::tests` 验证；普通 `cargo test --all-targets` 不执行耗时上限断言。
+
 ## 5. 请求签名与授权
 
 `LegalTaskPayload` 包含 TaskId、`protocol_version`、`expires_at` 和有序 `operations`。`LegalTask` 携带网络 ID、签发者公钥及签名、账户签名列表。请求使用规范化编码签名，操作顺序参与任务身份。当前协议版本为 `CURRENT_PROTOCOL_VERSION = 1`。
@@ -425,7 +437,8 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 | 分配后来源超限 | 入场按 LeakRepair 最坏碎片化、Transfer 一段计量；含 Transfer 的分配任务仍可能因持有人货币碎片化或 claim 分割使实际来源超限。此时本次 claim 释放，但已认证分配、原签名待办及 TaskId 绑定保留，状态可能停在 Bound，重启后重试。该路径要求 Authorizer 签名；终止入口待设计 |
 | 磁盘 | 完整快照编码与双槽提交，载荷上限 512 MiB |
 | 公开同步 | 规范公开存活区间、基线差异增量及委员会认证检查点 |
-| 残余公开泄露 | 周期内废弃数量与前沿新增数量相等可提示修复，单凭数量也可能是等量销毁与发行；保存此前 occupied 可进一步识别有主对象的修复。规范增量不列出 Reserve 接替者；Reserve 选取规则本身的可关联性未处理 |
+| 残余公开泄露 | 一个周期只有一次修复时，废弃数量等于前沿新增数量，仍可看出发生过修复，但在请求摘要保密的假设下无法据此推出接替者。单凭数量也可能是等量销毁与发行；保存此前 occupied 可进一步识别有主对象的修复。规范增量不列出 Reserve 接替者，默认选择使用私有种子加权抽样 |
+| Reserve 抽样隐私 | 匿名集为可用 Reserve 总数；账户持有人、Authorizer、验证者可重算，恶意验证者或完整请求/摘要泄露后不再保密；冻结来源允许恢复非默认选择并验证摘要。随机修复增加账户区间碎片，与 Transfer 来源超限边界相互影响 |
 | 钱包账户查询 | 对单个完整状态节点本地已提交快照的签名读取；资产区间分页、余额按长度求和，成本取决于区间数 |
 | 账户数据完整性 | 目前缺少跨节点独立验证的全部资产覆盖证据 |
 | 余额新鲜度 | 当前接口没有全网最新性与线性化读取保证 |
@@ -441,6 +454,7 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 | --- | --- |
 | `src/ids.rs`、`src/account.rs`、`src/currency.rs`、`src/currency_ledger.rs`、`src/payment.rs`、`src/state.rs` | 身份、账户、支付、资产与唯一业务状态 |
 | `src/address_ranges.rs`、`src/range_map.rs` | 规范地址集合，以及账本、claim 和公开增量共用的区间拆分与合并 |
+| `src/reserve_sampling.rs` | 私有请求种子、固定地址树加权抽样与修复配对 |
 | `src/task.rs`、`src/authorization.rs`、`src/transaction.rs` | LegalTask、交易输入、签名与授权 |
 | `src/currency_allocation.rs`、`src/claims.rs`、`src/prepared.rs`、`src/prepared_plan.rs`、`src/prepared/` | 地址分配、冻结准备、冲突与业务提交 |
 | `src/bft.rs`、`src/bft_driver.rs`、`src/finality.rs`、`src/validator_signer.rs` | BFT、投票安全与最终性 |

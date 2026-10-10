@@ -169,6 +169,39 @@ fn leak_repair_validates_leaked_currency_before_reserve_availability() {
         ))
     );
     assert_eq!(finalized.claimed_currency_count(), 0);
+
+    let alice = support::account(1);
+    let mut state = SecondState::genesis([alice], 1);
+    state
+        .execute_finalized(
+            &verified_task(
+                198,
+                vec![Operation::Issue {
+                    account: alice,
+                    count: 1,
+                }],
+            ),
+            1,
+        )
+        .unwrap();
+    let mut finalized = FinalityHarness::new("leak-unavailable");
+    assert_eq!(
+        finalized.prepare(
+            &mut state,
+            &verified_task(
+                200,
+                vec![Operation::LeakRepair {
+                    leaked: vec![1.into()],
+                }]
+            ),
+            2
+        ),
+        Err(PreparationError::Claim(ClaimError::ReserveUnavailable {
+            required: 1,
+            available: 0,
+        }))
+    );
+    assert_eq!(finalized.claimed_currency_count(), 0);
 }
 
 #[test]

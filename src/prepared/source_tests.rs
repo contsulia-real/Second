@@ -457,8 +457,33 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
     local.initialize(&initial, &validators).unwrap();
     let mut remote_state = initial.clone();
     let mut remote_book = PreparedTaskBook::new(remote.clone()).unwrap();
+    // Freeze a blocker on this request's default choice, so its source must restore an alternative.
+    let default = crate::reserve_sampling::ReserveSamplingSeed::new(repair.request_digest(), 0)
+        .select(
+            &crate::AddressRanges::single(CurrencyAddress::new(1), 2).unwrap(),
+            1,
+        );
+    let blocker_plan = PreparedTask::new(
+        blocker.task_id(),
+        blocker.request_digest(),
+        blocker.signed_task().clone(),
+        1,
+        vec![PreparedOperation::LeakRepair {
+            leaked: vec![CurrencyAddress::new(3)],
+            leaked_owners: vec![alice],
+            reserve: default.clone(),
+            replacement_reserve: crate::AddressRanges::single(CurrencyAddress::new(5), 1).unwrap(),
+        }],
+    );
     remote_book
-        .prepare(&mut remote_state, &blocker, 1, &validators)
+        .prepare_expected_plan(
+            &mut remote_state,
+            &blocker,
+            1,
+            &validators,
+            blocker_plan.plan_digest().unwrap(),
+            std::slice::from_ref(&default),
+        )
         .unwrap();
     remote_book
         .prepare(&mut remote_state, &repair, 1, &validators)
@@ -471,14 +496,10 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
         .unwrap();
     let digest = prepared.plan_digest().unwrap();
     let decoded = PreparedTaskSource::decode(&prepared.encode_source().unwrap()).unwrap();
-    assert_eq!(
-        decoded.selections,
-        vec![
-            vec![CurrencyAddress::new(2)]
-                .into_iter()
-                .collect::<crate::AddressRanges>()
-        ]
-    );
+    let selected = decoded.selections[0].addresses().next().unwrap();
+    let unused = CurrencyAddress::new(3 - selected.value());
+    assert!([1, 2].contains(&selected.value()));
+    assert_ne!(decoded.selections[0], default);
     let mut state = initial;
     let mut book = PreparedTaskBook::new(local.clone()).unwrap();
     let generation = local.load().unwrap().unwrap().generation;
@@ -526,21 +547,11 @@ fn leak_repair_source_preserves_selected_reserve_and_rejects_circulating_substit
     .unwrap();
     assert!(!state.currency_exists(CurrencyAddress::new(4)));
     assert_eq!(
-        state
-            .business
-            .currencies
-            .get(&CurrencyAddress::new(1))
-            .unwrap()
-            .role,
+        state.business.currencies.get(&unused).unwrap().role,
         CurrencyRole::Reserve
     );
     assert_eq!(
-        state
-            .business
-            .currencies
-            .get(&CurrencyAddress::new(2))
-            .unwrap()
-            .owner,
+        state.business.currencies.get(&selected).unwrap().owner,
         Some(alice)
     );
     assert_eq!(

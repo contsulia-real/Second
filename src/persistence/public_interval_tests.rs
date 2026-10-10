@@ -48,9 +48,6 @@ fn single_repair_delta_contains_only_retired_and_new_identities_after_restart() 
             occupied: true
         }]
     );
-    let reserve_before = state
-        .public_currency_state(CurrencyAddress::new(1))
-        .unwrap();
     let (store, _) = temp_store();
     store.initialize(&state, &validators).unwrap();
     let checkpoint = PublicCurrencyCheckpoint::new(1, 1, base.summary.clone());
@@ -87,13 +84,22 @@ fn single_repair_delta_contains_only_retired_and_new_identities_after_restart() 
     state = store.load().unwrap().unwrap().state;
     let mut book = PreparedTaskBook::new(store.clone()).unwrap();
     book.prepare(&mut state, &task, 1, &validators).unwrap();
+    let plan = store
+        .load_prepared_tasks()
+        .unwrap()
+        .remove(&task.task_id())
+        .unwrap();
+    let crate::prepared_plan::PreparedOperation::LeakRepair { reserve, .. } = &plan.operations[0]
+    else {
+        panic!("expected repair");
+    };
+    let selected = reserve.addresses().next().unwrap();
+    let reserve_before = state.public_currency_state(selected).unwrap();
     let certificate = certify(book.prepared_finality_statement(task.task_id()).unwrap());
     book.commit(&mut state, task.task_id(), &certificate)
         .unwrap();
     assert_eq!(
-        state
-            .public_currency_state(CurrencyAddress::new(1))
-            .unwrap(),
+        state.public_currency_state(selected).unwrap(),
         reserve_before
     );
     // The historical baseline must survive disk decoding, not just the write cache.

@@ -174,7 +174,9 @@ impl CurrencyClaimBook {
             return Ok(existing);
         }
 
-        let selected = self.select_reserve(business, claim_id.task_id(), count)?;
+        let selected = self
+            .available_reserve(business, claim_id.task_id(), count)?
+            .take(count);
         self.insert_claim(claim_id, requested_kind, selected.clone(), selected.clone())?;
         Ok(selected)
     }
@@ -203,6 +205,7 @@ impl CurrencyClaimBook {
         claim_id: OperationClaimId,
         business: &BusinessState,
         leaked: &[CurrencyAddress],
+        seed: &crate::reserve_sampling::ReserveSamplingSeed,
     ) -> Result<AddressRanges, ClaimError> {
         let requested_kind = ClaimKind::LeakRepair {
             leaked: leaked.to_vec(),
@@ -215,7 +218,9 @@ impl CurrencyClaimBook {
         self.ensure_unique_explicit(leaked, &claim_id)?;
         self.ensure_claimable(leaked, claim_id.task_id())?;
 
-        let reserve = self.select_reserve(business, claim_id.task_id(), leaked.len() as u64)?;
+        let available =
+            self.available_reserve(business, claim_id.task_id(), leaked.len() as u64)?;
+        let reserve = seed.select(&available, leaked.len() as u64);
         let mut claimed = leaked.iter().copied().collect::<AddressRanges>();
         claimed.union_with(&reserve);
 
@@ -354,7 +359,7 @@ impl CurrencyClaimBook {
         }
     }
 
-    fn select_reserve(
+    fn available_reserve(
         &self,
         business: &BusinessState,
         task_id: &TaskId,
@@ -383,7 +388,7 @@ impl CurrencyClaimBook {
             });
         }
 
-        Ok(available.take(count))
+        Ok(available)
     }
 
     fn available(&self, ranges: &AddressRanges, task: &TaskId) -> AddressRanges {

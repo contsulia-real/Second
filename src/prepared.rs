@@ -11,6 +11,8 @@ pub(crate) mod fences;
 #[cfg(test)]
 mod handoff_tests;
 pub(crate) mod lifecycle;
+#[cfg(test)]
+mod repair_pairing_tests;
 pub(crate) mod source;
 #[cfg(test)]
 mod source_tests;
@@ -676,6 +678,10 @@ impl PreparedTaskBook {
                     }
                 }
                 Operation::LeakRepair { leaked } => {
+                    let seed = crate::reserve_sampling::ReserveSamplingSeed::new(
+                        task.request_digest(),
+                        operation_index,
+                    );
                     let leaked_owners = state.validate_leaked_owners(working, leaked)?;
                     for owner in &leaked_owners {
                         task.require_account_signature(*owner)?;
@@ -692,7 +698,7 @@ impl PreparedTaskBook {
                         reserve.clone()
                     } else {
                         self.claims
-                            .claim_leak_repair_in_business_state(claim_id, working, leaked)?
+                            .claim_leak_repair_in_business_state(claim_id, working, leaked, &seed)?
                     };
                     let replacement_count = u64::try_from(leaked.len())
                         .map_err(|_| PreparationError::LengthOverflow)?;
@@ -707,7 +713,7 @@ impl PreparedTaskBook {
                         working,
                         leaked,
                         &leaked_owners,
-                        &reserve,
+                        &seed.pair(&reserve),
                         &replacement_reserve,
                     )?;
 

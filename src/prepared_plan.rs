@@ -54,6 +54,7 @@ impl PreparedOperation {
         working: &mut BusinessState,
         prerequisite: &mut PrerequisiteState,
         claim_id: OperationClaimId,
+        request_digest: [u8; 32],
     ) -> Result<(), PreparationError> {
         match self {
             Self::RegisterAccount { account } => {
@@ -104,7 +105,11 @@ impl PreparedOperation {
                     working,
                     leaked,
                     leaked_owners,
-                    reserve,
+                    &crate::reserve_sampling::ReserveSamplingSeed::new(
+                        request_digest,
+                        claim_id.operation_index(),
+                    )
+                    .pair(reserve),
                     replacement_reserve,
                 )?;
             }
@@ -427,7 +432,13 @@ impl PreparedTask {
                     }
                 }
             }
-            operation.apply(state, working, &mut prerequisite, claim_id)?;
+            operation.apply(
+                state,
+                working,
+                &mut prerequisite,
+                claim_id,
+                self.request_digest,
+            )?;
         }
 
         state.prerequisite = prerequisite;

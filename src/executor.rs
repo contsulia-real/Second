@@ -107,16 +107,16 @@ impl SecondState {
         working: &mut BusinessState,
         leaked: &[CurrencyAddress],
         leaked_owners: &[AccountAddress],
-        reserve: &AddressRanges,
+        reserve: &[CurrencyAddress],
         replacement_reserve: &AddressRanges,
     ) -> Result<(), ExecutionError> {
         if leaked.len() != leaked_owners.len()
-            || leaked.len() as u64 != reserve.len()
+            || leaked.len() != reserve.len()
             || leaked.len() as u64 != replacement_reserve.len()
         {
             return Err(ExecutionError::ReserveUnavailable {
                 required: leaked.len() as u64,
-                available: reserve.len(),
+                available: reserve.len() as u64,
             });
         }
 
@@ -135,7 +135,7 @@ impl SecondState {
             }
         }
 
-        for address in reserve.addresses() {
+        for &address in reserve {
             let currency = working
                 .currencies
                 .get(&address)
@@ -151,8 +151,10 @@ impl SecondState {
             }
         }
 
-        for ((leaked_address, reserve_address), owner) in
-            leaked.iter().zip(reserve.addresses()).zip(leaked_owners)
+        for ((leaked_address, reserve_address), owner) in leaked
+            .iter()
+            .zip(reserve.iter().copied())
+            .zip(leaked_owners)
         {
             working.currencies.remove(leaked_address);
 

@@ -24,6 +24,7 @@ mod public_state;
 mod public_state_codec;
 mod public_sync;
 mod range_map;
+mod reserve_sampling;
 mod runtime;
 mod runtime_bft;
 mod runtime_bft_consensus;
