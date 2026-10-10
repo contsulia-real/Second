@@ -118,6 +118,8 @@ Active → Retiring → Retired
 
 转账金额和发行数量必须大于零。Destroy 和 LeakRepair 使用非空、唯一的 Currency 列表。Prepare 在同一任务中按照 operations 的原始顺序构建中间业务状态并重新验证每步条件。任务执行遵守整体业务原子性。
 
+一个 LegalTask 内全部 LeakRepair 操作的 leaked 地址总数不得超过 `MAX_LEAK_REPAIR_ADDRESSES_PER_TASK = 16,384`；合法任务结构校验返回明确的 `TooManyLeakRepairAddresses`，不截断列表。大批量泄露需拆成多个任务。Issue、Transfer、Destroy 的数量限制及组合任务的原子性不变。
+
 ### 4.1 Transfer 的冻结选择
 
 Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户，并建立具有 `OperationClaimId` 的执行前置事实。准备器核对源账户签名、支付地址状态和资金条件，从可用的流通 Currency 中选取确切的 `amount` 个对象，并将规范货币地址区间、源目标账户和执行数据写入 `PreparedTask`。
@@ -135,6 +137,10 @@ Transfer 首先通过 `source` 与 `destination` 支付地址确定实际账户�
 `LegalTaskPayload` 包含 TaskId、`protocol_version`、`expires_at` 和有序 `operations`。`LegalTask` 携带网络 ID、签发者公钥及签名、账户签名列表。请求使用规范化编码签名，操作顺序参与任务身份。当前协议版本为 `CURRENT_PROTOCOL_VERSION = 1`。
 
 `LegalTask::verify` 校验协议版本、网络 ID、操作结构、Authorizer 签名以及账户签名。`SecondState::authorize_task` 依据当前状态检查每项操作所要求的账户签名，并在实际准备过程中复验。
+
+含 Issue 或 LeakRepair 的任务还在生成 `VerifiedLegalTask` 前检查分配入场来源预算，早于 TaskId 绑定和地址分配排队。计量与 `PreparedTask::encode_source` 共用函数：来源包含 4 字节请求长度、原请求，以及每项冻结选择的 4 字节区间数和每区间 16 字节起点/长度。入场预算为 `4 + 请求字节 + Σ_LeakRepair(4 + 16 × leaked数量) + Σ_Transfer(4 + 16 × 1)`，超过既有 2,097,156 字节来源上限返回 `AllocationSourceTooLarge { maximum, required }`。Issue 没有选择字段，只有全来源共用的 4 字节请求长度；Transfer 使用最好情形的一段，仅排除其必然超限情况，LeakRepair 使用确定的最坏碎片化上界。这是保守的入场预算，不保证含 Transfer 的计划一定可编码。纯 Transfer/Destroy 任务不增加此检查，现有字节上限、签名域、协议版本和 Prepare 恢复分支不变。
+
+纯 LeakRepair 任务设地址总数 Q、操作数 m、选择区间总数 r、TaskId 字节数 t、可选过期字段额外字节 e（0 或 8）、账户签名数 s，则来源字节为 `146 + t + e + 9m + 8Q + 16r + 96s`。非空操作保证 m ≤ Q，碎片化最坏 r = Q；取 Q = m = r = 16,384、t = 128、e = 8、s = 1,024，实际来源为 639,258 字节，距上限余 1,457,898 字节。该上限为随机 Reserve 选择导致 r 接近 Q 时预留确定预算，不增加任何既有字节上限；混合任务另受上述入场预算约束。
 
 当前授权规则：
 
@@ -416,6 +422,7 @@ second task-status <address> <request-file> <authorizer-public-key> <server-cert
 | 委员会 | 有准入的 ValidatorSet 和认证成员切换 |
 | 共识 | 四类 ConsensusScope 与固定委员会法定票数 |
 | 提交 | 冻结计划、认证终态、依赖闭包与单次业务原子写入 |
+| 分配后来源超限 | 入场按 LeakRepair 最坏碎片化、Transfer 一段计量；含 Transfer 的分配任务仍可能因持有人货币碎片化或 claim 分割使实际来源超限。此时本次 claim 释放，但已认证分配、原签名待办及 TaskId 绑定保留，状态可能停在 Bound，重启后重试。该路径要求 Authorizer 签名；终止入口待设计 |
 | 磁盘 | 完整快照编码与双槽提交，载荷上限 512 MiB |
 | 公开同步 | 规范公开存活区间、基线差异增量及委员会认证检查点 |
 | 残余公开泄露 | 周期内废弃数量与前沿新增数量相等可提示修复，单凭数量也可能是等量销毁与发行；保存此前 occupied 可进一步识别有主对象的修复。规范增量不列出 Reserve 接替者；Reserve 选取规则本身的可关联性未处理 |

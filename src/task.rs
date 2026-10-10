@@ -5,6 +5,7 @@ use crate::{
 };
 
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+pub const MAX_LEAK_REPAIR_ADDRESSES_PER_TASK: usize = 16_384;
 
 const SIGNING_DOMAIN: &[u8] = b"Second/LegalTask/v1\0";
 
@@ -80,6 +81,7 @@ impl LegalTaskPayload {
     }
 
     pub fn validate(&self) -> Result<(), TaskValidationError> {
+        let mut leak_repair_addresses = 0_usize;
         for operation in &self.operations {
             match operation {
                 Operation::Transfer { amount, .. } if *amount == 0 => {
@@ -92,6 +94,13 @@ impl LegalTaskPayload {
                     validate_currency_set(currencies, TaskValidationError::EmptyDestroy)?;
                 }
                 Operation::LeakRepair { leaked } => {
+                    leak_repair_addresses = leak_repair_addresses.saturating_add(leaked.len());
+                    if leak_repair_addresses > MAX_LEAK_REPAIR_ADDRESSES_PER_TASK {
+                        return Err(TaskValidationError::TooManyLeakRepairAddresses {
+                            maximum: MAX_LEAK_REPAIR_ADDRESSES_PER_TASK,
+                            actual: leak_repair_addresses,
+                        });
+                    }
                     validate_currency_set(leaked, TaskValidationError::EmptyLeakRepair)?;
                 }
                 Operation::Transfer { .. }

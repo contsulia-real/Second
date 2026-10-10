@@ -236,6 +236,7 @@ impl LegalTask {
                 .map_err(|_| AuthorizationError::InvalidSignature)?;
         }
         self.verify_account_signatures()?;
+        crate::prepared::source::validate_allocation_source(self)?;
 
         let request_digest = self.request_digest_from_message(&message);
 

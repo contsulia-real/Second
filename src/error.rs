@@ -22,6 +22,7 @@ pub enum TaskValidationError {
     IssueAmountZero,
     EmptyDestroy,
     EmptyLeakRepair,
+    TooManyLeakRepairAddresses { maximum: usize, actual: usize },
     DuplicateCurrency(CurrencyAddress),
 }
 
@@ -35,6 +36,7 @@ pub enum AuthorizationError {
     InvalidPublicKey,
     InvalidSignature,
     TooManyAccountSignatures,
+    AllocationSourceTooLarge { maximum: usize, required: usize },
     NonCanonicalAccountSignatures,
     MissingAccountSignature(AccountAddress),
     InvalidPayload(TaskValidationError),

@@ -13,6 +13,8 @@ use crate::{
 #[cfg(test)]
 mod network_tests;
 #[cfg(test)]
+mod source_budget_tests;
+#[cfg(test)]
 mod tests;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

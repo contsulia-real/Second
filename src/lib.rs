@@ -122,7 +122,9 @@ pub use state_recovery_checkpoint::{
     CertifiedStateRecoveryCheckpoint, StateRecoveryCheckpoint, StateRecoveryCheckpointProof,
     StateRecoveryPayload,
 };
-pub use task::{CURRENT_PROTOCOL_VERSION, LegalTaskPayload, Operation};
+pub use task::{
+    CURRENT_PROTOCOL_VERSION, LegalTaskPayload, MAX_LEAK_REPAIR_ADDRESSES_PER_TASK, Operation,
+};
 pub use task_status::LegalTaskStatus;
 pub use transaction::{
     TransactionRequestParseError, parse_transaction_request_json,
